@@ -66,5 +66,10 @@ mod tests {
         }
         assert_eq!(value["insecure_local_development"], true);
         assert_eq!(value["limits"]["max_control_message_bytes"], 16_384);
+        let plugin_fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/plugin/fixtures/scaffold-capabilities.json"
+        ))
+        .unwrap();
+        assert_eq!(value, plugin_fixture);
     }
 }

@@ -3,8 +3,9 @@
 Status: architecture proposal with an initial Docker-only Rust HTTP scaffold, not
 an implemented or benchmarked screensharing system. Target repository:
 <https://github.com/alkalines/DASS>. See [backend development](../backend.md) for
-the scaffold and validation commands. No plugin, authentication, signaling or
-media forwarding has been implemented.
+the scaffold and validation commands. An initial plugin settings/discovery scaffold
+exists; authentication, capture integration, signaling and media forwarding remain
+unimplemented. See [plugin status](../plugin.md) for build blockers and limitations.
 
 ## 1. Recommendation
 
@@ -15,8 +16,9 @@ server: route encoded packets without decoding, transcoding or recording.
 
 Use Rust for both signaling and media in one Docker container. Do not introduce
 a Bun server or separate signaling service. Bun is only for the monorepo's future
-TypeScript plugin tooling. Dependency resolution, compilation, formatting,
+TypeScript plugin tooling. Rust dependency resolution, compilation, formatting,
 linting and automated tests run in Docker; no host Rust toolchain is required.
+Bun/TypeScript and Equibop client tooling may run locally.
 
 No DASS client daemon, FFmpeg process, GStreamer process, native encoder helper,
 local proxy or sidecar. Web Workers inside Equibop are permitted for frame

@@ -1,0 +1,13 @@
+{
+    "protocol_version": 1,
+    "stage": "scaffold",
+    "ready": false,
+    "signaling_available": false,
+    "media_available": false,
+    "e2ee_available": false,
+    "insecure_local_development": true,
+    "limits": {
+        "max_concurrent_requests": 128,
+        "max_control_message_bytes": 16384
+    }
+}
