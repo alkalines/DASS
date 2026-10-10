@@ -1,8 +1,10 @@
 # DASS: implementation plan and research
 
-Status: proposal, not an implemented or benchmarked system. Target repository:
-<https://github.com/alkalines/DASS>. This repository contains research and project instructions only; no plugin or
-backend runtime has been implemented.
+Status: architecture proposal with an initial Docker-only Rust HTTP scaffold, not
+an implemented or benchmarked screensharing system. Target repository:
+<https://github.com/alkalines/DASS>. See [backend development](../backend.md) for
+the scaffold and validation commands. No plugin, authentication, signaling or
+media forwarding has been implemented.
 
 ## 1. Recommendation
 
@@ -11,10 +13,10 @@ Use Chromium's existing screen capture, encoders and WebRTC implementation on
 the client. Use `str0m` to implement a selective forwarding unit (SFU) on the
 server: route encoded packets without decoding, transcoding or recording.
 
-Use Bun for the monorepo's TypeScript tooling. `Bun.serve` is a reasonable
-signaling option, but is not itself a WebRTC media server. A Bun control plane
-plus Rust SFU is possible, entirely on the backend, but adds a service boundary
-without an obvious initial benefit. Prefer Rust for both signaling and media.
+Use Rust for both signaling and media in one Docker container. Do not introduce
+a Bun server or separate signaling service. Bun is only for the monorepo's future
+TypeScript plugin tooling. Dependency resolution, compilation, formatting,
+linting and automated tests run in Docker; no host Rust toolchain is required.
 
 No DASS client daemon, FFmpeg process, GStreamer process, native encoder helper,
 local proxy or sidecar. Web Workers inside Equibop are permitted for frame
@@ -136,10 +138,11 @@ connection or every screen-capture request globally.
 | Observability | `tracing`, `tracing-subscriber`, Prometheus-compatible metrics | Redact identifiers, SDP, IPs, tokens and all keys. |
 | Optional persistent state | SQLite adapter | Backend identities/revocations only; no media storage. Not needed for an invite-only spike. |
 | Restricted-network support | Backend-managed coturn | STUN/TURN, including TCP/TLS fallback; extra backend service, never a client executable. |
-| Quality/security checks | Bun tests, Rust tests, `cargo-audit`, `cargo-deny`, fuzzing | Development/CI tooling, not client runtime processes. |
+| Quality/security checks | Containerized Rust tests, `cargo-audit`, `cargo-deny`, fuzzing; Bun tests for future TS packages | Development/CI tooling, not client runtime processes. Security tools are planned, not yet included. |
 
-Do not add all dependencies on day one. Lock versions in `bun.lock` and
-`Cargo.lock` after the spike and review transitive dependencies and licenses.
+Do not add all dependencies on day one. Generate and commit `Cargo.lock` using
+Docker before validating the scaffold, then require locked builds. Commit
+`bun.lock` when TypeScript packages exist. Review transitive dependencies and licenses.
 Current str0m upstream declares version `0.24.1`, Rust 2024 edition and MSRV
 1.85.0; verify published packages and all selected dependencies' toolchain needs.
 Its defaults include example-server dependencies: disable defaults and explicitly
@@ -151,9 +154,6 @@ not automatically the fastest or safest choice.
 
 | Option | Assessment |
 | --- | --- |
-| Bun signaling + direct peer mesh | Useful disposable proof of capture. Publisher upload scales with viewers; not the target concurrent architecture. |
-| Bun signaling + Rust SFU | Valid if Bun is strongly preferred. Backend-only IPC, bounded messages, authenticated internal control; more deployment and failure modes. |
-| Bun + mediasoup | Mature SFU candidate with backend worker processes; validate the exact Node/Bun compatibility and build requirements first. Not a guaranteed Bun drop-in. |
 | Established server such as LiveKit | Comparison baseline/fallback if custom-SFU engineering cost is too high; not the proposed backend we write. |
 | MediaRecorder over WebSocket | Reject for primary media: chunk delay and TCP head-of-line blocking; no native WebRTC congestion/recovery pipeline. |
 | Custom RTP/crypto/codec stack | Reject: unnecessary security risk and maintenance. Reuse maintained implementations. |
@@ -256,9 +256,9 @@ independent failure domains and TCP/TLS listeners where needed. If the requireme
 also means exactly one backend executable, TURN integration is an additional scope
 decision; don't quietly introduce coturn under that interpretation.
 
-No Kubernetes/Redis/metrics sidecars are required for the first release. Compose
-and systemd deployment examples are sufficient initially; all operational services
-stay server-side. Production servers need patched OS images, least privilege,
+No Kubernetes/Redis/metrics sidecars are required for the first release. Docker
+and Compose are the backend build, test and deployment workflow; all operational
+services stay server-side. Production servers need patched OS images, least privilege,
 resource limits, secret injection and key/certificate rotation procedures.
 
 ## 9. Proposed DASS monorepo
@@ -272,6 +272,8 @@ DASS/
   bun.lock
   Cargo.toml                   # Rust workspace
   Cargo.lock
+  Dockerfile                   # tooling, builder and non-root runtime stages
+  compose.yaml                 # container-only checks and local backend
   apps/plugin/                 # Equicord userplugin source
     index.tsx
     settings.ts
@@ -316,9 +318,10 @@ choosing a monorepo-wide license.
   select/review an actual maintained frame-encryption dependency.
 - Record whether hardware encoding is really used, not merely enabled in settings.
 
-Deliverable: reproducible evidence and an ADR choosing Rust, Bun+Rust, or an
-established SFU if the custom implementation is not justified. Do not proceed on
-an unsupported compatibility assumption.
+Deliverable: reproducible evidence validating the selected Rust stack, or an ADR
+proposing an established SFU if the custom implementation is not justified. Rust
+signaling and Docker-only tooling are selected; media-library feasibility remains
+unverified. Do not proceed on an unsupported compatibility assumption.
 
 ### Phase 1 — bounded single-node vertical slice
 
@@ -382,11 +385,12 @@ Consider browser viewing and deeper native UI integration only afterward.
 - [WebScreenShareFixes](https://github.com/Equicord/Equicord/blob/main/src/plugins/webScreenShareFixes.web/index.ts).
 - [Electron desktopCapturer](https://www.electronjs.org/docs/latest/api/desktop-capturer)
   and [session](https://www.electronjs.org/docs/latest/api/session), queried through Context7.
-- [Bun WebSockets](https://bun.sh/docs/api/websockets), queried through Context7.
 - [str0m](https://github.com/algesten/str0m), README/API queried through Context7;
   [Cargo features/toolchain](https://github.com/algesten/str0m/blob/main/Cargo.toml) inspected directly.
 - [MDN encoded transforms](https://developer.mozilla.org/en-US/docs/Web/API/RTCRtpScriptTransform).
 - [SFrame specification, RFC 9605](https://www.rfc-editor.org/rfc/rfc9605).
 
-Only source/document inspection was performed for this plan. Runtime capture,
-transport compatibility, E2EE, performance and failover remain untested.
+Source/document inspection and an HTTP scaffold were completed. User-provided
+Docker output confirms Clippy, all 12 unit tests, the locked release image build
+and Compose container startup succeeded. HTTP smoke checks are pending. Runtime
+capture, transport compatibility, E2EE, performance and failover remain untested.

@@ -5,8 +5,20 @@
 - DASS is a monorepo for a TypeScript Equicord plugin and a self-hosted Rust screensharing backend. Its goal is to replace Discord's screenshare transport while keeping ordinary Discord voice independent.
 - Self-hosting aims to increase control and security and bypass restrictions tied to Discord's screensharing service. Do not promise that it bypasses OS capture permissions, firewalls or all local network restrictions.
 - Broadcasters and viewers need DASS-compatible clients; stock Discord cannot receive DASS media. Never silently fall back to Discord sharing or upload DASS preview thumbnails there.
-- Keep plugin, backend and shared protocol responsibilities separate. The repository currently contains documentation and the upstream host submodule, not implemented DASS runtime packages; do not invent existing paths or verification commands.
-- Use Bun, not npm or pnpm, for DASS TypeScript dependency management, scripts, tests and build tooling. Commit `bun.lock`; keep Rust tooling on Cargo. If an upstream checkout requires another package manager, report the incompatibility and ask before deviating from Bun.
+- Keep plugin, backend and shared protocol responsibilities separate. `crates/backend` contains a local-development HTTP scaffold; `crates/protocol` owns discovery types. Authentication, signaling, SFU media, E2EE and the plugin are not implemented. Do not advertise readiness or invent interoperability evidence.
+- The backend is one Rust executable in a Docker container. Do not introduce `Bun.serve`, Bun signaling, a TypeScript backend, or a separate control-plane service. Bun remains only for future TypeScript plugin tooling; use Cargo for Rust, inside Docker.
+- All dependency resolution, formatting, linting, compilation and automated tests must run in Docker, not on the host. Do not work around unavailable Docker access with host Cargo/Bun. Give the user the container commands and report validation as blocked instead.
+- Keep the Docker-generated `Cargo.lock` committed and use `--locked` for builds and tests. Do not regenerate it on routine runs; dependency updates must be intentional. Commit `bun.lock` when TypeScript packages exist. If an upstream checkout requires another package manager, report the incompatibility and ask before deviating from Bun.
+
+## Rust backend and Docker workflow
+
+- Run commands from the repository root. `Dockerfile` provides `tooling`, `builder` and non-root `runtime` stages; `compose.yaml` provides the `tooling` and local-only `backend` services. Set `LOCAL_UID`/`LOCAL_GID` to the host user for bind-mounted file ownership.
+- Build tooling with `docker compose build tooling`. Only if `Cargo.lock` is missing, bootstrap with `docker compose run --rm tooling cargo generate-lockfile`. Otherwise use the committed lockfile and `--locked`; do not silently update dependencies during tests/builds.
+- Checks: `docker compose run --rm tooling cargo fmt --all -- --check`, `docker compose run --rm tooling cargo clippy --workspace --all-targets --locked -- -D warnings`, and `docker compose run --rm tooling cargo test --workspace --locked`. Build with `docker compose build backend`; run locally with `docker compose up -d backend`. See `docs/backend.md` for the full sequence and cleanup.
+- Keep runtime images non-root, read-only, capability-free and resource-bounded. Publish local HTTP only on host loopback; do not expose this scaffold publicly. Production startup fails closed unless an explicit insecure-local-development flag is set; this flag is not a production TLS substitute.
+- `/health/live` checks process liveness only. `/health/ready` must remain 503 until authenticated signaling and media are operational. `/v1/capabilities` must accurately report unavailable functionality. Bound HTTP request bodies, active handlers and request duration; these are not socket admission limits or complete rate limiting.
+- Add `str0m` only with a pinned, reviewed crypto-provider choice and a tested single-owner media loop. Do not treat skeleton endpoints or a successful Docker build as an SFU implementation. Keep the Phase 0 interoperability gate in the plan.
+- Do not modify Docker socket permissions, host groups or install a host toolchain automatically. Docker access/setup is the user's responsibility. Do not spawn subagents, push images or deploy without explicit authorization.
 
 ## Equicord, Equibop and plugins
 
@@ -44,7 +56,7 @@
 ## Checkout and validation
 
 - `vendor/Equibop` is an upstream submodule pinned to `27219be3566589280c0c933b04753805381d3bc8`; initialize with `git submodule update --init --recursive`. Do not advance its pin or treat it as DASS-owned plugin source incidentally.
-- Host-only checks, from `vendor/Equibop`: `bun install` (Bun >=1.3.0; postinstall updates/compiles arRPC), `bun run test` (lint then typecheck), `bun run build`, `bun run build --dev`. Linux CI installs `libglib2.0-dev`; these checks do not validate DASS.
+- Upstream Equibop uses Bun >=1.3.0; its test script runs lint/typecheck and its postinstall updates/compiles arRPC. Future upstream checks must use a dedicated Docker tooling environment with the required native libraries (including `libglib2.0-dev` on Linux); the Rust tooling image does not provide this. Host checks do not validate DASS, and GUI capture tests still require real Equibop clients on the target OS.
 - Missing venmic/libvesktop may only warn during host builds. Verify real Wayland/X11 capture, audio selection, cleanup, native-action interception and absence of Discord media leakage; build success is not interoperability evidence.
 - Test authorization failures, E2EE downgrade rejection and reconnection/node failure. Report untested compatibility/security behavior; make performance claims only from measured hardware/scenarios.
 - Commit dependency lockfiles and review licenses/native requirements. Do not spawn subagents, change remotes, push or deploy without explicit user authorization.

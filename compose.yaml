@@ -1,0 +1,38 @@
+services:
+  tooling:
+    profiles: [tools]
+    build:
+      context: .
+      target: tooling
+    user: "${LOCAL_UID:-1000}:${LOCAL_GID:-1000}"
+    working_dir: /workspace
+    environment:
+      CARGO_HOME: /opt/cargo
+    volumes:
+      - .:/workspace
+      - cargo-cache:/opt/cargo
+      - cargo-target:/workspace/target
+    command: [cargo, test, --workspace, --locked]
+
+  backend:
+    build:
+      context: .
+      target: runtime
+    environment:
+      DASS_INSECURE_LOCAL_DEV: "true"
+      DASS_LISTEN_ADDR: "0.0.0.0:8080"
+      DASS_MAX_CONCURRENT_REQUESTS: "128"
+      DASS_MAX_CONTROL_MESSAGE_BYTES: "16384"
+    ports:
+      - "127.0.0.1:8080:8080"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 64
+    mem_limit: 256m
+    cpus: 1.0
+    stop_grace_period: 10s
+
+volumes:
+  cargo-cache:
+  cargo-target:

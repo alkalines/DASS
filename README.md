@@ -1,13 +1,20 @@
 # DASS — Discord Alternative ScreenShare
 
-Planning-stage project for an Equicord plugin and self-hosted screensharing backend.
+Early-stage project for an Equicord plugin and self-hosted Rust screensharing backend.
 
 - [Research and implementation plan](docs/research/PLAN.md)
 - [Contributor and agent instructions](AGENTS.md)
+- [Docker-only backend development](docs/backend.md)
 
 The proposed architecture uses Equibop's existing capture pipeline and a Rust
 WebRTC selective forwarding backend, without additional client helper executables.
-Both broadcasters and viewers need DASS. No plugin or backend is implemented yet.
+Both broadcasters and viewers need DASS. The Rust backend currently provides
+local-development health and capability endpoints only; the plugin, authentication,
+WebRTC forwarding and E2EE are not implemented.
+
+The backend is built, tested and run using Docker, with no host Rust installation.
+Follow the backend guide to generate `Cargo.lock`, run checks and start the container.
+Bun is only for future TypeScript plugin tooling, not the server.
 
 ## Equibop checkout
 

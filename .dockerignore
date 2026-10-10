@@ -1,0 +1,10 @@
+.git
+.agents
+vendor
+target
+**/target
+node_modules
+**/node_modules
+.env
+.env.*
+docs
