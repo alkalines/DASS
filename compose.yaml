@@ -24,7 +24,7 @@ services:
       DASS_MAX_CONCURRENT_REQUESTS: "128"
       DASS_MAX_CONTROL_MESSAGE_BYTES: "16384"
     ports:
-      - "127.0.0.1:8080:8080"
+      - "8080:8080"
     read_only: true
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
