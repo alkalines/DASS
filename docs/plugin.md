@@ -21,7 +21,7 @@ thumbnails. Stock Discord cannot receive future DASS media.
 - Equibop: submodule `27219be3566589280c0c933b04753805381d3bc8` (3.3.1).
 - Discord build: not tested or recorded; runtime compatibility is unverified.
 - All 13 plugin tests passed (41 assertions). DASS lint, full Equicord typecheck,
-  and desktop/Equibop-target bundle builds passed. The Equibop renderer was checked
+  and desktop/Equibop-target bundle builds passed. Both renderers were checked
   for DASS inclusion. Equibop host builds and GUI/plugin loading were not verified
   by the agent; the user has launched the Equibop host.
 - Docker daemon access was denied; Rust/backend validation remains blocked.
@@ -64,7 +64,7 @@ in `tooling/equicord`; Equibop retains its upstream `bun.lock`. The Rust test ch
 against the actual serialized protocol so frontend validation cannot silently drift.
 Scaffold tests do not typecheck the host-facing plugin or establish interoperability.
 
-## Build and install DASS in Equibop
+## Build DASS for Equicord and Equibop
 
 Launching `vendor/Equibop` alone uses its default Equicord bundle, which does
 **not** contain DASS. You must build the plugin into a custom Equicord bundle and
@@ -72,14 +72,47 @@ select it in Equibop. From the **DASS repository root**, with Bun 1.4.2, Node >=
 and Git available locally:
 
 ```sh
+git submodule update --init --recursive
 bun scripts/build-plugin.mjs
 ```
 
-This clones a dedicated checkout on first use, verifies the pin, adapts the local
+`vendor/Equicord` is the shared upstream source, pinned to the verified revision
+above. This clones a dedicated `build/Equicord` checkout from that submodule on
+first use, verifies both pins, adapts the local
 types dependency, stages `plugins/dass` under `src/userplugins/dass`, installs the
 locked dependencies, runs lint/typecheck, and builds both targets. It refuses
 unfamiliar manifest, lockfile and staged-source edits rather than overwriting them.
 Edit `plugins/dass`, not the staged copy, and rerun this command to rebuild.
+The upstream submodule stays unchanged. Both desktop and Equibop renderers are
+checked for DASS inclusion.
+
+## Install in standard Discord desktop with Equicord
+
+Build using the commands above first. A normal installed Equicord bundle does
+not include DASS, and copying loose plugin files into Discord will not install it.
+Fully quit Discord, including its tray process. Then, only when you intend to
+modify your Discord installation, from the **DASS repository root**:
+
+```sh
+cd build/Equicord
+bun run inject
+```
+
+The pinned `inject` script invokes Node directly, not pnpm. It downloads and runs
+upstream's Equilotl installer and points it at this checkout's `dist/desktop`.
+Review that installer before running it; injection is an explicit installation
+step, never part of the build adapter. Select the intended Discord installation
+when prompted, restart Discord, then enable **DASS** in **Equicord → Plugins**.
+Keep `build/Equicord` on disk. Rebuild from the DASS root after plugin changes and
+fully restart Discord.
+
+This installation command is source-inspected, not executed or runtime-verified
+by the agent. Desktop bundle checks do not prove plugin loading or capture
+compatibility. Equibop's picker and venmic APIs are not available in standard
+Discord; future capture integration needs separate host validation. The current
+settings/discovery scaffold has no Equibop-only capture dependency.
+
+## Install in Equibop
 
 1. In Equibop settings, open **Developer Options** and click **Change** next to
    the Equicord location.
@@ -89,7 +122,7 @@ Edit `plugins/dass`, not the staged copy, and rerun this command to rebuild.
 4. Open **Equicord → Plugins**, search for **DASS**, and enable it. Open the
    plugin's settings for backend discovery.
 
-The build disables Equicord's updater so an upstream update cannot replace the
+The build disables Equicord's updater for both targets so an upstream update cannot replace the
 custom bundle and remove DASS. Updates require an intentional pin/lock review and
 rebuild. Do not use Discord injection for Equibop.
 

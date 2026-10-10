@@ -1,3 +1,6 @@
 [submodule "vendor/Equibop"]
 	path = vendor/Equibop
 	url = https://github.com/Equicord/Equibop.git
+[submodule "vendor/Equicord"]
+	path = vendor/Equicord
+	url = https://github.com/Equicord/Equicord.git

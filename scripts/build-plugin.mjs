@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 
 const EQUICORD_REVISION = "e0e85c8d4f6dc73aac9368cf3f4b2200eac4d4b4";
 const rootDirectory = fileURLToPath(new URL("../", import.meta.url));
+const vendorDirectory = join(rootDirectory, "vendor/Equicord");
 const checkoutDirectory = join(rootDirectory, "build/Equicord");
 
 function run(command, args, directory = checkoutDirectory, capture = false) {
@@ -30,9 +31,15 @@ try {
         throw new Error("Equicord requires Node >=22 for its build script.");
     }
 
+    if (!existsSync(join(vendorDirectory, "package.json"))) {
+        throw new Error("Initialize vendor/Equicord with git submodule update --init --recursive before building.");
+    }
+    if (run("git", ["rev-parse", "HEAD"], vendorDirectory, true) !== EQUICORD_REVISION) {
+        throw new Error("vendor/Equicord has a different revision. The build requires the reviewed Equicord pin.");
+    }
     if (!existsSync(checkoutDirectory)) {
         mkdirSync(join(rootDirectory, "build"), { recursive: true });
-        run("git", ["clone", "--no-checkout", "https://github.com/Equicord/Equicord.git", checkoutDirectory], rootDirectory);
+        run("git", ["clone", "--no-hardlinks", "--no-checkout", vendorDirectory, checkoutDirectory], rootDirectory);
         run("git", ["switch", "--detach", EQUICORD_REVISION]);
     }
     if (run("git", ["rev-parse", "HEAD"], checkoutDirectory, true) !== EQUICORD_REVISION) {
@@ -94,12 +101,14 @@ try {
     run("bun", ["run", "build", "--disable-updater"]);
 
     const distDirectory = join(checkoutDirectory, "dist");
-    if (!existsSync(join(distDirectory, "equibop/main.js"))) throw new Error("Equibop entry point was not built.");
-    const renderer = readFileSync(join(distDirectory, "equibop/renderer.js"), "utf8");
-    if (!renderer.includes("Discord Alternative ScreenShare: backend discovery scaffold.")) {
-        throw new Error("Built Equibop renderer does not contain the DASS plugin.");
+    for (const [target, entryPoint] of [["desktop", "patcher.js"], ["equibop", "main.js"]]) {
+        if (!existsSync(join(distDirectory, target, entryPoint))) throw new Error(`${target} entry point was not built.`);
+        const renderer = readFileSync(join(distDirectory, target, "renderer.js"), "utf8");
+        if (!renderer.includes("Discord Alternative ScreenShare: backend discovery scaffold.")) {
+            throw new Error(`Built ${target} renderer does not contain the DASS plugin.`);
+        }
     }
-    console.log(`\nDASS bundle built. In Equibop Developer Options, select:\n${distDirectory}\nFully quit and restart Equibop, then enable DASS in Equicord Plugins.`);
+    console.log(`\nDASS desktop and Equibop bundles built in:\n${distDirectory}\nFor standard Discord desktop installation, see docs/plugin.md.\nFor Equibop, select this directory in Developer Options.\nFully quit and restart your client after installation, then enable DASS in Equicord Plugins.`);
 } catch (error) {
     console.error(error instanceof Error ? error.message : "Plugin build failed.");
     process.exitCode = 1;
