@@ -2,8 +2,10 @@
 
 Status: architecture proposal with an opt-in, authenticated one-publisher/one-viewer
 experiment and user-reported LAN video evidence, not a production or benchmarked
-screensharing system. The new [directory and viewer](../watching.md) increment
-awaits Docker checks and real-client acceptance. E2EE is unavailable; the Phase 0
+screensharing system. The [directory and viewer](../watching.md) also have
+user-reported discovery and audio playback evidence. Audio consent and backend
+checks are user-confirmed; broader runtime acceptance remains pending.
+E2EE is unavailable; the Phase 0
 transport gate remains open. Target repository: <https://github.com/alkalines/DASS>.
 See [backend development](../backend.md) and [plugin status](../plugin.md) for
 commands and limitations. The architecture and future-work sections below are

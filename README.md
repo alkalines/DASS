@@ -12,8 +12,9 @@ The proposed architecture uses Equibop's existing capture pipeline and a Rust
 WebRTC selective forwarding backend, without additional client helper executables.
 Both broadcasters and viewers need DASS. An opt-in, invite-authenticated
 one-publisher/one-viewer Rust transport has user-reported LAN video evidence.
-The new authenticated directory and DASS-owned viewer are implemented but await
-backend checks and real-client verification. This is not a production SFU;
+The authenticated directory and DASS-owned viewer now have user-reported discovery
+and audio playback evidence. Audio consent and backend checks are also
+user-confirmed; broader runtime acceptance remains pending. This is not a production SFU;
 E2EE is unavailable and readiness remains 503. Native Discord watching is separate.
 
 The backend is built, tested and run using Docker, with no host Rust installation.

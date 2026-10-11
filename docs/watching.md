@@ -2,9 +2,24 @@
 
 Discord Alternative ScreenShare (DASS) now connects its experimental one-viewer
 transport to an authenticated directory and a DASS-owned settings-panel viewer.
-This increment is **not runtime-verified** and does not complete the transport
-gate. The previous commit's user-confirmed video stream used manual publisher-ID
-entry, not this directory. E2EE is unavailable; readiness remains 503.
+The user has confirmed discovery, audio playback, audio consent and backend checks;
+this does not complete the transport gate. The earlier user-confirmed video stream
+used manual publisher-ID entry, not this directory. E2EE is unavailable;
+readiness remains 503.
+
+## Recorded runtime evidence
+
+On October 11, 2026, after the directory/viewer implementation, the user reported:
+“Discovering is working. Audio is also working.” This is user-confirmed discovery
+and audio playback, not an agent-observed test or a full authorization/security
+acceptance result. Exact running revisions, audio source/selection, playback gesture
+behavior and the topology of this follow-up were not separately recorded.
+The user subsequently confirmed that backend checks and audio consent are working,
+and deferred the remaining runtime checks. This records user-confirmed acceptance
+of those categories; command outputs, test counts and detailed audio scenarios were
+not provided. It is not agent-executed validation.
+Unauthorized access rejection, publisher removal, viewer/context cleanup, decoder
+bounds and absence of Discord media/preview leakage remain pending runtime checks.
 
 ## Directory ownership and authorization
 
@@ -82,8 +97,9 @@ audio track). Publisher capture remains in the separate test panel. Native share
 buttons still refuse DASS transport; native Discord watching remains unchanged.
 The DASS watch button consumes a DASS intent synchronously through `routeWatch`
 before awaiting setup and has no native callback. No guessed private watch patch
-has been added. Standard Discord desktop receiving and this UI's real Equibop
-behavior remain unverified.
+has been added. Standard Discord desktop receiving and full Equibop lifecycle/
+security behavior remain unverified; discovery and audio have the user-reported
+evidence above.
 
 ## Validation and acceptance still needed
 
@@ -96,7 +112,9 @@ teardown. These use fake transport/media objects, not real network playback.
 Docker socket access was denied in the agent session. New Rust tests include
 directory grant/expiry/result bounds/lease cleanup and extend the authenticated
 DTLS test to check discovery only after connection and cleanup on revocation.
-They have **not run**. From the repository root in a Docker-enabled shell:
+They were **not run by the agent**. The user subsequently confirmed backend checks
+are working; individual command outputs were not supplied. The check sequence,
+from the repository root in a Docker-enabled shell, is:
 
 ```sh
 export LOCAL_UID="$(id -u)"
@@ -108,10 +126,11 @@ docker compose run --rm tooling cargo test --workspace --locked
 docker compose build backend
 ```
 
-Before claiming the exit condition, verify real directory discovery/playback with
-authorized clients, rejection with access-only/wrong-room/expired credentials,
+Discovery, audio playback, audio consent and backend checks are user-confirmed. Before claiming
+the exit condition, record the running revisions and verify authorization with
+access-only/wrong-room/expired credentials,
 publisher stop/disconnect/expiry/revocation removal, late-result cancellation,
-viewer close/context/logout cleanup, selected audio playback, decoder bounds and
+viewer close/context/logout cleanup, decoder bounds and
 absence of Discord media/preview leakage. Keep the remaining acceptance checks in
 [transport-gate.md](transport-gate.md). No deployment or trust/firewall changes
 were performed by the agent.

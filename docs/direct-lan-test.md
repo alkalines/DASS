@@ -35,6 +35,13 @@ adversarial/reconnection checks still need explicit evidence. Readiness and
 advertised media capabilities remain unchanged. Production SFU work remains gated
 on completing and recording the required real-client acceptance checks.
 
+After implementing the authenticated directory and viewer, the user additionally
+reported working discovery and audio playback on October 11, 2026. See
+[watching.md](watching.md) for this follow-up evidence and remaining checks. The
+user subsequently confirmed audio consent and backend checks as working. Exact
+running revisions, unauthorized access rejection, cleanup and absence of Discord
+media leakage remain unverified; remaining runtime tests were deferred.
+
 ## 1. Prepare private test material
 
 From the DASS root in the user's root Docker shell (not the desktop/client shell):
