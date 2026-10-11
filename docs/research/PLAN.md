@@ -1,11 +1,13 @@
 # DASS: implementation plan and research
 
-Status: architecture proposal with an initial Docker-only Rust HTTP scaffold, not
-an implemented or benchmarked screensharing system. Target repository:
-<https://github.com/alkalines/DASS>. See [backend development](../backend.md) for
-the scaffold and validation commands. An initial plugin settings/discovery scaffold
-exists; authentication, capture integration, signaling and media forwarding remain
-unimplemented. See [plugin status](../plugin.md) for build blockers and limitations.
+Status: architecture proposal with an opt-in, authenticated one-publisher/one-viewer
+experiment and user-reported LAN video evidence, not a production or benchmarked
+screensharing system. The new [directory and viewer](../watching.md) increment
+awaits Docker checks and real-client acceptance. E2EE is unavailable; the Phase 0
+transport gate remains open. Target repository: <https://github.com/alkalines/DASS>.
+See [backend development](../backend.md) and [plugin status](../plugin.md) for
+commands and limitations. The architecture and future-work sections below are
+proposals, not verification evidence.
 
 ## 1. Recommendation
 

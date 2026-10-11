@@ -20,7 +20,7 @@ export function stopSpikeTest() {
     stop?.();
 }
 
-export function SpikeTestPanel({ backendUrl, isActive }: { backendUrl: string; isActive(): boolean; }) {
+export function SpikeTestPanel({ backendUrl, isActive, beforePrepare }: { backendUrl: string; isActive(): boolean; beforePrepare(): void; }) {
     const [roomId, setRoomId] = useState("");
     const [credential, setCredential] = useState("");
     const [publisherId, setPublisherId] = useState("");
@@ -69,6 +69,7 @@ export function SpikeTestPanel({ backendUrl, isActive }: { backendUrl: string; i
 
     async function prepare(publisher: boolean) {
         if (!isActive()) return;
+        beforePrepare();
         if (stopCurrentTest !== stop) stopSpikeTest();
         stopResources(false);
         stopCurrentTest = stop;

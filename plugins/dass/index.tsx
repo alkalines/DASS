@@ -14,11 +14,13 @@ import { closeModal, Modal, openModal, SelectedChannelStore, showToast, useEffec
 import { EquibopCaptureBridge, LocalCaptureCheck } from "./capture";
 import { DiscoveryController } from "./controller";
 import { createShareSelection, DISCORD_SHARE_PATCHES, PublishIntent, routePublish, routeWatch, WatchIntent } from "./discordAdapter";
-import { ScreenshareRouting } from "./routing";
 import { SpikeTestPanel, stopSpikeTest } from "./spikeTest";
+import { WatchController } from "./watching";
+import { WatchPanel } from "./watchPanel";
 
 const discovery = new DiscoveryController();
-const screenshare = new ScreenshareRouting();
+const watching = new WatchController(() => SelectedChannelStore.getVoiceChannelId());
+const screenshare = watching.routing;
 const localCapture = new LocalCaptureCheck();
 let pluginActive = false;
 let shareChooser: { key: string; abort: AbortController; } | undefined;
@@ -32,6 +34,7 @@ function closeShareChooser() {
 }
 
 function resetConfiguration() {
+    watching.reset();
     stopSpikeTest();
     localCapture.stop();
     closeShareChooser();
@@ -64,9 +67,9 @@ function DiscoveryPanel() {
     }, []);
     return (
         <div>
-            <Paragraph>Discord Alternative ScreenShare is an early development scaffold, not a working screensharing transport.</Paragraph>
+            <Paragraph>Discord Alternative ScreenShare provides an experimental DASS directory and one-viewer transport. E2EE and production readiness remain unavailable.</Paragraph>
             <Paragraph>On Discord build 634304, the center call and Voice Connected panel share buttons offer Discord or DASS before native sharing. Other share entry points still use Discord.</Paragraph>
-            <Paragraph>DASS selection only reports that transport is unavailable. Native interception is awaiting runtime verification; watch and stream detection hooks are not installed.</Paragraph>
+            <Paragraph>Native share-button DASS selection still reports transport unavailable. Use the separate test publisher and DASS directory below; no synthetic Discord streams are created.</Paragraph>
             <Paragraph role="status" aria-live="polite">{status.message}</Paragraph>
             <Button
                 disabled={status.phase === "stopped" || status.phase === "checking"}
@@ -75,7 +78,8 @@ function DiscoveryPanel() {
                 Check backend capabilities
             </Button>
             <Paragraph role="status" aria-live="polite">{captureStatus}</Paragraph>
-            <SpikeTestPanel backendUrl={settings.store.backendUrl} isActive={() => pluginActive} />
+            <WatchPanel controller={watching} backendUrl={settings.store.backendUrl} beforePrepare={stopSpikeTest} />
+            <SpikeTestPanel backendUrl={settings.store.backendUrl} isActive={() => pluginActive} beforePrepare={() => watching.reset()} />
             <Button disabled={status.phase === "stopped"} onClick={() => {
                 const host = globalThis as typeof globalThis & { Equibop?: { DassCapture?: EquibopCaptureBridge; }; };
                 setCaptureStatus("Opening the installed host picker for local capture only. Nothing will be transmitted.");
@@ -91,7 +95,7 @@ function DiscoveryPanel() {
 
 export default definePlugin({
     name: "DASS",
-    description: "Discord Alternative ScreenShare: backend discovery scaffold. Screensharing is not implemented.",
+    description: "Discord Alternative ScreenShare: experimental authenticated directory and viewer. No E2EE.",
     // Add the maintainer's confirmed Discord ID before distribution; never invent one.
     authors: [],
     settings,
@@ -131,9 +135,10 @@ export default definePlugin({
         shareChooser = { key, abort };
     },
     setDassRoom(roomId?: string) {
+        watching.reset();
         stopSpikeTest();
         localCapture.stop();
-        screenshare.setRoom(roomId);
+        if (roomId) showToast("Bind this DASS room with a separate credential in the DASS directory panel.");
     },
     stopPublishing() {
         stopSpikeTest();
@@ -142,13 +147,14 @@ export default definePlugin({
     },
     stopWatching() {
         stopSpikeTest();
-        screenshare.stopWatching();
+        watching.reset();
     },
     routePublish(intent: PublishIntent) {
         return routePublish(screenshare, intent);
     },
     routeWatch(intent: WatchIntent) {
-        return routeWatch(screenshare, intent);
+        if (intent.transport === "discord") return routeWatch(screenshare, intent);
+        return { handled: true, completion: watching.watch(intent.share) };
     },
     detectShares(roomId: string) {
         return screenshare.detect(roomId);
@@ -156,7 +162,7 @@ export default definePlugin({
     start() {
         pluginActive = true;
         discovery.start();
-        screenshare.start();
+        watching.start();
     },
     stop() {
         stopSpikeTest();
@@ -164,16 +170,18 @@ export default definePlugin({
         pluginActive = false;
         closeShareChooser();
         discovery.stop();
-        screenshare.stop();
+        watching.stop();
     },
     flux: {
         VOICE_CHANNEL_SELECT() {
+            watching.reset();
             stopSpikeTest();
             localCapture.stop();
             closeShareChooser();
             screenshare.setRoom(undefined);
         },
         LOGOUT() {
+            watching.stop();
             stopSpikeTest();
             localCapture.stop();
             pluginActive = false;

@@ -101,3 +101,15 @@ test("buffer overload closes rather than queueing more control messages", async 
     expect(connection.closed.aborted).toBe(true);
     expect(socket.messages.length).toBe(1);
 });
+
+test("directory snapshots are correlated and stale responses fail closed", async () => {
+    const socket = new Socket();
+    const connection = await connect(socket);
+    const directory = connection.request({ type: "directory", room_id: "room" }, "directory");
+    socket.reply({ type: "directory", room_id: "room", publisher_ids: ["source"] });
+    expect(await directory).toEqual({ type: "directory", room_id: "room", publisher_ids: ["source"] });
+    const newer = connection.request({ type: "directory", room_id: "room" }, "directory");
+    socket.reply({ type: "directory", room_id: "room", publisher_ids: ["stale"] }, "client_2");
+    await expect(newer).rejects.toThrow("protocol");
+    expect(connection.closed.aborted).toBe(true);
+});

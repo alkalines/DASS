@@ -3,8 +3,9 @@
 Discord Alternative ScreenShare (DASS) defines its proposed control-plane wire
 types in `crates/protocol/src/signaling.rs`. An optional invite-backed control-plane
 endpoint is implemented and passes user-run Docker control-plane tests; see
-[control-plane.md](control-plane.md). **There is no authenticated media transport
-yet.** These types alone do not enable capture, authorize clients or establish
+[control-plane.md](control-plane.md). An opt-in authenticated RTC experiment now
+exists; its new directory/viewer increment is described in [watching.md](watching.md).
+These types alone do not enable capture, authorize clients or establish
 readiness.
 
 ## Generate and validate
@@ -48,6 +49,10 @@ The intended connection sequence is:
 2. After `authenticated`, request `join` with a room ID and explicit
    `require_e2ee`. Room access must be authorized separately from publishing and
    subscribing. Required E2EE must be rejected while E2EE is unavailable.
+   Before joining, `directory` with `room_id` returns up to 64 `publisher_ids`
+   only with access and subscribe grants. The response echoes the room and request
+   ID. There is no client update operation. Entries come from connected,
+   server-owned publishers; expired/unauthorized publishers are filtered.
 3. After `joined`, use its session ID for `publish` or `subscribe`. A subscription
    targets a server-issued publisher ID in the authorized room. Recheck credential
    validity and the specific permission on **every** operation. No client-provided
@@ -76,6 +81,7 @@ structural parsers.
 | ICE candidate | 2,048 UTF-8 bytes |
 | Sessions per backend | 128 |
 | Members per room | 16 |
+| Directory entries | 64 (one live publisher in the current RTC experiment) |
 | Outbound messages per connection | 32 |
 | Login deadline | 5,000 ms |
 | RTC setup deadline after acceptance | 15,000 ms |

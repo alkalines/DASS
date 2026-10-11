@@ -17,9 +17,9 @@ use axum::{
 use dass_protocol::{
     PROTOCOL_VERSION,
     signaling::{
-        ClientOperation, CloseReason, ErrorCode, LOGIN_DEADLINE_MS, MAX_MESSAGE_BYTES,
-        MAX_ROOM_MEMBERS, MAX_SESSIONS, SETUP_DEADLINE_MS, ServerMessage, ServerOperation,
-        parse_client_message,
+        ClientOperation, CloseReason, ErrorCode, LOGIN_DEADLINE_MS, MAX_DIRECTORY_SHARES,
+        MAX_MESSAGE_BYTES, MAX_ROOM_MEMBERS, MAX_SESSIONS, SETUP_DEADLINE_MS, ServerMessage,
+        ServerOperation, parse_client_message,
     },
 };
 use std::{
@@ -46,6 +46,7 @@ pub struct SignalingState {
     verifications: Arc<Semaphore>,
     active_invites: Arc<Mutex<HashSet<String>>>,
     rooms: Arc<Mutex<HashMap<String, usize>>>,
+    publishers: Arc<Mutex<HashMap<String, PublisherEntry>>>,
     login_rate: Arc<Mutex<RateWindow>>,
     rtc_spike: Option<SpikeConfig>,
 }
@@ -85,6 +86,7 @@ impl SignalingState {
             verifications: Arc::new(Semaphore::new(2)),
             active_invites: Arc::new(Mutex::new(HashSet::new())),
             rooms: Arc::new(Mutex::new(HashMap::new())),
+            publishers: Arc::new(Mutex::new(HashMap::new())),
             login_rate: Arc::new(Mutex::new(RateWindow::new())),
             rtc_spike: None,
         }
@@ -160,6 +162,90 @@ struct JoinedSession {
     room: RoomLease,
     setup_deadline: Instant,
     receive_peer: Option<SpikePeer>,
+    publisher: Option<PublisherLease>,
+}
+
+struct PublisherEntry {
+    room_id: String,
+    invite_id: String,
+}
+
+// Only the authenticated RTC owner can register a connected publisher. No client
+// directory mutation operation exists; session teardown removes the entry.
+struct PublisherLease {
+    session_id: String,
+    publishers: Arc<Mutex<HashMap<String, PublisherEntry>>>,
+}
+
+impl Drop for PublisherLease {
+    fn drop(&mut self) {
+        if let Ok(mut publishers) = self.publishers.lock() {
+            publishers.remove(&self.session_id);
+        }
+    }
+}
+
+fn register_publisher(
+    state: &SignalingState,
+    joined: &mut JoinedSession,
+    invite_id: &str,
+) -> Result<(), ()> {
+    if joined.publisher.is_some()
+        || !joined
+            .receive_peer
+            .as_ref()
+            .is_some_and(|peer| peer.connected() && !peer.is_subscriber())
+    {
+        return Ok(());
+    }
+    let mut publishers = state.publishers.lock().map_err(|_| ())?;
+    if publishers.len() >= MAX_DIRECTORY_SHARES || publishers.contains_key(&joined.session_id) {
+        return Err(());
+    }
+    publishers.insert(
+        joined.session_id.clone(),
+        PublisherEntry {
+            room_id: joined.room.room_id.clone(),
+            invite_id: invite_id.into(),
+        },
+    );
+    joined.publisher = Some(PublisherLease {
+        session_id: joined.session_id.clone(),
+        publishers: state.publishers.clone(),
+    });
+    Ok(())
+}
+
+fn directory(
+    state: &SignalingState,
+    store: &InviteStore,
+    invite_id: &str,
+    room_id: String,
+    now: u32,
+) -> ServerOperation {
+    if !store.authorize(invite_id, &room_id, Permission::Access, now)
+        || !store.authorize(invite_id, &room_id, Permission::Subscribe, now)
+    {
+        return rejected(ErrorCode::Unauthorized);
+    }
+    let Ok(publishers) = state.publishers.lock() else {
+        return rejected(ErrorCode::Overloaded);
+    };
+    let mut publisher_ids: Vec<String> = publishers
+        .iter()
+        .filter(|(_, publisher)| {
+            publisher.room_id == room_id
+                && store.authorize(&publisher.invite_id, &room_id, Permission::Access, now)
+                && store.authorize(&publisher.invite_id, &room_id, Permission::Publish, now)
+        })
+        .map(|(id, _)| id.clone())
+        .take(MAX_DIRECTORY_SHARES)
+        .collect();
+    publisher_ids.sort_unstable();
+    ServerOperation::Directory {
+        room_id,
+        publisher_ids,
+    }
 }
 
 pub fn router(mut state: SignalingState, maximum_message_bytes: usize) -> Router {
@@ -244,6 +330,12 @@ async fn send(socket: &mut WebSocket, request_id: String, operation: ServerOpera
 
 async fn close(socket: &mut WebSocket, session: Option<&JoinedSession>, reason: CloseReason) {
     if let Some(session) = session {
+        // Invalidate discovery before awaiting a potentially slow close send.
+        if let Some(publisher) = &session.publisher
+            && let Ok(mut publishers) = publisher.publishers.lock()
+        {
+            publishers.remove(&publisher.session_id);
+        }
         let _ = send(
             socket,
             "server_close".into(),
@@ -402,6 +494,11 @@ async fn run(
                 if let Some(peer) = session.as_mut().and_then(|session| session.receive_peer.as_mut())
                     && peer.timeout().await.is_err() {
                     close(&mut socket, session.as_ref(), CloseReason::TransportFailed).await;
+                    break;
+                }
+                if let Some(joined) = session.as_mut()
+                    && register_publisher(&state, joined, &identity.invite_id).is_err() {
+                    close(&mut socket, session.as_ref(), CloseReason::Overloaded).await;
                     break;
                 }
             }
@@ -570,6 +667,7 @@ fn operate(
 ) -> ServerOperation {
     match operation {
         ClientOperation::Login { .. } => rejected(ErrorCode::InvalidState),
+        ClientOperation::Directory { room_id } => directory(state, store, invite_id, room_id, now),
         ClientOperation::Join {
             room_id,
             require_e2ee,
@@ -595,6 +693,7 @@ fn operate(
                 room,
                 setup_deadline: Instant::now() + Duration::from_millis(SETUP_DEADLINE_MS as u64),
                 receive_peer: None,
+                publisher: None,
             });
             *last_left = None;
             ServerOperation::Joined { session_id }
@@ -651,6 +750,93 @@ fn operate(
 mod tests {
     use super::*;
     use crate::auth::{InviteFile, RoomGrant, create_invite};
+
+    #[tokio::test]
+    async fn directory_requires_subscribe_scope_filters_expiry_and_is_drop_owned() {
+        let mut invites = Vec::new();
+        for (id, room, publish, subscribe, expires) in [
+            ("publisher", "room", true, false, 100),
+            ("viewer", "room", false, true, 200),
+            ("outsider", "other", false, true, 200),
+        ] {
+            invites.push(
+                create_invite(
+                    id.into(),
+                    vec![RoomGrant {
+                        room_id: room.into(),
+                        access: true,
+                        publish,
+                        subscribe,
+                    }],
+                    expires,
+                )
+                .unwrap()
+                .0,
+            );
+        }
+        let store = Arc::new(
+            InviteStore::from_bytes(
+                &serde_json::to_vec(&InviteFile {
+                    version: 1,
+                    invites,
+                })
+                .unwrap(),
+            )
+            .unwrap(),
+        );
+        let (_sender, receiver) = watch::channel(store.clone());
+        let state = SignalingState::new(receiver);
+        state.publishers.lock().unwrap().insert(
+            "source".into(),
+            PublisherEntry {
+                room_id: "room".into(),
+                invite_id: "publisher".into(),
+            },
+        );
+        let lease = PublisherLease {
+            session_id: "source".into(),
+            publishers: state.publishers.clone(),
+        };
+        for requester in ["publisher", "outsider", "unknown"] {
+            assert!(matches!(
+                directory(&state, &store, requester, "room".into(), 99),
+                ServerOperation::Rejected {
+                    code: ErrorCode::Unauthorized
+                }
+            ));
+        }
+        assert!(matches!(
+            directory(&state, &store, "viewer", "room".into(), 99),
+            ServerOperation::Directory { publisher_ids, .. } if publisher_ids == vec!["source"]
+        ));
+        assert!(matches!(
+            directory(&state, &store, "viewer", "room".into(), 100),
+            ServerOperation::Directory { publisher_ids, .. } if publisher_ids.is_empty()
+        ));
+        assert!(matches!(
+            directory(&state, &store, "outsider", "other".into(), 99),
+            ServerOperation::Directory { publisher_ids, .. } if publisher_ids.is_empty()
+        ));
+        drop(lease);
+        assert!(state.publishers.lock().unwrap().is_empty());
+        assert!(matches!(
+            directory(&state, &store, "viewer", "room".into(), 99),
+            ServerOperation::Directory { publisher_ids, .. } if publisher_ids.is_empty()
+        ));
+        for index in 0..=MAX_DIRECTORY_SHARES {
+            state.publishers.lock().unwrap().insert(
+                format!("source_{index}"),
+                PublisherEntry {
+                    room_id: "room".into(),
+                    invite_id: "publisher".into(),
+                },
+            );
+        }
+        assert!(matches!(
+            directory(&state, &store, "viewer", "room".into(), 99),
+            ServerOperation::Directory { publisher_ids, .. } if publisher_ids.len() == MAX_DIRECTORY_SHARES
+        ));
+    }
 
     #[test]
     fn origins_are_exact_and_unambiguous() {
@@ -1205,6 +1391,7 @@ mod network_tests {
         state: SignalingState,
         task: tokio::task::JoinHandle<()>,
         credential: String,
+        viewer_credential: String,
     }
 
     impl Drop for Server {
@@ -1229,10 +1416,21 @@ mod network_tests {
             expires,
         )
         .unwrap();
+        let (viewer_invite, viewer_credential) = create_invite(
+            "directory_viewer".into(),
+            vec![RoomGrant {
+                room_id: "room_1".into(),
+                access: true,
+                publish: false,
+                subscribe: true,
+            }],
+            expires,
+        )
+        .unwrap();
         let store = InviteStore::from_bytes(
             &serde_json::to_vec(&InviteFile {
                 version: 1,
-                invites: vec![invite],
+                invites: vec![invite, viewer_invite],
             })
             .unwrap(),
         )
@@ -1284,6 +1482,7 @@ mod network_tests {
             state,
             task,
             credential,
+            viewer_credential,
         }
     }
 
@@ -1414,6 +1613,22 @@ mod network_tests {
         .await;
         assert_eq!(result["operation"]["type"], "accepted");
 
+        let mut viewer = connect(&server, "https://discord.com", "").await.unwrap();
+        let result = request(
+            &mut viewer,
+            "directory_login",
+            serde_json::json!({ "type": "login", "credential": server.viewer_credential }),
+        )
+        .await;
+        assert_eq!(result["operation"]["type"], "authenticated");
+        let result = request(
+            &mut viewer,
+            "directory_pending",
+            serde_json::json!({ "type": "directory", "room_id": "room_1" }),
+        )
+        .await;
+        assert_eq!(result["operation"]["publisher_ids"], serde_json::json!([]));
+
         let mut publisher = Rtc::builder()
             .set_crypto_provider(Arc::new(str0m_aws_lc_rs::default_provider()))
             .set_fingerprint_verification(true)
@@ -1510,6 +1725,22 @@ mod network_tests {
             }
         }
 
+        let mut discovered = false;
+        for index in 0..100 {
+            let result = request(
+                &mut viewer,
+                &format!("directory_connected_{index}"),
+                serde_json::json!({ "type": "directory", "room_id": "room_1" }),
+            )
+            .await;
+            if result["operation"]["publisher_ids"] == serde_json::json!([session_id]) {
+                discovered = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(discovered, "connected RTC publisher was not discoverable");
+
         // The tested control-policy watch reload must tear down actual RTC ownership,
         // not merely invalidate a control-only room reservation.
         server
@@ -1523,6 +1754,7 @@ mod network_tests {
                 drop(socket);
                 if server.state.rooms.lock().unwrap().is_empty()
                     && server.state.active_invites.lock().unwrap().is_empty()
+                    && server.state.publishers.lock().unwrap().is_empty()
                 {
                     return;
                 }

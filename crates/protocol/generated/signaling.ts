@@ -7,6 +7,7 @@ export const MAX_ROOM_MEMBERS = 16;
 export const MAX_QUEUED_MESSAGES = 32;
 export const LOGIN_DEADLINE_MS = 5000;
 export const SETUP_DEADLINE_MS = 15000;
+export const MAX_DIRECTORY_SHARES = 64;
 
 export type ClientMessage = { protocol_version: number; request_id: string; operation: ClientOperation };
 
@@ -15,6 +16,7 @@ export type ServerMessage = { protocol_version: number; request_id: string; oper
 export type ClientOperation =
     | { type: "login"; credential: string }
     | { type: "join"; room_id: string; require_e2ee: boolean }
+    | { type: "directory"; room_id: string }
     | { type: "publish"; session_id: string }
     | { type: "subscribe"; session_id: string; publisher_id: string }
     | { type: "offer"; session_id: string; sdp: string }
@@ -24,6 +26,7 @@ export type ClientOperation =
 export type ServerOperation =
     | { type: "authenticated"; expires_at_unix_seconds: number }
     | { type: "joined"; session_id: string }
+    | { type: "directory"; room_id: string; publisher_ids: Array<string> }
     | { type: "accepted"; session_id: string }
     | { type: "answer"; session_id: string; sdp: string }
     | { type: "ice"; session_id: string; candidate: string }

@@ -6,13 +6,15 @@ Early-stage project for an Equicord plugin and self-hosted Rust screensharing ba
 - [Contributor and agent instructions](AGENTS.md)
 - [Docker-only backend development](docs/backend.md)
 - [Build and install the plugin scaffold in Equicord or Equibop](docs/plugin.md)
+- [Experimental authenticated directory and DASS viewer](docs/watching.md)
 
 The proposed architecture uses Equibop's existing capture pipeline and a Rust
 WebRTC selective forwarding backend, without additional client helper executables.
-Both broadcasters and viewers need DASS. The Rust backend currently provides
-local-development health and capability endpoints only. The initial plugin has
-settings and explicit capability discovery, but authentication, capture integration,
-WebRTC forwarding and E2EE are not implemented. Native Discord sharing is unchanged.
+Both broadcasters and viewers need DASS. An opt-in, invite-authenticated
+one-publisher/one-viewer Rust transport has user-reported LAN video evidence.
+The new authenticated directory and DASS-owned viewer are implemented but await
+backend checks and real-client verification. This is not a production SFU;
+E2EE is unavailable and readiness remains 503. Native Discord watching is separate.
 
 The backend is built, tested and run using Docker, with no host Rust installation.
 Follow the backend guide to generate `Cargo.lock`, run checks and start the container.

@@ -80,6 +80,7 @@ export function ipv4Offer(sdp: string): string {
 /** Two-phase setup preserves actual candidate ports for the backend's exact allowlist. */
 export class SpikePeer {
     readonly receivedStream = new MediaStream();
+    readonly tracksChanged = new EventTarget();
     private signaling?: SpikeSignaling;
     private active = true;
     private activated = false;
@@ -180,7 +181,7 @@ export class SpikePeer {
         });
     }
 
-    async activate(options: { backendUrl: string; credential: string; roomId: string; publisherId?: string; }): Promise<string> {
+    async activate(options: { backendUrl: string; credential: string; roomId: string; publisherId?: string; signaling?: SpikeSignaling; }): Promise<string> {
         this.checkActive();
         if (this.activated || !this.offer || (Boolean(this.capture) === Boolean(options.publisherId))) {
             throw new Error("Select the matching DASS publisher or viewer role once.");
@@ -189,7 +190,7 @@ export class SpikePeer {
         clearTimeout(this.timer);
         this.timer = setTimeout(() => this.closeWithDiagnostic(`Activation failed [${this.activationStage}:timeout]. Check UDP reachability if the answer was applied.`), 15_000);
         try {
-            this.signaling = await SpikeSignaling.connect({ experimental: true, backendUrl: options.backendUrl,
+            this.signaling = options.signaling ?? await SpikeSignaling.connect({ experimental: true, backendUrl: options.backendUrl,
                 credential: options.credential, signal: this.closed });
             this.checkActive();
             this.signaling.closed.addEventListener("abort", this.onSignalingClosed, { once: true });
@@ -247,6 +248,8 @@ export class SpikePeer {
         if (!this.active || this.capture || !["audio", "video"].includes(event.track.kind) || this.receivedStream.getTracks().length >= 2
             || this.receivedStream.getTracks().some(track => track.kind === event.track.kind)) { event.track.stop(); return; }
         this.receivedStream.addTrack(event.track);
+        // Script-driven MediaStream.addTrack does not emit the UA addtrack event.
+        this.tracksChanged.dispatchEvent(new Event("change"));
         event.track.addEventListener("ended", this.close, { once: true });
     };
 

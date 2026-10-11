@@ -1,5 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
 import { gatheredCandidates, ipv4Offer, preparationFailureMessage, PREPARATION_TIMEOUT_MS, SpikePeer } from "../../clients/spike/peer";
+import { SpikeSignaling } from "../../clients/spike/signaling";
 
 test("gathered candidate extraction is bounded and deduplicated", () => {
     const candidate = "a=candidate:1 1 udp 2130706431 192.168.1.2 50000 typ host";
@@ -147,6 +148,24 @@ function capture(audioSelected = false, audioPresent = audioSelected) {
         stream: new Stream(tracks) as unknown as MediaStream, audioSelected, release: () => { releases++; }
     } };
 }
+
+test("viewer reuses directory authentication without a second credential login", async () => withBrowserDoubles(async () => {
+    const abort = new AbortController();
+    const signaling = await SpikeSignaling.connect({ experimental: true, backendUrl: "https://dass.example", credential: "separate_secret", signal: abort.signal });
+    const connection = await SpikePeer.prepare({ experimental: true, signal: abort.signal });
+    try {
+        await connection.activate({ backendUrl: "https://dass.example", credential: "", roomId: "room", publisherId: "source", signaling });
+        expect(Socket.instances).toHaveLength(1);
+        expect(Socket.instances[0].operations.map(operation => operation.type)).toEqual(["login", "join", "subscribe", "offer"]);
+        let changes = 0;
+        connection.tracksChanged.addEventListener("change", () => { changes++; });
+        Peer.instances[0].receive(new Track("video"));
+        expect(changes).toBe(1);
+        expect(connection.receivedStream.getVideoTracks()).toHaveLength(1);
+        connection.close();
+        expect(Socket.instances[0].closes).toBe(1);
+    } finally { connection.close(); signaling.close(); }
+}));
 
 test("preparation has a 180-second deadline and expiry releases capture", async () => withBrowserDoubles(async () => {
     const schedule = spyOn(globalThis, "setTimeout");

@@ -1,4 +1,4 @@
-import { MAX_MESSAGE_BYTES, PROTOCOL_VERSION, type ClientMessage, type ServerMessage } from "./signaling";
+import { type ClientMessage, MAX_DIRECTORY_SHARES, MAX_MESSAGE_BYTES, PROTOCOL_VERSION, type ServerMessage } from "./signaling";
 
 const encoder = new TextEncoder();
 const identifier = (value: unknown) => typeof value === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(value);
@@ -13,6 +13,7 @@ type Shape = Record<string, Validator>;
 const clientShapes: Record<string, Shape> = {
     login: { credential: text(512) },
     join: { room_id: identifier, require_e2ee: boolean },
+    directory: { room_id: identifier },
     publish: { session_id: identifier },
     subscribe: { session_id: identifier, publisher_id: identifier },
     offer: { session_id: identifier, sdp: text(12288) },
@@ -22,6 +23,8 @@ const clientShapes: Record<string, Shape> = {
 const serverShapes: Record<string, Shape> = {
     authenticated: { expires_at_unix_seconds: seconds },
     joined: { session_id: identifier },
+    directory: { room_id: identifier, publisher_ids: value => Array.isArray(value) && value.length <= MAX_DIRECTORY_SHARES
+        && value.every(identifier) && new Set(value).size === value.length },
     accepted: { session_id: identifier },
     answer: { session_id: identifier, sdp: text(12288) },
     ice: { session_id: identifier, candidate: text(2048) },

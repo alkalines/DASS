@@ -74,7 +74,8 @@ try {
     const markerPath = join(checkoutDirectory, ".dass-staged.json");
     const previousHashes = existsSync(markerPath) ? JSON.parse(readFileSync(markerPath, "utf8")) : {};
     const sources = new Map(readdirSync(sourceDirectory).map(name => [name, readFileSync(join(sourceDirectory, name), "utf8")
-        .replaceAll('"../../clients/spike/peer"', '"./spikePeer"')]));
+        .replaceAll('"../../clients/spike/peer"', '"./spikePeer"')
+        .replaceAll('"../../clients/spike/signaling"', '"./spikeSignaling"')]));
     const clientSources = [
         ["spikePeer.ts", "clients/spike/peer.ts", [['"../../plugins/dass/routing"', '"./routing"'], ['"./signaling"', '"./spikeSignaling"']]],
         ["spikeSignaling.ts", "clients/spike/signaling.ts", [['"../../crates/protocol/generated/signaling"', '"./protocolSignaling"'], ['"../../crates/protocol/generated/validate"', '"./protocolValidate"']]],
@@ -123,7 +124,7 @@ try {
     for (const [target, entryPoint] of [["desktop", "patcher.js"], ["equibop", "main.js"]]) {
         if (!existsSync(join(distDirectory, target, entryPoint))) throw new Error(`${target} entry point was not built.`);
         const renderer = readFileSync(join(distDirectory, target, "renderer.js"), "utf8");
-        if (!renderer.includes("Discord Alternative ScreenShare: backend discovery scaffold.")) {
+        if (!renderer.includes("Discord Alternative ScreenShare: experimental authenticated directory and viewer.")) {
             throw new Error(`Built ${target} renderer does not contain the DASS plugin.`);
         }
     }

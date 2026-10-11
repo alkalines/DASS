@@ -9,6 +9,7 @@ pub const MAX_ROOM_MEMBERS: usize = 16;
 pub const MAX_QUEUED_MESSAGES: usize = 32;
 pub const LOGIN_DEADLINE_MS: usize = 5_000;
 pub const SETUP_DEADLINE_MS: usize = 15_000;
+pub const MAX_DIRECTORY_SHARES: usize = 64;
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -28,6 +29,9 @@ pub enum ClientOperation {
     Join {
         room_id: String,
         require_e2ee: bool,
+    },
+    Directory {
+        room_id: String,
     },
     Publish {
         session_id: String,
@@ -65,6 +69,10 @@ pub enum ServerOperation {
     },
     Joined {
         session_id: String,
+    },
+    Directory {
+        room_id: String,
+        publisher_ids: Vec<String>,
     },
     Accepted {
         session_id: String,
@@ -145,7 +153,9 @@ impl ClientMessage {
         }
         match &self.operation {
             ClientOperation::Login { credential } => valid_text(credential, 512),
-            ClientOperation::Join { room_id, .. } => valid_id(room_id),
+            ClientOperation::Join { room_id, .. } | ClientOperation::Directory { room_id } => {
+                valid_id(room_id)
+            }
             ClientOperation::Publish { session_id } | ClientOperation::Leave { session_id } => {
                 valid_id(session_id)
             }

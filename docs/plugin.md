@@ -1,11 +1,13 @@
 # DASS plugin scaffold
 
 Discord Alternative ScreenShare (DASS) now has a build-time Equicord userplugin
-in `plugins/dass`. This is **not working screensharing**. It provides backend URL
-settings, an explicit discovery button, visible status and cancellation on disable,
-logout, settings changes or a newer check. No background requests are made.
+in `plugins/dass`. It now includes an experimental authenticated directory and
+DASS-owned viewer; see [watching.md](watching.md) for the current behavior,
+supervised LAN procedure and unverified exit condition. The earlier manual
+transport has user-reported LAN video evidence, not a completed transport gate.
+The capability checker described below is still a separate scaffold-only check.
 
-It sends no credentials, rejects redirects, requires HTTPS except for explicitly
+The capability checker sends no credentials, rejects redirects, requires HTTPS except for explicitly
 enabled loopback HTTP, and bounds discovery to 5 seconds and 16 KiB. Only the
 version-1 scaffold contract is accepted. Discovery is not authentication or an
 authorization to capture. There is no production transport or E2EE to configure.
@@ -20,6 +22,13 @@ runtime coverage, voice independence and absence of native media/thumbnail leaka
 are **not yet verified**. Stock Discord cannot receive future DASS media.
 
 ## Publish, watch and detection boundary
+
+**Historical routing/chooser snapshot:** the description below predates the
+authenticated watch transport. `WatchController` now supplies `subscribe` and
+`listShares` through authenticated WSS and routes DASS-owned watch buttons to the
+viewer. `setDassRoom` alone does not authorize a binding. Routing `preparePublish`
+still refuses; the separate manual publisher panel remains the publishing path.
+Current directory/viewer checks and limitations are recorded in [watching.md](watching.md).
 
 The initial routing implementation is in `plugins/dass/routing.ts`, with the
 action boundary isolated in `plugins/dass/discordAdapter.ts`. These are tested
