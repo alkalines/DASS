@@ -9,7 +9,7 @@ import { Paragraph } from "@components/Paragraph";
 import { TextInput, useCallback, useEffect, useRef, useState } from "@webpack/common";
 
 import { createEquibopCapture, type EquibopCaptureBridge } from "./capture";
-import { SpikePeer } from "../../clients/spike/peer";
+import { preparationFailureMessage, SpikePeer } from "../../clients/spike/peer";
 
 let stopCurrentTest: (() => void) | undefined;
 
@@ -88,10 +88,10 @@ export function SpikeTestPanel({ backendUrl, isActive }: { backendUrl: string; i
             if (!publisher) setViewerStream(current.peer.receivedStream);
             setPrepared(true);
             setStatus("Candidates prepared for 60 seconds. Allowlist both clients' endpoints before activation. Enter your separate DASS credential below.");
-        } catch {
+        } catch (error) {
             if (resource.current === current) {
                 stop();
-                setStatus("Preparation failed or was cancelled. The publisher needs the custom Equibop capture bridge; mDNS candidates are unsupported. No Discord fallback.");
+                setStatus(preparationFailureMessage(error));
             }
         } finally {
             if (resource.current === current) setBusy(false);

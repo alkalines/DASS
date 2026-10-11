@@ -1,11 +1,41 @@
 import { expect, test } from "bun:test";
-import { gatheredCandidates, SpikePeer } from "../../clients/spike/peer";
+import { gatheredCandidates, ipv4Offer, preparationFailureMessage, SpikePeer } from "../../clients/spike/peer";
 
 test("gathered candidate extraction is bounded and deduplicated", () => {
     const candidate = "a=candidate:1 1 udp 2130706431 192.168.1.2 50000 typ host";
     expect(gatheredCandidates(`v=0\r\n${candidate}\r\n${candidate}\r\n`)).toEqual([candidate.slice(2)]);
     expect(() => gatheredCandidates("x".repeat(12289))).toThrow();
     expect(() => gatheredCandidates("v=0\r\n")).toThrow();
+});
+
+test("preparation diagnostics identify candidate policy without exposing candidate text", () => {
+    for (const [candidate, code] of [
+        ["candidate:private 1 udp 123 private-source.local 50000 typ host", "candidate_mdns"],
+        ["candidate:private 1 udp 123 ::1 50000 typ host", "candidate_address"],
+        ["candidate:private 1 tcp 123 192.168.1.2 50000 typ host", "candidate_transport"]
+    ]) {
+        try { gatheredCandidates(`a=${candidate}\r\n`); throw new Error("Candidate unexpectedly accepted"); }
+        catch (error) {
+            const message = preparationFailureMessage(error);
+            expect(message).toContain(`[${code}]`);
+            expect(message).not.toContain("private-source");
+            expect(message).not.toContain(candidate);
+        }
+    }
+    expect(preparationFailureMessage(new Error("sensitive browser exception"))).not.toContain("sensitive");
+});
+
+test("IPv4 offer omits IPv6 candidates without changing supported endpoints or media lines", () => {
+    const ipv4 = "a=candidate:1 1 udp 2130706431 192.0.2.1 50123 typ host";
+    const ipv6 = "a=candidate:2 1 udp 2130706431 fd00::2 50124 typ host";
+    const mediaLines = "v=0\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\na=sendonly\r\na=fingerprint:sha-256 placeholder\r\n";
+    const filtered = ipv4Offer(`${mediaLines}${ipv6}\r\n${ipv4}\r\na=end-of-candidates\r\n`);
+    expect(filtered).toBe(`${mediaLines}${ipv4}\r\na=end-of-candidates\r\n`);
+    expect(gatheredCandidates(filtered)).toEqual([ipv4.slice(2)]);
+    expect(() => ipv4Offer(`${mediaLines}${ipv6}\r\n`)).toThrow("Only IPv6");
+    expect(() => ipv4Offer(`${mediaLines}${ipv4}\r\na=candidate:3 1 udp 123 capture.local 50125 typ host\r\n`)).toThrow("mDNS");
+    expect(() => ipv4Offer(`${mediaLines}${ipv4}\r\na=candidate:4 1 tcp 123 192.0.2.1 50126 typ host\r\n`)).toThrow("transport");
+    expect(() => ipv4Offer("x".repeat(12289))).toThrow("12 KiB");
 });
 
 // These doubles test ownership and cancellation, not Chromium or codec playback.
@@ -62,7 +92,7 @@ class Socket extends EventTarget {
     readyState = 1;
     bufferedAmount = 0;
     closes = 0;
-    operations: Array<{ type: string; publisher_id?: string; }> = [];
+    operations: Array<{ type: string; publisher_id?: string; sdp?: string; }> = [];
     constructor() { super(); Socket.instances.push(this); }
     send(message: string) {
         const request = JSON.parse(message);
@@ -193,12 +223,16 @@ test("viewer is receive-only, bounds incoming tracks and closes on source end", 
 }));
 
 test("publisher activation correlates WSS operations; signaling loss stops capture", async () => withBrowserDoubles(async () => {
+    Peer.offer = async () => ({ type: "offer", sdp: `${offerSdp}a=candidate:2 1 udp 123 fd00::2 50001 typ host\r\n` });
     const source = capture();
     const connection = await SpikePeer.prepare({ experimental: true, signal: new AbortController().signal, capture: source.lease });
     try {
         expect(await connection.activate({ backendUrl: "https://dass.example", credential: "separate-dass-test", roomId: "room" })).toBe("session");
         const socket = Socket.instances[0];
         expect(socket.operations.map(operation => operation.type)).toEqual(["login", "join", "publish", "offer"]);
+        expect(socket.operations[3].sdp).not.toContain("fd00::2");
+        expect(socket.operations[3].sdp).toContain("192.168.1.2 50000");
+        expect(Peer.instances[0].localDescription?.sdp).toContain("fd00::2");
         expect(Peer.instances[0].remoteDescription?.type).toBe("answer");
         await expect(connection.activate({ backendUrl: "https://dass.example", credential: "test", roomId: "room" })).rejects.toThrow("once");
         socket.dispatchEvent(new Event("close"));

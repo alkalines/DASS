@@ -4,6 +4,42 @@ Discord Alternative ScreenShare (DASS) is targeting two CachyOS/Wayland machines
 on the same LAN. One machine is both a client and the Rust backend host. This is
 a manual interoperability test, not a supported release or a passed step 4.6 gate.
 
+## User-reported local capture preflight
+
+The publisher/backend is `X.X.X.1`; the viewer is `X.X.X.2`.
+After launching the custom Equibop host, the user reported that the local capture
+check acquired video-only capture, Stop removed the OS capture indicator, picker
+cancellation left no active capture, and Discord voice continued working in both
+directions. This is user-observed CachyOS/Wayland evidence, not agent-observed GUI
+validation. Exact running host/Discord versions were not supplied for this check.
+Selected audio, network media playback and absence of Discord media/preview
+leakage remain unverified; the two-client transport gate has not passed.
+
+Subsequent publisher and viewer preparation both failed before activation. The
+publisher opened the picker and released capture after failure. The original
+generic status did not identify the cause; neither mDNS nor any other cause is
+confirmed. The panel now exposes fixed preparation failure codes for codec
+configuration, offer/local-description setup, gathering deadline, candidate
+policy and capture tracks. It never displays raw browser exception messages,
+SDP or candidate text in failures. Plugin lint/typecheck/bundles and 77 client
+tests passed after this diagnostic change; real preparation needs to be retried.
+
+The retry reported `[candidate_address]`. This does not identify the address
+family conclusively, but the client previously refused a mixed IPv4/IPv6 offer
+even when valid IPv4 candidates were available. The offer now omits IPv6 candidate
+lines before validation/signaling. Addresses/ports and media negotiation lines
+are not rewritten; no-IPv4, mDNS, malformed or unsupported-transport offers still
+fail closed. The backend exact endpoint allowlist is unchanged. Client tests
+cover filtered SDP and the actual mock signaling offer; real preparation must
+be retried before claiming this resolves the user's failure.
+
+The user has an existing Cloudflare Tunnel route at
+`https://testbench.megarthur.dev`, currently targeting HTTP port 8080. Its root
+returns 404, which is compatible with the backend's missing root route but does
+not verify WSS authentication. The planned HTTP tunnel carries signaling only;
+WebRTC UDP media must use the direct LAN path. Backend TLS with verified tunnel
+origin trust, WSS compatibility and scoped UDP publication remain pending.
+
 ## Current client artifact
 
 The plugin settings now contain a manual test panel. The build adapter stages the
@@ -87,7 +123,8 @@ make the current loopback backend accessible to the other machine.
    or capture correctness on the target host until observed.
 3. The panels show only gathered IP:UDP-port pairs, not full SDP. Configure those
    exact endpoints in the backend allowlist **before** activation. If Chromium
-   produces mDNS/IPv6 candidates, preparation fails visibly. This limitation is
+   produces mDNS candidates or no usable IPv4 candidates, preparation fails visibly;
+   IPv6 candidate lines are omitted from the transmitted offer. This limitation is
    not solved by disabling browser privacy/security settings.
 4. Enter credentials after preparation (Stop/Prepare clears them). Activate the
    publisher; give its returned DASS session ID to the viewer, then activate the

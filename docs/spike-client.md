@@ -18,8 +18,10 @@ and interoperability have not been tested.
 
 Preparation gathers host-only candidates before authenticated join so the exact
 IP:port pairs can be allowlisted without reloading an authenticated session.
-There are no external STUN/TURN servers. mDNS, IPv6 and non-UDP candidates fail
-visibly rather than silently weakening policy. Preparation expires after 60 seconds;
+There are no external STUN/TURN servers. IPv6 candidate lines are omitted from the
+transmitted offer without rewriting any supported address or port. At least one
+literal IPv4 candidate must remain. mDNS, malformed addresses and non-UDP
+candidates still fail visibly rather than weakening policy. Preparation expires after 60 seconds;
 activation has a 15-second connection deadline. `activate` returns the DASS session
 ID after applying the answer, not proof that video/audio has reached the viewer.
 The manual panel shows candidate endpoints and negotiation status without dumping
