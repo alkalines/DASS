@@ -7,6 +7,8 @@
 import type { CaptureLease } from "../../plugins/dass/routing";
 import { SpikeSignaling } from "./signaling";
 
+export const PREPARATION_TIMEOUT_MS = 180_000;
+
 const PREPARATION_MESSAGES = {
     offer_size: "The gathered offer exceeded the spike's 12 KiB limit.",
     candidate_count: "ICE gathering did not provide one to sixteen candidates.",
@@ -96,7 +98,7 @@ export class SpikePeer {
         peer.addEventListener("connectionstatechange", this.onState);
         peer.addEventListener("track", this.onTrack);
         capture?.stream.getTracks().forEach(track => track.addEventListener("ended", this.close, { once: true }));
-        this.timer = setTimeout(this.close, 60_000);
+        this.timer = setTimeout(this.close, PREPARATION_TIMEOUT_MS);
     }
 
     static async prepare(options: { experimental: true; signal: AbortSignal; capture?: CaptureLease; }): Promise<SpikePeer> {

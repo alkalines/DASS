@@ -1,5 +1,5 @@
-import { expect, test } from "bun:test";
-import { gatheredCandidates, ipv4Offer, preparationFailureMessage, SpikePeer } from "../../clients/spike/peer";
+import { expect, spyOn, test } from "bun:test";
+import { gatheredCandidates, ipv4Offer, preparationFailureMessage, PREPARATION_TIMEOUT_MS, SpikePeer } from "../../clients/spike/peer";
 
 test("gathered candidate extraction is bounded and deduplicated", () => {
     const candidate = "a=candidate:1 1 udp 2130706431 192.168.1.2 50000 typ host";
@@ -143,6 +143,27 @@ function capture(audioSelected = false, audioPresent = audioSelected) {
         stream: new Stream(tracks) as unknown as MediaStream, audioSelected, release: () => { releases++; }
     } };
 }
+
+test("preparation has a 180-second deadline and expiry releases capture", async () => withBrowserDoubles(async () => {
+    const schedule = spyOn(globalThis, "setTimeout");
+    const source = capture();
+    let connection: SpikePeer | undefined;
+    try {
+        connection = await SpikePeer.prepare({ experimental: true, signal: new AbortController().signal, capture: source.lease });
+        expect(PREPARATION_TIMEOUT_MS).toBe(180_000);
+        const scheduled = schedule.mock.calls.find(call => call[1] === PREPARATION_TIMEOUT_MS);
+        expect(scheduled).toBeDefined();
+        const callback = scheduled?.[0];
+        if (typeof callback !== "function") throw new Error("Preparation timer not registered");
+        callback();
+        expect(connection.closed.aborted).toBe(true);
+        expect(source.releases).toBe(1);
+        expect(source.tracks[0].stops).toBe(1);
+    } finally {
+        connection?.close();
+        schedule.mockRestore();
+    }
+}));
 
 test("publisher uses only selected tracks and codecs; abort and repeat teardown release once", async () => withBrowserDoubles(async () => {
     const abort = new AbortController();

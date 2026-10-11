@@ -1,0 +1,15 @@
+# Explicit two-client LAN feasibility test only; not a production deployment.
+# Use after compose.signaling.example.yaml. TCP remains loopback-published.
+# Prepare TLS/invites first, then collect FRESH exact client UDP endpoints.
+# Requires shell variables; never commit credentials or use old gathered ports.
+services:
+  backend:
+    environment:
+      DASS_RTC_SPIKE: "true"
+      DASS_RTC_BIND_IP: "0.0.0.0"
+      DASS_RTC_ADVERTISED_IP: "X.X.X.1"
+      DASS_RTC_FIRST_PORT: "50000"
+      DASS_RTC_ALLOWED_PEERS: "${DASS_TEST_ALLOWED_PEERS:?Set fresh exact IPv4 UDP endpoints from both client panels}"
+    ports:
+      - "X.X.X.1:50000:50000/udp"
+      - "X.X.X.1:50001:50001/udp"

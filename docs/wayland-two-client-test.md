@@ -1,5 +1,9 @@
 # CachyOS Wayland two-client test preparation
 
+For the chosen **direct LAN first-stream attempt**, use
+[direct-lan-test.md](direct-lan-test.md). Cloudflare setup is deferred. The
+historical tunnel planning below is not a prerequisite for this direct test.
+
 Discord Alternative ScreenShare (DASS) is targeting two CachyOS/Wayland machines
 on the same LAN. One machine is both a client and the Rust backend host. This is
 a manual interoperability test, not a supported release or a passed step 4.6 gate.
@@ -32,6 +36,13 @@ are not rewritten; no-IPv4, mDNS, malformed or unsupported-transport offers stil
 fail closed. The backend exact endpoint allowlist is unchanged. Client tests
 cover filtered SDP and the actual mock signaling offer; real preparation must
 be retried before claiming this resolves the user's failure.
+
+After filtering IPv6, the user reported successful preparation on both machines,
+with publisher endpoint `X.X.X.1:35578` and viewer endpoint
+`X.X.X.2:55748`. These are diagnostic observations, not persistent
+allowlist entries: prepared peers expire and new peers can select different ports.
+The viewer's empty video player/spinner appeared before credentials or activation;
+it is not evidence of a connection or received media.
 
 The user has an existing Cloudflare Tunnel route at
 `https://testbench.megarthur.dev`, currently targeting HTTP port 8080. Its root
@@ -112,6 +123,37 @@ must be configured separately. Networking instructions will be finalized after
 the address/certificate choice is confirmed; installing the client alone cannot
 make the current loopback backend accessible to the other machine.
 
+`compose.lan-spike.example.yaml` is an opt-in override for the selected backend
+LAN address and UDP ports 50000–50001. Use it **after**
+`compose.signaling.example.yaml`; it retains the base loopback TCP publication
+and runtime hardening. It requires `DASS_TEST_ALLOWED_PEERS` containing fresh
+exact endpoints from both client panels, with no guessed/wildcard destinations.
+The old endpoints recorded above must not be used after peers stop or expire.
+The override has not been run or Compose-validated by the agent (Docker access
+remains unavailable). No firewall, tunnel or networking changes were applied.
+
+Before any activation:
+
+- Supply `.secrets/cert.pem`, `.secrets/key.pem` and `.secrets/invites.json` as
+  described in [control-plane.md](control-plane.md), readable by the non-root
+  backend without making the private key/credentials world-readable.
+- The public Cloudflare edge certificate is distinct from the backend PEM
+  certificate/key. This spike requires TLS on the Rust listener. Configure the
+  existing tunnel to use an HTTPS origin, with verified certificate trust and a
+  matching origin server name; do not enable `noTLSVerify`.
+- Confirm the two UDP ports are free and explicitly scope firewall access to
+  the test clients. Docker publication is not a client source-IP firewall;
+  backend exact peer validation remains required. Router port forwarding is not
+  needed for a reachable same-LAN path.
+- Build/start and smoke-test verified HTTPS/WSS before preparing fresh peers.
+  Then update the exact endpoint allowlist and recreate the test backend within
+  the 180-second preparation window. Do not start authenticated sessions before
+  that recreation, which would disconnect them.
+
+The endpoint-approval/recreation sequence is experimental and not yet proven
+usable within that short deadline. Do not relax candidate restrictions, disable
+TLS or claim a working transport to work around test-harness limitations.
+
 ## Manual panel flow once networking is ready
 
 1. Set the same HTTPS backend origin in DASS settings on both clients. Use separate
@@ -119,14 +161,15 @@ make the current loopback backend accessible to the other machine.
    access to the same DASS room. Do not use Discord tokens or channel IDs as grants.
 2. Prepare the viewer, then prepare publisher capture using the installed host
    picker. Explicitly select share audio there or choose video-only. Preparation
-   holds capture locally and expires after 60 seconds; it does not prove consent
+   holds capture locally and expires after 180 seconds; it does not prove consent
    or capture correctness on the target host until observed.
 3. The panels show only gathered IP:UDP-port pairs, not full SDP. Configure those
    exact endpoints in the backend allowlist **before** activation. If Chromium
    produces mDNS candidates or no usable IPv4 candidates, preparation fails visibly;
    IPv6 candidate lines are omitted from the transmitted offer. This limitation is
    not solved by disabling browser privacy/security settings.
-4. Enter credentials after preparation (Stop/Prepare clears them). Activate the
+4. Enter credentials before or after preparation (Prepare preserves them; Stop
+   and teardown clear them). Activate the
    publisher; give its returned DASS session ID to the viewer, then activate the
    viewer. The ID is not a credential and is not authorization by itself.
 5. An applied answer is not a connected/playback result. Verify the viewer's video
