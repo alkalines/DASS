@@ -47,13 +47,15 @@ The intended interception sequence is:
    without downgrade. `preparePublish` must reject before capture if those
    prerequisites fail. These interface requirements are **not implemented or
    cryptographically tested** by the routing layer.
-4. A future host capture bridge invokes the **currently installed** native
+4. The development-only [host capture bridge](capture-bridge.md) invokes the **currently installed** native
    capture function, retaining the existing picker, source selection, quality
    and consent. It returns a `CaptureLease` containing explicit `audioSelected`
    and an idempotent `release()` for host audio/capture cleanup. It must clean up
    partial capture on rejection and handle cancellation while a picker is open.
    Unselected audio is stopped/removed before publishing as a final safeguard;
-   this does not replace preventing unwanted audio capture in the host bridge.
+    this does not replace preventing unwanted audio capture in the host bridge.
+    The unchanged upstream wrapper has partial-capture cleanup and audio-consent
+    blockers; this prototype is not enabled or accepted for runtime use.
 5. Watching returns a DASS-owned media stream for a future player adapter.
    Detection reads the authenticated DASS room directory, not Discord stream
    events or invented native stream records. Stock Discord shares remain a
@@ -72,7 +74,10 @@ chooser patch. It does not call native capture, instantiate a peer connection,
 change voice, or install watch/detection hooks. A Discord build and private
 factory excerpts are recorded; runtime hook behavior is not validated. The
 required narrow Equibop audio lifecycle
-bridge is still outstanding; pinned upstream capture code remains untouched.
+bridge now has a staged, unit-tested prototype; runtime acceptance remains
+outstanding. Pinned upstream capture code remains untouched. See
+[capture bridge limitations](capture-bridge.md) and the
+[Rust transport gate](transport-gate.md).
 
 The routing tests use fake capture tracks and injected transports. They check
 synchronous consumption, refusal before capture, explicit audio, cancellation,
