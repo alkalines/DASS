@@ -10,15 +10,22 @@ enabled loopback HTTP, and bounds discovery to 5 seconds and 16 KiB. Only the
 version-1 scaffold contract is accepted. Discovery is not authentication or an
 authorization to capture. There is no production transport or E2EE to configure.
 
-Native Discord sharing is **unchanged**: choosing it still shares through Discord.
-DASS has no capture button or native replacement toggle, and sends no frames or
-thumbnails. Stock Discord cannot receive future DASS media.
+On Discord stable build **634304**, the center voice tray and left Voice Connected
+panel share buttons now declare an explicit Discord/DASS chooser before their
+native start callbacks. The center chooser/refusal is user-observed; the new left
+panel patch is not yet runtime-verified. DASS only
+shows “DASS transport unavailable.”; choosing Discord still shares through
+Discord. Other share entry points remain native and unmodified. Complete
+runtime coverage, voice independence and absence of native media/thumbnail leakage
+are **not yet verified**. Stock Discord cannot receive future DASS media.
 
 ## Publish, watch and detection boundary
 
 The initial routing implementation is in `plugins/dass/routing.ts`, with the
 action boundary isolated in `plugins/dass/discordAdapter.ts`. These are tested
-contracts, **not installed Discord hooks or a working server connection**. The
+contracts, **not a working server connection**. Narrow center-tray and
+Voice Connected panel UI patches are declared separately; see
+[discord-hooks.md](discord-hooks.md). The
 plugin intentionally supplies no transport, so all DASS operations are refused
 before capture. The capability checker does not enable media.
 
@@ -60,10 +67,11 @@ provider can leave its awaiting promise pending. Directory results are bounded
 to 64 entries and checked against the current DASS room. This is an in-process
 contract, not a new wire protocol or a complete untrusted-response parser.
 
-The plugin exposes the boundary methods for future verified patches, but does
-not yet call native capture, instantiate a peer connection, change voice, or
-install publish/watch/detection hooks. No Discord build has been recorded to
-validate those private call sites. The required narrow Equibop audio lifecycle
+The plugin exposes boundary methods and declares a build-scoped share-start
+chooser patch. It does not call native capture, instantiate a peer connection,
+change voice, or install watch/detection hooks. A Discord build and private
+factory excerpts are recorded; runtime hook behavior is not validated. The
+required narrow Equibop audio lifecycle
 bridge is still outstanding; pinned upstream capture code remains untouched.
 
 The routing tests use fake capture tracks and injected transports. They check
@@ -72,20 +80,22 @@ late-result disposal, room isolation and publish/watch cleanup. They do not
 prove native interception, live directory detection, server authorization,
 E2EE, OS capture compatibility or absence of runtime Discord media leakage.
 
-Validation for this routing slice: `bun test ./tests/plugin` passes with Bun
-1.4.3. Standalone strict TypeScript checking of `routing.ts` and
-`discordAdapter.ts` passes using the existing build checkout's compiler. The
-full build adapter refuses Bun 1.4.3 because it is pinned to validated Bun 1.4.2;
-the version guard was not changed. Host-facing lint/typecheck and updated bundles
-remain unvalidated for this slice. The verified builds below describe the
-previous discovery-only snapshot, not these routing changes.
+Validation for the current routing and chooser slice: `bun test ./tests/plugin`
+passes with Bun 1.4.3 (38 tests, 128 assertions). `bun scripts/build-plugin.mjs`
+passes DASS lint, full Equicord typecheck and desktop/Equibop bundle builds.
+The existing adapter's Bun-version guard was already commented out; this work
+does not change it. GUI hook matching and voice/media behavior remain unverified.
+The historical build details below describe the earlier discovery-only snapshot.
 
 ## Verified builds and remaining limitations
 
 - Equicord: `e0e85c8d4f6dc73aac9368cf3f4b2200eac4d4b4` (1.15.11.0), built
   with DASS in `build/Equicord` using local Bun 1.4.2 and Node 24.18.0 on Linux.
 - Equibop: submodule `27219be3566589280c0c933b04753805381d3bc8` (3.3.1).
-- Discord build: not tested or recorded; runtime compatibility is unverified.
+- Discord build: user-reported stable `634304`, version hash
+  `17e01cf978c3c10a5688429a38db59a4926e8982`. Candidate factory matches are
+  recorded in [discord-hooks.md](discord-hooks.md); runtime compatibility and
+  native interception remain unverified.
 - All 13 plugin tests passed (41 assertions). DASS lint, full Equicord typecheck,
   and desktop/Equibop-target bundle builds passed. Both renderers were checked
   for DASS inclusion. Equibop host builds and GUI/plugin loading were not verified
@@ -231,9 +241,12 @@ local scaffold publicly to make discovery work.
 
 ## Next integration gate
 
-Private Discord hooks must live in a guarded adapter, with tested interception
-**before** native stream creation. No hook is installed by this scaffold. Source
-inspection alone cannot establish a safe hook against a live Discord build.
+Private Discord hooks live in a guarded adapter, with interception **before**
+the native share-start callbacks at the identified center-tray and Voice Connected
+panel buttons. Both build-634304 patches are built; the center chooser/refusal is
+user-observed, while the left-panel patch still needs runtime verification. Follow the
+acceptance procedure in [discord-hooks.md](discord-hooks.md); source inspection
+and unit tests alone cannot establish safety against a live Discord build.
 
 Reuse Equibop's installed capture function and its existing picker/consent. The
 pinned Linux wrapper attaches venmic audio when its virtual device exists, and
