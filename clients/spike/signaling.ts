@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
-import { type ClientOperation, LOGIN_DEADLINE_MS, MAX_MESSAGE_BYTES, PROTOCOL_VERSION, type ServerOperation } from "../../crates/protocol/generated/signaling";
+import { type ClientOperation, type CloseReason, type ErrorCode, LOGIN_DEADLINE_MS, MAX_MESSAGE_BYTES, PROTOCOL_VERSION, type ServerOperation } from "../../crates/protocol/generated/signaling";
 import { parseClientMessage, parseServerMessage } from "../../crates/protocol/generated/validate";
 
 export interface BrowserSocket extends EventTarget {
@@ -32,9 +32,17 @@ type Pending<T> = {
     timer: ReturnType<typeof setTimeout>;
 };
 
+type SignalingFailureCode = "closed" | "socket" | "protocol" | "timeout" | "expired" | "cancelled" | "overloaded"
+    | `rejected:${ErrorCode}` | `server:${CloseReason}`;
+
+export class SpikeSignalingError extends Error {
+    constructor(readonly code: SignalingFailureCode) { super(`DASS signaling failed [${code}].`); }
+}
+
 /** Experimental control transport, staged into the plugin's manual test panel. */
 export class SpikeSignaling {
     private active = true;
+    private failureCode: SignalingFailureCode = "closed";
     private sequence = 0;
     private openWait?: Pending<void>;
     private pending?: Pending<ServerOperation> & { requestId: string; expectedType: ServerOperation["type"]; };
@@ -72,33 +80,33 @@ export class SpikeSignaling {
             const expiryMs = authenticated.expires_at_unix_seconds * 1000 - Date.now();
             if (expiryMs <= 0) throw new Error("DASS credential has expired.");
             // The backend also enforces expiry and the ten-minute connection ceiling.
-            connection.expiryTimer = setTimeout(() => connection.close(), Math.min(expiryMs, 600_000));
+            connection.expiryTimer = setTimeout(() => connection.close("expired"), Math.min(expiryMs, 600_000));
             return connection;
-        } catch {
+        } catch (error) {
             connection.close();
-            throw new Error("DASS connection failed or was cancelled.");
+            throw error instanceof SpikeSignalingError ? error : new SpikeSignalingError(connection.failureCode);
         }
     }
 
     private waitForOpen(): Promise<void> {
         return new Promise((resolve, reject) => {
-            this.openWait = { resolve, reject, timer: setTimeout(() => this.close(), LOGIN_DEADLINE_MS) };
+            this.openWait = { resolve, reject, timer: setTimeout(() => this.close("timeout"), LOGIN_DEADLINE_MS) };
             if (!this.active || this.signal.aborted) this.close();
             else if (this.socket.readyState === 1) this.onOpen();
         });
     }
 
     private readonly onOpen = () => {
-        if (this.socket.protocol !== "dass.v1" || this.socket.readyState !== 1) return this.close();
+        if (this.socket.protocol !== "dass.v1" || this.socket.readyState !== 1) return this.close("protocol");
         const wait = this.openWait;
         this.openWait = undefined;
         if (wait) { clearTimeout(wait.timer); wait.resolve(); }
     };
 
-    private readonly onFailure = () => this.close();
+    private readonly onFailure = () => this.close(this.signal.aborted ? "cancelled" : "socket");
 
     private readonly onMessage = (event: Event) => {
-        if (!(event instanceof MessageEvent) || typeof event.data !== "string") return this.close();
+        if (!(event instanceof MessageEvent) || typeof event.data !== "string") return this.close("protocol");
         try {
             const message = parseServerMessage(event.data);
             const { pending } = this;
@@ -108,14 +116,16 @@ export class SpikeSignaling {
                     clearTimeout(pending.timer);
                     pending.resolve(message.operation);
                 }
-                return this.close();
+                return this.close(`server:${message.operation.reason}`);
             }
-            if (!pending || pending.requestId !== message.request_id || message.operation.type !== pending.expectedType) return this.close();
+            if (!pending || pending.requestId !== message.request_id) return this.close("protocol");
+            if (message.operation.type === "rejected") return this.close(`rejected:${message.operation.code}`);
+            if (message.operation.type !== pending.expectedType) return this.close("protocol");
             this.pending = undefined;
             clearTimeout(pending.timer);
             pending.resolve(message.operation);
         } catch {
-            this.close();
+            this.close("protocol");
         }
     };
 
@@ -127,18 +137,19 @@ export class SpikeSignaling {
         const message = JSON.stringify({ protocol_version: PROTOCOL_VERSION, request_id: requestId, operation });
         try { parseClientMessage(message); } catch { return Promise.reject(new Error("Invalid DASS request.")); }
         if (this.socket.bufferedAmount + new TextEncoder().encode(message).byteLength > MAX_MESSAGE_BYTES * 2) {
-            this.close();
+            this.close("overloaded");
             return Promise.reject(new Error("DASS connection is overloaded."));
         }
         return new Promise((resolve, reject) => {
-            this.pending = { requestId, expectedType, resolve, reject, timer: setTimeout(() => this.close(), LOGIN_DEADLINE_MS) };
-            try { this.socket.send(message); } catch { this.close(); }
+            this.pending = { requestId, expectedType, resolve, reject, timer: setTimeout(() => this.close("timeout"), LOGIN_DEADLINE_MS) };
+            try { this.socket.send(message); } catch { this.close("socket"); }
         });
     }
 
-    close() {
+    close(code: SignalingFailureCode = "closed") {
         // Pending waits are rejected even if cancellation preceded wait registration.
-        const error = new Error("DASS connection was closed or rejected.");
+        if (this.active) this.failureCode = code;
+        const error = new SpikeSignalingError(this.failureCode);
         if (this.openWait) { clearTimeout(this.openWait.timer); this.openWait.reject(error); this.openWait = undefined; }
         if (this.pending) { clearTimeout(this.pending.timer); this.pending.reject(error); this.pending = undefined; }
         if (!this.active) return;
@@ -149,6 +160,6 @@ export class SpikeSignaling {
         this.socket.removeEventListener("error", this.onFailure);
         this.socket.removeEventListener("close", this.onFailure);
         this.signal.removeEventListener("abort", this.onFailure);
-        try { this.socket.close(1000, "DASS session ended"); } finally { this.closedController.abort(); }
+        try { this.socket.close(1000, "DASS session ended"); } finally { this.closedController.abort(error); }
     }
 }

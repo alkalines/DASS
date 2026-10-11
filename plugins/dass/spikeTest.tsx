@@ -6,6 +6,7 @@
 
 import { Button } from "@components/Button";
 import { Paragraph } from "@components/Paragraph";
+import { copyToClipboard } from "@utils/clipboard";
 import { TextInput, useCallback, useEffect, useRef, useState } from "@webpack/common";
 
 import { createEquibopCapture, type EquibopCaptureBridge } from "./capture";
@@ -82,7 +83,11 @@ export function SpikeTestPanel({ backendUrl, isActive }: { backendUrl: string; i
             current.peer = await SpikePeer.prepare({ experimental: true, signal: current.abort.signal, capture });
             if (resource.current !== current) { current.peer.close(); return; }
             current.peer.closed.addEventListener("abort", () => {
-                if (resource.current === current) stop();
+                if (resource.current === current) {
+                    const message = current.peer?.closeMessage;
+                    stop();
+                    if (message) setStatus(message);
+                }
             }, { once: true });
             setEndpoints(current.peer.candidates.map(candidate => {
                 const fields = candidate.split(/\s+/);
@@ -145,7 +150,13 @@ export function SpikeTestPanel({ backendUrl, isActive }: { backendUrl: string; i
         {activationBlockers.length > 0 && <Paragraph>To activate: {activationBlockers.join("; ")}.</Paragraph>}
         <Button onClick={() => { stopSpikeTest(); stop(); }}>Stop test</Button>
         <Paragraph role="status" aria-live="polite">{status}</Paragraph>
-        {sessionId && <Paragraph>DASS session ID: {sessionId}</Paragraph>}
+        {sessionId && <div>
+            <Paragraph>DASS session ID (not a credential):</Paragraph>
+            <TextInput value={sessionId} readOnly aria-label="DASS session ID" />
+            <Button onClick={() => void copyToClipboard(sessionId).catch(() => {
+                if (mounted.current) setStatus("Clipboard copy failed. Select the session ID text and copy it manually.");
+            })}>Copy session ID</Button>
+        </div>}
         {viewerStream && <video ref={video} controls autoPlay playsInline aria-label="DASS experimental viewer" />}
     </div>;
 }

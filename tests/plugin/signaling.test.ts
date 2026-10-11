@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { BrowserSocket, signalingUrl, SpikeSignaling } from "../../clients/spike/signaling";
+import { BrowserSocket, signalingUrl, SpikeSignaling, SpikeSignalingError } from "../../clients/spike/signaling";
 
 class Socket extends EventTarget implements BrowserSocket {
     protocol = "dass.v1";
@@ -42,7 +42,7 @@ test("login, validated response correlation, busy admission and abort cleanup", 
     expect(await joined).toEqual({ type: "joined", session_id: "session" });
     const publish = connection.request({ type: "publish", session_id: "session" }, "accepted");
     abort.abort();
-    await expect(publish).rejects.toThrow("closed");
+    await expect(publish).rejects.toThrow("cancelled");
     expect(connection.closed.aborted).toBe(true);
     connection.close();
     expect(socket.closeCount).toBe(1);
@@ -56,9 +56,22 @@ test("unexpected IDs, malformed messages and server closure fail closed", async 
         if (kind === "id") socket.reply({ type: "joined", session_id: "session" }, "wrong_request");
         else if (kind === "closed") socket.reply({ type: "closed", session_id: "session", reason: "revoked" }, "server_close");
         else socket.dispatchEvent(new MessageEvent("message", { data: "{" }));
-        await expect(pending).rejects.toThrow("closed");
+        await expect(pending).rejects.toThrow(kind === "closed" ? "server:revoked" : "protocol");
         expect(connection.closed.aborted).toBe(true);
     }
+});
+
+test("validated backend rejection survives socket cleanup without exposing request data", async () => {
+    const socket = new Socket();
+    const connection = await connect(socket);
+    const pending = connection.request({ type: "subscribe", session_id: "session", publisher_id: "private_source" }, "accepted");
+    socket.reply({ type: "rejected", code: "invalid_state" });
+    await expect(pending).rejects.toThrow("rejected:invalid_state");
+    expect(connection.closed.reason).toBeInstanceOf(SpikeSignalingError);
+    expect(connection.closed.reason.code).toBe("rejected:invalid_state");
+    expect(connection.closed.reason.message).not.toContain("private_source");
+    connection.close();
+    expect(connection.closed.reason.code).toBe("rejected:invalid_state");
 });
 
 test("aborted connect never opens a socket", async () => {

@@ -16,6 +16,25 @@ the capabilities fetch in both actual Equibop renderers after HTTPS startup.
 This is user-reported HTTPS/TLS/CORS/reachability evidence; authenticated WSS,
 UDP DTLS-SRTP and network media playback remain to be verified.
 
+In a subsequent attempt, the publisher returned a DASS session ID and the viewer
+player disappeared after activation. The user transferred the ID using OCR.
+No playback was reported, and the cause is not established. An ID returned after
+answer application is not evidence of a connected publisher. The client now
+provides a selectable ID and Copy button, and retains fixed stage/rejection/close
+diagnostics when automatic teardown removes the player. All 81 client tests,
+plugin lint, full typecheck and both bundles passed after this change; the retry
+and actual UI/clipboard behavior remain unverified.
+
+The user subsequently reported that the two-client stream works. This is the
+first user-reported successful real-client media result for the selected
+CachyOS/Wayland LAN topology, not an agent-observed recording or a completed
+transport gate. The attempt followed the video-only test instructions; selected
+audio, exact running revisions/negotiated codecs, Discord voice during network
+sharing, network-session teardown, absence of Discord media/preview leakage and
+adversarial/reconnection checks still need explicit evidence. Readiness and
+advertised media capabilities remain unchanged. Production SFU work remains gated
+on completing and recording the required real-client acceptance checks.
+
 ## 1. Prepare private test material
 
 From the DASS root in the user's root Docker shell (not the desktop/client shell):
@@ -137,6 +156,13 @@ prepared peer, room, credential and (for the viewer) publisher session ID.
 The exact-endpoint backend recreation must fit the 180-second peer preparation
 deadline. Do not activate authenticated sessions before that recreation. The
 viewer needs the publisher's returned DASS session ID, not its credential.
+Use the Copy session ID button or selectable read-only field, not OCR. Keep the
+publisher's settings panel open: closing/unmounting it stops the test. A publisher
+without a connected UDP peer can expire at the separate 15-second activation
+deadline, regardless of the 180-second preparation window. Check its status
+before activating the viewer. The viewer must target a currently active publisher
+in the same DASS room; `subscribe:rejected:invalid_state` can indicate a wrong ID
+or an absent/ended publisher and is not proof of an OCR mistake.
 An applied answer/player spinner is not proof of media or playback. Runtime
 capture and cleanup evidence so far is limited to video-only local capture;
 selected audio, real media, voice independence during network sharing and

@@ -5,7 +5,7 @@
  */
 
 import type { CaptureLease } from "../../plugins/dass/routing";
-import { SpikeSignaling } from "./signaling";
+import { SpikeSignaling, SpikeSignalingError } from "./signaling";
 
 export const PREPARATION_TIMEOUT_MS = 180_000;
 
@@ -83,6 +83,8 @@ export class SpikePeer {
     private signaling?: SpikeSignaling;
     private active = true;
     private activated = false;
+    private activationStage = "signaling";
+    private closeDiagnostic?: string;
     private offer?: string;
     private timer?: ReturnType<typeof setTimeout>;
     private gatheringFailure?: () => void;
@@ -98,7 +100,7 @@ export class SpikePeer {
         peer.addEventListener("connectionstatechange", this.onState);
         peer.addEventListener("track", this.onTrack);
         capture?.stream.getTracks().forEach(track => track.addEventListener("ended", this.close, { once: true }));
-        this.timer = setTimeout(this.close, PREPARATION_TIMEOUT_MS);
+        this.timer = setTimeout(() => this.closeWithDiagnostic("Preparation expired after 180 seconds. Prepare fresh candidates."), PREPARATION_TIMEOUT_MS);
     }
 
     static async prepare(options: { experimental: true; signal: AbortSignal; capture?: CaptureLease; }): Promise<SpikePeer> {
@@ -185,39 +187,60 @@ export class SpikePeer {
         }
         this.activated = true;
         clearTimeout(this.timer);
-        this.timer = setTimeout(this.close, 15_000);
+        this.timer = setTimeout(() => this.closeWithDiagnostic(`Activation failed [${this.activationStage}:timeout]. Check UDP reachability if the answer was applied.`), 15_000);
         try {
             this.signaling = await SpikeSignaling.connect({ experimental: true, backendUrl: options.backendUrl,
                 credential: options.credential, signal: this.closed });
             this.checkActive();
-            this.signaling.closed.addEventListener("abort", this.close, { once: true });
+            this.signaling.closed.addEventListener("abort", this.onSignalingClosed, { once: true });
             if (this.signaling.closed.aborted) throw new Error("DASS signaling closed.");
+            this.activationStage = "join";
             const joined = await this.signaling.request({ type: "join", room_id: options.roomId, require_e2ee: false }, "joined");
             this.checkActive();
             if (joined.type !== "joined") throw new Error("DASS join failed.");
+            this.activationStage = options.publisherId ? "subscribe" : "publish";
             const accepted = await this.signaling.request(options.publisherId
                 ? { type: "subscribe", session_id: joined.session_id, publisher_id: options.publisherId }
                 : { type: "publish", session_id: joined.session_id }, "accepted");
             this.checkActive();
             if (accepted.type !== "accepted" || accepted.session_id !== joined.session_id) throw new Error("DASS role does not match the session.");
+            this.activationStage = "offer";
             const answer = await this.signaling.request({ type: "offer", session_id: joined.session_id, sdp: this.offer }, "answer");
             this.checkActive();
             if (answer.type !== "answer" || answer.session_id !== joined.session_id) throw new Error("DASS answer does not match the session.");
+            this.activationStage = "answer";
             await this.peer.setRemoteDescription({ type: "answer", sdp: answer.sdp });
             this.checkActive();
+            this.activationStage = "connection";
             this.onState();
             return joined.session_id;
-        } catch {
-            this.close();
+        } catch (error) {
+            this.closeWithDiagnostic(this.activationFailure(error));
             throw new Error("DASS media setup failed or was cancelled. No Discord fallback.");
         }
     }
 
     private checkActive() { if (!this.active || this.signal.aborted) throw new Error("DASS peer is closed."); }
 
+    get closeMessage(): string { return this.closeDiagnostic ?? "Test stopped. Capture and connection resources were released."; }
+
+    private activationFailure(error: unknown): string {
+        const code = error instanceof SpikeSignalingError ? `:${error.code}` : "";
+        return `Activation failed [${this.activationStage}${code}]. No Discord fallback.`;
+    }
+
+    private closeWithDiagnostic(message: string) {
+        if (this.active) this.closeDiagnostic = message;
+        this.close();
+    }
+
+    private readonly onSignalingClosed = () => this.closeWithDiagnostic(this.activationFailure(this.signaling?.closed.reason));
+
     private readonly onState = () => {
         if (this.peer.connectionState === "connected") clearTimeout(this.timer);
-        else if (["failed", "closed", "disconnected"].includes(this.peer.connectionState)) this.close();
+        else if (["failed", "closed", "disconnected"].includes(this.peer.connectionState)) {
+            this.closeWithDiagnostic(`Media stopped [connection:${this.peer.connectionState}]. Check the UDP path and peer lifecycle.`);
+        }
     };
 
     private readonly onTrack = (event: RTCTrackEvent) => {
@@ -235,7 +258,7 @@ export class SpikePeer {
         this.signal.removeEventListener("abort", this.close);
         this.peer.removeEventListener("connectionstatechange", this.onState);
         this.peer.removeEventListener("track", this.onTrack);
-        this.signaling?.closed.removeEventListener("abort", this.close);
+        this.signaling?.closed.removeEventListener("abort", this.onSignalingClosed);
         this.stopController.abort();
         this.signaling?.close();
         this.peer.close();

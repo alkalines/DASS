@@ -88,6 +88,7 @@ class Peer extends EventTarget {
 class Socket extends EventTarget {
     static instances: Socket[] = [];
     static failOffer = false;
+    static rejectSubscribe = false;
     protocol = "dass.v1";
     readyState = 1;
     bufferedAmount = 0;
@@ -101,7 +102,9 @@ class Socket extends EventTarget {
         switch (request.operation.type) {
             case "login": operation = { type: "authenticated", expires_at_unix_seconds: Math.floor(Date.now() / 1000) + 60 }; break;
             case "join": operation = { type: "joined", session_id: "session" }; break;
-            case "publish": case "subscribe": operation = { type: "accepted", session_id: "session" }; break;
+            case "publish": operation = { type: "accepted", session_id: "session" }; break;
+            case "subscribe": operation = Socket.rejectSubscribe ? { type: "rejected", code: "invalid_state" }
+                : { type: "accepted", session_id: "session" }; break;
             case "offer": operation = Socket.failOffer
                 ? { type: "closed", session_id: "session", reason: "transport_failed" }
                 : { type: "answer", session_id: "session", sdp: "v=0\r\n" }; break;
@@ -127,6 +130,7 @@ async function withBrowserDoubles(run: () => Promise<void>) {
     Peer.offer = undefined;
     Socket.instances = [];
     Socket.failOffer = false;
+    Socket.rejectSubscribe = false;
     for (const [name, value] of Object.entries(doubles)) Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
     try { await run(); } finally {
         for (const [name, descriptor] of originals) {
@@ -157,6 +161,7 @@ test("preparation has a 180-second deadline and expiry releases capture", async 
         if (typeof callback !== "function") throw new Error("Preparation timer not registered");
         callback();
         expect(connection.closed.aborted).toBe(true);
+        expect(connection.closeMessage).toContain("Preparation expired");
         expect(source.releases).toBe(1);
         expect(source.tracks[0].stops).toBe(1);
     } finally {
@@ -258,6 +263,7 @@ test("publisher activation correlates WSS operations; signaling loss stops captu
         await expect(connection.activate({ backendUrl: "https://dass.example", credential: "test", roomId: "room" })).rejects.toThrow("once");
         socket.dispatchEvent(new Event("close"));
         expect(connection.closed.aborted).toBe(true);
+        expect(connection.closeMessage).toContain("connection:socket");
         expect(source.releases).toBe(1);
         expect(source.tracks[0].stops).toBe(1);
         expect(socket.closes).toBe(1);
@@ -271,8 +277,23 @@ test("viewer binds to the selected publisher and setup rejection tears down", as
         await expect(connection.activate({ backendUrl: "https://dass.example", credential: "separate-dass-test", roomId: "room", publisherId: "publisher" })).rejects.toThrow("failed");
         expect(Socket.instances[0].operations[2]).toEqual({ type: "subscribe", session_id: "session", publisher_id: "publisher" });
         expect(connection.closed.aborted).toBe(true);
+        expect(connection.closeMessage).toContain("offer:server:transport_failed");
         expect(Peer.instances[0].closes).toBe(1);
         expect(Socket.instances[0].closes).toBe(1);
+    } finally { connection.close(); }
+}));
+
+test("subscribe rejection is observable at closure before the activation catch runs", async () => withBrowserDoubles(async () => {
+    const connection = await SpikePeer.prepare({ experimental: true, signal: new AbortController().signal });
+    let statusAtClosure = "";
+    connection.closed.addEventListener("abort", () => { statusAtClosure = connection.closeMessage; }, { once: true });
+    try {
+        Socket.rejectSubscribe = true;
+        await expect(connection.activate({ backendUrl: "https://dass.example", credential: "separate-dass-test", roomId: "room", publisherId: "ocr_wrong" })).rejects.toThrow();
+        expect(statusAtClosure).toContain("subscribe:rejected:invalid_state");
+        expect(connection.closeMessage).toBe(statusAtClosure);
+        expect(statusAtClosure).not.toContain("ocr_wrong");
+        expect(statusAtClosure).not.toContain("separate-dass-test");
     } finally { connection.close(); }
 }));
 
