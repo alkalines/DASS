@@ -8,10 +8,24 @@ publish.workspace = true
 [dependencies]
 dass-protocol = { path = "../protocol" }
 axum.workspace = true
+argon2.workspace = true
+getrandom.workspace = true
+rustls.workspace = true
+aws-lc-rs.workspace = true
+str0m.workspace = true
+str0m-aws-lc-rs.workspace = true
+# Constrain the provider's DTLS implementation to the reviewed release.
+dimpl.workspace = true
+rustls-pki-types.workspace = true
+tokio-rustls.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 tokio.workspace = true
 tower.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
 [dev-dependencies]
-serde_json.workspace = true
+rcgen = { version = "=0.14.10", default-features = false, features = ["aws_lc_rs"] }
+tokio-tungstenite = { version = "=0.29.0", default-features = false, features = ["connect", "handshake"] }
+futures-util = { version = "=0.3.34", default-features = false, features = ["std", "sink"] }

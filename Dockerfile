@@ -1,6 +1,7 @@
 # All Rust compilation, formatting and tests run in this stage, never on the host.
 FROM rust:1.90.0-bookworm AS tooling
 RUN rustup component add rustfmt clippy
+RUN apt-get update && apt-get install -y --no-install-recommends cmake && apt-get clean
 ENV CARGO_HOME=/opt/cargo
 WORKDIR /workspace
 RUN mkdir -p /opt/cargo /workspace/target && chmod 1777 /opt/cargo /workspace/target

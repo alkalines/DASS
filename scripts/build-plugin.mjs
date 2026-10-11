@@ -73,13 +73,32 @@ try {
     const stagedDirectory = join(checkoutDirectory, "src/userplugins/dass");
     const markerPath = join(checkoutDirectory, ".dass-staged.json");
     const previousHashes = existsSync(markerPath) ? JSON.parse(readFileSync(markerPath, "utf8")) : {};
-    const sourceFiles = readdirSync(sourceDirectory);
+    const sources = new Map(readdirSync(sourceDirectory).map(name => [name, readFileSync(join(sourceDirectory, name), "utf8")
+        .replaceAll('"../../clients/spike/peer"', '"./spikePeer"')]));
+    const clientSources = [
+        ["spikePeer.ts", "clients/spike/peer.ts", [['"../../plugins/dass/routing"', '"./routing"'], ['"./signaling"', '"./spikeSignaling"']]],
+        ["spikeSignaling.ts", "clients/spike/signaling.ts", [['"../../crates/protocol/generated/signaling"', '"./protocolSignaling"'], ['"../../crates/protocol/generated/validate"', '"./protocolValidate"']]],
+        ["protocolSignaling.ts", "crates/protocol/generated/signaling.ts", []],
+        ["protocolValidate.ts", "crates/protocol/generated/validate.ts", [['"./signaling"', '"./protocolSignaling"']]]
+    ];
+    for (const [name, path, replacements] of clientSources) {
+        let contents = readFileSync(join(rootDirectory, path), "utf8");
+        for (const [from, to] of replacements) {
+            if (!contents.includes(from)) throw new Error(`Client staging import did not match in ${path}.`);
+            contents = contents.replaceAll(from, to);
+        }
+        if (name.startsWith("protocol")) {
+            contents = "/*\n * Vencord, a Discord client mod\n * Copyright (c) 2026 Vendicated and contributors\n * SPDX-License-Identifier: GPL-3.0-or-later\n */\n\n" + contents;
+            contents = contents.replace("MAX_MESSAGE_BYTES, PROTOCOL_VERSION, type ClientMessage, type ServerMessage", "type ClientMessage, MAX_MESSAGE_BYTES, PROTOCOL_VERSION, type ServerMessage");
+        }
+        sources.set(name, contents);
+    }
+    const sourceFiles = [...sources.keys()];
     const currentHashes = {};
     if (existsSync(stagedDirectory)) {
         for (const name of readdirSync(stagedDirectory)) {
             const stagedContents = readFileSync(join(stagedDirectory, name));
-            const sourcePath = join(sourceDirectory, name);
-            if (!sourceFiles.includes(name) || (!stagedContents.equals(readFileSync(sourcePath)) && digest(stagedContents) !== previousHashes[name])) {
+            if (!sourceFiles.includes(name) || (stagedContents.toString("utf8") !== sources.get(name) && digest(stagedContents) !== previousHashes[name])) {
                 throw new Error(`Staged plugin ${name} has unfamiliar changes; edit plugins/dass instead. Nothing was overwritten.`);
             }
         }
@@ -89,7 +108,7 @@ try {
     writeFileSync(lockPath, lockContents);
     mkdirSync(stagedDirectory, { recursive: true });
     for (const name of sourceFiles) {
-        const contents = readFileSync(join(sourceDirectory, name));
+        const contents = sources.get(name);
         writeFileSync(join(stagedDirectory, name), contents);
         currentHashes[name] = digest(contents);
     }

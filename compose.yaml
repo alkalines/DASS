@@ -7,7 +7,8 @@ services:
     user: "${LOCAL_UID:-1000}:${LOCAL_GID:-1000}"
     working_dir: /workspace
     environment:
-      CARGO_HOME: /opt/cargo
+      CARGO_HOME: "/opt/cargo/uid-${LOCAL_UID:-1000}"
+      CARGO_TARGET_DIR: "/workspace/target/uid-${LOCAL_UID:-1000}"
     volumes:
       - .:/workspace
       - cargo-cache:/opt/cargo
@@ -24,7 +25,7 @@ services:
       DASS_MAX_CONCURRENT_REQUESTS: "128"
       DASS_MAX_CONTROL_MESSAGE_BYTES: "16384"
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"
     read_only: true
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]

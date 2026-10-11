@@ -1,8 +1,11 @@
 # DASS backend: Docker-only development
 
 Discord Alternative ScreenShare (DASS) uses one Rust backend executable. This
-first increment contains an Axum HTTP scaffold and a separate Rust discovery
-contract, not a functioning SFU. All Rust tooling runs inside Docker.
+backend contains an Axum HTTP scaffold and a separate Rust protocol crate, not a
+functioning SFU. All Rust tooling runs inside Docker. Signaling types and
+structural parsers are documented in [protocol.md](protocol.md). An optional
+invite-backed HTTPS/WSS control plane now passes user-run Docker validation; see
+[control-plane.md](control-plane.md). WebRTC/media transport is still absent.
 
 ## Prerequisites
 
@@ -61,10 +64,52 @@ The `tooling` service bind-mounts source and uses named volumes for Cargo's cach
 and build artifacts. It runs as the configured UID/GID. Run tooling commands
 sequentially: parallel Cargo/formatting jobs against the same source are unnecessary.
 
+Cargo caches and build artifacts now use UID-specific subdirectories in those
+volumes, so earlier root-run tooling does not require changing ownership of shared
+registry/build files. If you prefer a root shell for Docker, enter it explicitly
+and set Compose ownership variables **inside that shell**:
+
+```sh
+sudo su
+export LOCAL_UID="$(id -u)"
+export LOCAL_GID="$(id -g)"
+docker compose run --rm tooling cargo test --workspace --locked
+```
+
+In this example tooling also runs as root and uses the `uid-0` cache/target
+directories. Newly generated bind-mounted files may be root-owned. The runtime
+image still runs as UID 10001; root tooling does not change that. No Docker
+socket permissions or host groups need changing. Run the intentional dependency
+update in [control-plane.md](control-plane.md) first when its new manifest pins
+are not yet represented in `Cargo.lock`.
+
+The subsequent receive-only RTC spike introduces new manifest pins; its Docker
+lockfile update, formatting, Clippy and all 37 Rust tests passed in the user's
+Docker run. Locked builds, formatting check and provider-feature review then passed,
+including non-root runtime image `c768ed04d118`. A subsequently added combined
+WSS-to-DTLS/revocation test also passed with Docker formatting, Clippy and all
+38 Rust tests. See [rtc-spike.md](rtc-spike.md).
+
+The later one-publisher/one-viewer feasibility forwarding code and its new tests
+passed user-run Docker formatting, Clippy and all 41 Rust tests. The user then
+confirmed its locked workspace/backend image builds completed, without supplying
+a new image ID or separate formatting-check output. Prior
+receive-only image evidence does not validate this increment's runtime image;
+see [forwarding-spike.md](forwarding-spike.md).
+
 Tests cover development opt-in, configuration bounds, capability truthfulness,
 liveness versus readiness, absent session APIs, HTTP method rejection, oversized
 bodies, handler saturation and request timeout. They do not validate capture,
 authentication, WebRTC, SFU forwarding or E2EE.
+
+The later protocol-foundation validation supplied by the user passed formatting,
+Clippy with warnings denied, 17 Rust tests (13 backend, four protocol), locked
+debug/release builds, and the runtime image build. TypeScript generation freshness,
+61 client tests and `git diff --check` also passed. This evidence predates the
+new authentication/TLS/WSS increment. The user subsequently validated that
+increment too: Clippy, all 33 Rust tests, locked debug/release builds and runtime
+image build passed after enabling Axum's `original-uri` feature. See
+[control-plane.md](control-plane.md) for network-test evidence and untested behavior.
 
 ## Run locally
 
@@ -93,8 +138,8 @@ Expected behavior, **not yet verified at runtime**:
 | --- | --- |
 | `GET /health/live` | 204: process responds |
 | `GET /health/ready` | 503: signaling and media are not implemented |
-| `GET /v1/capabilities` | 200: protocol v1, stage `scaffold`, all service/security capabilities unavailable |
-| Room, publish, subscribe and WebSocket paths | 404: no unauthenticated session APIs |
+| `GET /v1/capabilities` | 200: protocol v1, stage `scaffold`, all media/security capabilities unavailable in default local Compose |
+| Room, publish, subscribe and WebSocket paths | 404 in default local Compose; optional invite configuration adds `/v1/ws` only |
 
 Readiness intentionally stays false; do not configure it as a liveness probe.
 The capability document advertises no SDP/ICE or media endpoint. Logs contain
@@ -109,8 +154,10 @@ origin and `Vary: Origin`, without a wildcard or credential permission. Other
 origins, routes and write/preflight methods receive no CORS permission. The
 plugin's discovery fetch is a simple GET without custom headers; no preflight
 support is needed for that request. CORS is not authentication or authorization
-and does not make this scaffold safe to expose publicly. Production startup
-still fails closed without explicit local-development opt-in.
+and does not make this scaffold safe to expose publicly. Without TLS/invite
+configuration, startup still fails closed unless isolated local development is
+explicitly enabled. TLS/control network tests pass in Docker, but a built image
+and those tests are not a production deployment/security audit.
 
 After this change, rebuild/recreate the local backend from the **DASS repository
 root**:
@@ -142,20 +189,26 @@ docker compose down
 This preserves named caches. Do not add `--volumes` unless you intentionally want
 to discard build caches. Runtime SIGINT/SIGTERM asks Axum to drain; Compose waits
 10 seconds before forcing termination. Requests have a five-second processing
-timeout, but socket/header/keepalive admission is not fully hardened yet.
+timeout. The new bounded listener adds socket admission, initial-I/O deadlines and
+a maximum connection lifetime; its automated tests pass, but it is not complete
+per-IP denial-of-service protection.
 
 ## Configuration
 
 | Variable | Default | Behavior |
 | --- | --- | --- |
-| `DASS_INSECURE_LOCAL_DEV` | unset | Must be exactly `true`; otherwise startup fails because production TLS/auth is absent |
+| `DASS_INSECURE_LOCAL_DEV` | unset | Exactly `true` permits isolated loopback/container plaintext; otherwise TLS files and invite policy are required |
+| `DASS_TLS_CERT_FILE`, `DASS_TLS_KEY_FILE` | unset | Configure both for TLS 1.3; never combine with insecure mode |
+| `DASS_INVITE_FILE` | unset | Enables the timed-login control plane; mandatory in TLS mode |
 | `DASS_LISTEN_ADDR` | `127.0.0.1:8080` | Literal IP/port; Compose sets `0.0.0.0:8080` for container networking |
 | `DASS_MAX_CONCURRENT_REQUESTS` | 128 | 1–1024; immediately reject excess active HTTP handlers with 503 |
-| `DASS_MAX_CONTROL_MESSAGE_BYTES` | 16384 | 1–65536; cap HTTP body buffering and reject oversized bodies with 413 |
+| `DASS_MAX_CONTROL_MESSAGE_BYTES` | 16384 | Discovery-only: 1–65536; with invites: minimum 1024, clamped to protocol maximum 16384; cap HTTP bodies/WS messages |
 
 The handler limit is **not** a bound on open TCP sockets, a rate limiter or a
-future RTC peer limit. The local opt-in is not a TLS implementation and is not
-safe for production just because an external reverse proxy is present.
+future RTC peer limit. The new listener has its own 128-socket admission bound,
+TLS/initial-I/O deadlines and maximum connection lifetime. See
+[control-plane.md](control-plane.md) for independent WebSocket, verification and
+room limits and their recorded test status. Local opt-in is not a TLS substitute.
 
 ## Next backend increment
 

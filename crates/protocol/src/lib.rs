@@ -1,5 +1,7 @@
 //! Public discovery contract. No credentials, SDP or media belong in discovery.
 
+pub mod signaling;
+
 use serde::Serialize;
 
 pub const PROTOCOL_VERSION: u16 = 1;
@@ -16,6 +18,8 @@ pub struct Capabilities {
     pub stage: BackendStage,
     pub ready: bool,
     pub signaling_available: bool,
+    pub control_plane_available: bool,
+    pub authentication_available: bool,
     pub media_available: bool,
     pub e2ee_available: bool,
     pub insecure_local_development: bool,
@@ -35,6 +39,8 @@ impl Capabilities {
             stage: BackendStage::Scaffold,
             ready: false,
             signaling_available: false,
+            control_plane_available: false,
+            authentication_available: false,
             media_available: false,
             e2ee_available: false,
             insecure_local_development: true,
@@ -59,6 +65,8 @@ mod tests {
         for field in [
             "ready",
             "signaling_available",
+            "control_plane_available",
+            "authentication_available",
             "media_available",
             "e2ee_available",
         ] {

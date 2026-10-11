@@ -9,13 +9,22 @@ rust-version = "1.90"
 publish = false
 
 [workspace.dependencies]
-axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }
+axum = { version = "=0.8.9", default-features = false, features = ["http1", "json", "original-uri", "tokio", "ws"] }
+argon2 = { version = "=0.6.0", default-features = false, features = ["alloc", "password-hash", "zeroize"] }
+getrandom = "=0.4.3"
+rustls = { version = "=0.23.45", default-features = false, features = ["std", "aws_lc_rs"] }
+rustls-pki-types = { version = "=1.15.1", features = ["std"] }
+aws-lc-rs = { version = "=1.18.1", default-features = false, features = ["non-fips", "alloc", "prebuilt-nasm"] }
+str0m = { version = "=0.24.1", default-features = false }
+str0m-aws-lc-rs = { version = "=0.6.0", default-features = false }
+dimpl = { version = "=0.7.4", default-features = false, features = ["aws-lc-rs", "rcgen"] }
+tokio-rustls = { version = "=0.26.6", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "sync", "time"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "sync", "time", "io-util"] }
 tower = { version = "0.5", features = ["util"] }
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "json"] }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "json", "registry"] }
 
 [profile.release]
 lto = "thin"

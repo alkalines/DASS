@@ -15,6 +15,7 @@ import { EquibopCaptureBridge, LocalCaptureCheck } from "./capture";
 import { DiscoveryController } from "./controller";
 import { createShareSelection, DISCORD_SHARE_PATCHES, PublishIntent, routePublish, routeWatch, WatchIntent } from "./discordAdapter";
 import { ScreenshareRouting } from "./routing";
+import { SpikeTestPanel, stopSpikeTest } from "./spikeTest";
 
 const discovery = new DiscoveryController();
 const screenshare = new ScreenshareRouting();
@@ -31,6 +32,7 @@ function closeShareChooser() {
 }
 
 function resetConfiguration() {
+    stopSpikeTest();
     localCapture.stop();
     closeShareChooser();
     discovery.reset();
@@ -73,6 +75,7 @@ function DiscoveryPanel() {
                 Check backend capabilities
             </Button>
             <Paragraph role="status" aria-live="polite">{captureStatus}</Paragraph>
+            <SpikeTestPanel backendUrl={settings.store.backendUrl} isActive={() => pluginActive} />
             <Button disabled={status.phase === "stopped"} onClick={() => {
                 const host = globalThis as typeof globalThis & { Equibop?: { DassCapture?: EquibopCaptureBridge; }; };
                 setCaptureStatus("Opening the installed host picker for local capture only. Nothing will be transmitted.");
@@ -128,14 +131,17 @@ export default definePlugin({
         shareChooser = { key, abort };
     },
     setDassRoom(roomId?: string) {
+        stopSpikeTest();
         localCapture.stop();
         screenshare.setRoom(roomId);
     },
     stopPublishing() {
+        stopSpikeTest();
         localCapture.stop();
         screenshare.stopPublishing();
     },
     stopWatching() {
+        stopSpikeTest();
         screenshare.stopWatching();
     },
     routePublish(intent: PublishIntent) {
@@ -153,6 +159,7 @@ export default definePlugin({
         screenshare.start();
     },
     stop() {
+        stopSpikeTest();
         localCapture.stop();
         pluginActive = false;
         closeShareChooser();
@@ -161,11 +168,13 @@ export default definePlugin({
     },
     flux: {
         VOICE_CHANNEL_SELECT() {
+            stopSpikeTest();
             localCapture.stop();
             closeShareChooser();
             screenshare.setRoom(undefined);
         },
         LOGOUT() {
+            stopSpikeTest();
             localCapture.stop();
             pluginActive = false;
             closeShareChooser();

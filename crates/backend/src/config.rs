@@ -1,4 +1,4 @@
-use std::{net::SocketAddr, time::Duration};
+use std::{net::SocketAddr, path::PathBuf, time::Duration};
 
 use dass_protocol::ControlLimits;
 
@@ -7,6 +7,14 @@ pub struct Config {
     pub listen_addr: SocketAddr,
     pub limits: ControlLimits,
     pub request_timeout: Duration,
+    pub tls: Option<TlsFiles>,
+    pub invite_file: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug)]
+pub struct TlsFiles {
+    pub certificate: PathBuf,
+    pub private_key: PathBuf,
 }
 
 impl Config {
@@ -15,16 +23,58 @@ impl Config {
     }
 
     fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Result<Self, &'static str> {
-        if lookup("DASS_INSECURE_LOCAL_DEV").as_deref() != Some("true") {
-            return Err(
-                "TLS and authenticated signaling are not implemented; set DASS_INSECURE_LOCAL_DEV=true only for isolated local development",
-            );
+        let insecure = match lookup("DASS_INSECURE_LOCAL_DEV").as_deref() {
+            None | Some("false") => false,
+            Some("true") => true,
+            _ => return Err("DASS_INSECURE_LOCAL_DEV must be true or false"),
+        };
+        let tls = match (lookup("DASS_TLS_CERT_FILE"), lookup("DASS_TLS_KEY_FILE")) {
+            (Some(certificate), Some(private_key))
+                if !certificate.is_empty() && !private_key.is_empty() =>
+            {
+                Some(TlsFiles {
+                    certificate: certificate.into(),
+                    private_key: private_key.into(),
+                })
+            }
+            (None, None) if insecure => None,
+            _ => {
+                return Err(
+                    "provide both TLS certificate and key files; plaintext requires explicit isolated local development",
+                );
+            }
+        };
+        if insecure && tls.is_some() {
+            return Err("do not combine TLS with insecure development mode");
         }
 
-        let listen_addr = lookup("DASS_LISTEN_ADDR")
+        let listen_addr: SocketAddr = lookup("DASS_LISTEN_ADDR")
             .unwrap_or_else(|| "127.0.0.1:8080".into())
             .parse()
             .map_err(|_| "DASS_LISTEN_ADDR must be an IP address and port")?;
+        // Unspecified container binds are allowed only behind loopback host publication.
+        if insecure && !listen_addr.ip().is_loopback() && !listen_addr.ip().is_unspecified() {
+            return Err("plaintext development requires a loopback or isolated container bind");
+        }
+        let invite_file = lookup("DASS_INVITE_FILE").map(PathBuf::from);
+        if invite_file
+            .as_ref()
+            .is_some_and(|path| path.as_os_str().is_empty())
+        {
+            return Err("empty invite file path");
+        }
+        if !insecure && invite_file.is_none() {
+            return Err("TLS mode requires an invite file");
+        }
+        let mut max_control_message_bytes =
+            bounded_integer(lookup("DASS_MAX_CONTROL_MESSAGE_BYTES"), 16_384, 65_536)?;
+        if invite_file.is_some() {
+            if max_control_message_bytes < 1024 {
+                return Err("authenticated control messages require at least 1024 bytes");
+            }
+            max_control_message_bytes =
+                max_control_message_bytes.min(dass_protocol::signaling::MAX_MESSAGE_BYTES);
+        }
 
         Ok(Self {
             listen_addr,
@@ -34,13 +84,11 @@ impl Config {
                     128,
                     1024,
                 )?,
-                max_control_message_bytes: bounded_integer(
-                    lookup("DASS_MAX_CONTROL_MESSAGE_BYTES"),
-                    16_384,
-                    65_536,
-                )?,
+                max_control_message_bytes,
             },
             request_timeout: Duration::from_secs(5),
+            tls,
+            invite_file,
         })
     }
 }
@@ -117,5 +165,32 @@ mod tests {
         assert!(config.listen_addr.ip().is_unspecified());
         assert_eq!(config.limits.max_concurrent_requests, 32);
         assert_eq!(config.limits.max_control_message_bytes, 8192);
+    }
+
+    #[test]
+    fn tls_configuration_is_required_outside_development() {
+        let entries = [
+            ("DASS_TLS_CERT_FILE", "/run/secrets/cert.pem"),
+            ("DASS_TLS_KEY_FILE", "/run/secrets/key.pem"),
+            ("DASS_INVITE_FILE", "/run/secrets/invites.json"),
+        ];
+        assert!(config_with(&entries).unwrap().tls.is_some());
+        assert!(config_with(&entries[..1]).is_err());
+        assert!(config_with(&entries[..2]).is_err());
+        assert!(
+            config_with(&[
+                ("DASS_INSECURE_LOCAL_DEV", "true"),
+                ("DASS_LISTEN_ADDR", "192.0.2.1:8080"),
+            ])
+            .is_err()
+        );
+        assert!(
+            config_with(&[
+                ("DASS_INSECURE_LOCAL_DEV", "true"),
+                ("DASS_INVITE_FILE", "/run/secrets/invites.json"),
+                ("DASS_MAX_CONTROL_MESSAGE_BYTES", "512"),
+            ])
+            .is_err()
+        );
     }
 }

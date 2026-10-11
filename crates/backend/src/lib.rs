@@ -1,4 +1,9 @@
+pub mod auth;
 pub mod config;
+pub mod forwarding;
+pub mod listener;
+pub mod rtc;
+pub mod signaling;
 
 use axum::{
     Json, Router,
@@ -17,24 +22,36 @@ use config::Config;
 
 /// Discovery only: no unauthenticated room, publish or subscribe handlers.
 pub fn app(config: Config) -> Router {
+    app_with_signaling(config, None)
+}
+
+pub fn app_with_signaling(config: Config, signaling: Option<signaling::SignalingState>) -> Router {
     let request_limits = RequestLimits {
         semaphore: Arc::new(Semaphore::new(config.limits.max_concurrent_requests)),
         max_body_bytes: config.limits.max_control_message_bytes,
     };
-    Router::new()
+    let timeout = config.request_timeout;
+    let maximum_message_bytes = config.limits.max_control_message_bytes;
+    let discovery = DiscoveryState {
+        config,
+        control_plane_available: signaling.is_some(),
+    };
+    let router = Router::new()
         .route("/health/live", get(|| async { StatusCode::NO_CONTENT }))
         .route("/health/ready", get(not_ready))
         .route("/v1/capabilities", get(capabilities))
         .fallback(|| async { StatusCode::NOT_FOUND })
+        .with_state(discovery);
+    let router = match signaling {
+        Some(state) => router.merge(signaling::router(state, maximum_message_bytes)),
+        None => router,
+    };
+    router
         .layer(middleware::from_fn_with_state(
             request_limits,
             limit_request,
         ))
-        .layer(middleware::from_fn_with_state(
-            config.request_timeout,
-            request_timeout,
-        ))
-        .with_state(config)
+        .layer(middleware::from_fn_with_state(timeout, request_timeout))
 }
 
 #[derive(Clone)]
@@ -61,11 +78,25 @@ async fn limit_request(
 }
 
 async fn not_ready() -> impl IntoResponse {
-    (StatusCode::SERVICE_UNAVAILABLE, "backend_not_implemented")
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        "media_transport_unavailable",
+    )
 }
 
-async fn capabilities(State(config): State<Config>, headers: HeaderMap) -> Response {
-    let mut response = Json(Capabilities::scaffold(config.limits)).into_response();
+#[derive(Clone)]
+struct DiscoveryState {
+    config: Config,
+    control_plane_available: bool,
+}
+
+async fn capabilities(State(discovery): State<DiscoveryState>, headers: HeaderMap) -> Response {
+    let mut document = Capabilities::scaffold(discovery.config.limits);
+    document.insecure_local_development = discovery.config.tls.is_none();
+    document.control_plane_available = discovery.control_plane_available;
+    document.authentication_available = discovery.control_plane_available;
+    // Signaling control tests are not yet a media interoperability gate.
+    let mut response = Json(document).into_response();
     response
         .headers_mut()
         .insert(header::VARY, HeaderValue::from_static("Origin"));
@@ -107,6 +138,8 @@ mod tests {
                 max_control_message_bytes: 16_384,
             },
             request_timeout: Duration::from_secs(5),
+            tls: None,
+            invite_file: None,
         })
     }
 
