@@ -5,6 +5,8 @@
  */
 
 interface CaptureHost {
+    claim?(): () => void;
+    cancelPicker?(): void;
     capture(): Promise<MediaStream>;
     audioSelected(): boolean;
     unmute(): Promise<unknown>;
@@ -14,12 +16,19 @@ interface CaptureHost {
 /** Singleton host ownership, including pending pickers and asynchronous audio IPC. */
 export function createCaptureBridge(host: CaptureHost) {
     let busy = false;
+    let cancelled = false;
+    let captureSignal: AbortSignal | undefined;
     return {
         version: 1 as const,
         ownsAudio: () => busy,
+        isCancelled: () => busy && cancelled,
+        getSignal: () => busy ? captureSignal : undefined,
         async capture(signal: AbortSignal) {
             if (busy || signal.aborted) throw new Error("Capture unavailable.");
+            const releaseOwnership = host.claim?.();
             busy = true;
+            cancelled = false;
+            captureSignal = signal;
             let stream: MediaStream | undefined;
             let released = false;
             let settled = false;
@@ -41,11 +50,15 @@ export function createCaptureBridge(host: CaptureHost) {
                         return;
                     }
                     busy = false;
+                    captureSignal = undefined;
+                    releaseOwnership?.();
                 })();
             };
             const release = () => {
                 if (released) return;
                 released = true;
+                cancelled = true;
+                if (!settled) host.cancelPicker?.();
                 signal.removeEventListener("abort", release);
                 stopTracks();
                 finish();
@@ -68,6 +81,9 @@ export function createCaptureBridge(host: CaptureHost) {
                     throw new Error("Capture unavailable.");
                 }
                 for (const track of videoTracks) track.addEventListener("ended", onEnded);
+                if (audioSelected && !stream.getAudioTracks().length) {
+                    throw new Error("Selected share audio is unavailable.");
+                }
                 if (audioSelected && stream.getAudioTracks().length) await host.unmute();
                 if (released || signal.aborted) throw new Error("Capture cancelled.");
                 return { stream, audioSelected, release };

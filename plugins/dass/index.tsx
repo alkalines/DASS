@@ -11,12 +11,14 @@ import { Paragraph } from "@components/Paragraph";
 import definePlugin, { OptionType } from "@utils/types";
 import { closeModal, Modal, openModal, SelectedChannelStore, showToast, useEffect, useState } from "@webpack/common";
 
+import { EquibopCaptureBridge, LocalCaptureCheck } from "./capture";
 import { DiscoveryController } from "./controller";
 import { createShareSelection, DISCORD_SHARE_PATCHES, PublishIntent, routePublish, routeWatch, WatchIntent } from "./discordAdapter";
 import { ScreenshareRouting } from "./routing";
 
 const discovery = new DiscoveryController();
 const screenshare = new ScreenshareRouting();
+const localCapture = new LocalCaptureCheck();
 let pluginActive = false;
 let shareChooser: { key: string; abort: AbortController; } | undefined;
 
@@ -29,6 +31,7 @@ function closeShareChooser() {
 }
 
 function resetConfiguration() {
+    localCapture.stop();
     closeShareChooser();
     discovery.reset();
     screenshare.reset();
@@ -51,6 +54,7 @@ const settings = definePluginSettings({
 
 function DiscoveryPanel() {
     const [status, setStatus] = useState(discovery.getSnapshot());
+    const [captureStatus, setCaptureStatus] = useState("Local capture has not been tested. No transport is available.");
     useEffect(() => {
         const unsubscribe = discovery.subscribe(() => setStatus(discovery.getSnapshot()));
         setStatus(discovery.getSnapshot());
@@ -68,6 +72,16 @@ function DiscoveryPanel() {
             >
                 Check backend capabilities
             </Button>
+            <Paragraph role="status" aria-live="polite">{captureStatus}</Paragraph>
+            <Button disabled={status.phase === "stopped"} onClick={() => {
+                const host = globalThis as typeof globalThis & { Equibop?: { DassCapture?: EquibopCaptureBridge; }; };
+                setCaptureStatus("Opening the installed host picker for local capture only. Nothing will be transmitted.");
+                void localCapture.capture(host.Equibop?.DassCapture).then(setCaptureStatus);
+            }}>Test local capture (no transport)</Button>
+            <Button onClick={() => {
+                localCapture.stop();
+                setCaptureStatus("Local capture stopped. Pending capture is cancelled; any late tracks will be stopped.");
+            }}>Stop local capture</Button>
         </div>
     );
 }
@@ -114,9 +128,11 @@ export default definePlugin({
         shareChooser = { key, abort };
     },
     setDassRoom(roomId?: string) {
+        localCapture.stop();
         screenshare.setRoom(roomId);
     },
     stopPublishing() {
+        localCapture.stop();
         screenshare.stopPublishing();
     },
     stopWatching() {
@@ -137,6 +153,7 @@ export default definePlugin({
         screenshare.start();
     },
     stop() {
+        localCapture.stop();
         pluginActive = false;
         closeShareChooser();
         discovery.stop();
@@ -144,10 +161,12 @@ export default definePlugin({
     },
     flux: {
         VOICE_CHANNEL_SELECT() {
+            localCapture.stop();
             closeShareChooser();
             screenshare.setRoom(undefined);
         },
         LOGOUT() {
+            localCapture.stop();
             pluginActive = false;
             closeShareChooser();
             discovery.stop();

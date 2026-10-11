@@ -6,7 +6,7 @@
 
 import { describe, expect, test } from "bun:test";
 
-import { createEquibopCapture } from "../../plugins/dass/capture";
+import { createEquibopCapture, LocalCaptureCheck } from "../../plugins/dass/capture";
 import { createCaptureBridge } from "../../tooling/equibop/dassCaptureLifecycle";
 
 function deferred<T>() {
@@ -120,5 +120,49 @@ describe("explicit host capture lifecycle", () => {
         await Promise.resolve();
         expect(bridge.ownsAudio()).toBe(true);
         await expect(bridge.capture(new AbortController().signal)).rejects.toThrow();
+    });
+
+    test("pending picker cancellation is requested once and late capture is disposed", async () => {
+        const f = fixture();
+        const pending = deferred<MediaStream>();
+        let cancellations = 0;
+        const bridge = createCaptureBridge({ ...f.host, capture: () => pending.promise, cancelPicker: () => { cancellations++; } });
+        const abort = new AbortController();
+        const result = bridge.capture(abort.signal);
+        abort.abort();
+        abort.abort();
+        expect(bridge.isCancelled()).toBe(true);
+        expect(cancellations).toBe(1);
+        pending.resolve(f.stream);
+        await expect(result).rejects.toThrow();
+        expect(f.video.stops).toBe(1);
+        expect(bridge.isCancelled()).toBe(false);
+    });
+
+    test("independent local check cleans up on stop and ignores late leases", async () => {
+        const f = fixture(false);
+        const check = new LocalCaptureCheck();
+        const bridge = createCaptureBridge(f.host);
+        expect(await check.capture(bridge)).toContain("video-only");
+        check.stop();
+        check.stop();
+        expect(f.video.stops).toBe(1);
+        expect(f.stops()).toBe(1);
+        const pending = deferred<{ stream: MediaStream; audioSelected: boolean; release(): void; }>();
+        let releases = 0;
+        const late = check.capture({ version: 1, capture: () => pending.promise });
+        check.stop();
+        pending.resolve({ stream: f.stream, audioSelected: false, release: () => { releases++; } });
+        expect(await late).toContain("cancelled");
+        expect(releases).toBe(1);
+    });
+
+    test("selected audio unmute failure stops both tracks and releases host audio", async () => {
+        const f = fixture();
+        const bridge = createCaptureBridge({ ...f.host, unmute: async () => { throw new Error("private IPC error"); } });
+        await expect(bridge.capture(new AbortController().signal)).rejects.toThrow("Capture failed");
+        expect(f.video.stops).toBe(1);
+        expect(f.audio.stops).toBe(1);
+        expect(f.stops()).toBe(1);
     });
 });

@@ -54,8 +54,8 @@ The intended interception sequence is:
    partial capture on rejection and handle cancellation while a picker is open.
    Unselected audio is stopped/removed before publishing as a final safeguard;
     this does not replace preventing unwanted audio capture in the host bridge.
-    The unchanged upstream wrapper has partial-capture cleanup and audio-consent
-    blockers; this prototype is not enabled or accepted for runtime use.
+     The staged wrapper fix prevents unselected virtual-audio acquisition and
+     stops partial/replaced tracks. GUI acceptance remains outstanding.
 5. Watching returns a DASS-owned media stream for a future player adapter.
    Detection reads the authenticated DASS room directory, not Discord stream
    events or invented native stream records. Stock Discord shares remain a
@@ -69,12 +69,14 @@ provider can leave its awaiting promise pending. Directory results are bounded
 to 64 entries and checked against the current DASS room. This is an in-process
 contract, not a new wire protocol or a complete untrusted-response parser.
 
+The plugin also offers a local-only capture check in settings through the staged
+host bridge, without a backend transport. See [capture-bridge.md](capture-bridge.md).
 The plugin exposes boundary methods and declares a build-scoped share-start
-chooser patch. It does not call native capture, instantiate a peer connection,
+chooser patch. The chooser does not call native capture or instantiate a peer connection,
 change voice, or install watch/detection hooks. A Discord build and private
 factory excerpts are recorded; runtime hook behavior is not validated. The
-required narrow Equibop audio lifecycle
-bridge now has a staged, unit-tested prototype; runtime acceptance remains
+required narrow Equibop capture lifecycle
+bridge and wrapper fix are staged and unit-tested; runtime acceptance remains
 outstanding. Pinned upstream capture code remains untouched. See
 [capture bridge limitations](capture-bridge.md) and the
 [Rust transport gate](transport-gate.md).
@@ -257,8 +259,9 @@ Reuse Equibop's installed capture function and its existing picker/consent. The
 pinned Linux wrapper attaches venmic audio when its virtual device exists, and
 the picker currently ties audio unmute/cleanup to native `STREAM_UPDATE` and
 `STREAM_CLOSE`. DASS cannot rely on those events without native stream creation.
-Explicit audio selection and independent teardown therefore need a narrow,
-reviewed host integration before enabling DASS capture. An Equicord webpack patch
+The staged host fix now adds explicit consent, independent teardown and exclusive
+capture ownership; its local capture check still needs GUI acceptance before
+production use. An Equicord webpack patch
 cannot rewrite Equibop's bundled renderer. The upstream submodule is unchanged.
 
 Release gates remain real Wayland/X11 picker cancellation, optional audio,
