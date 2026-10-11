@@ -100,6 +100,39 @@ Readiness intentionally stays false; do not configure it as a liveness probe.
 The capability document advertises no SDP/ICE or media endpoint. Logs contain
 fixed lifecycle messages, not request URLs, headers, bodies or sensitive IDs.
 
+### Equibop discovery and CORS
+
+The local-development scaffold permits credential-free browser reads of
+`GET /v1/capabilities` (and its implicit HEAD response) only from the exact
+origin `https://discord.com`. It returns `Access-Control-Allow-Origin` for that
+origin and `Vary: Origin`, without a wildcard or credential permission. Other
+origins, routes and write/preflight methods receive no CORS permission. The
+plugin's discovery fetch is a simple GET without custom headers; no preflight
+support is needed for that request. CORS is not authentication or authorization
+and does not make this scaffold safe to expose publicly. Production startup
+still fails closed without explicit local-development opt-in.
+
+After this change, rebuild/recreate the local backend from the **DASS repository
+root**:
+
+```sh
+docker compose build backend
+docker compose up -d backend
+curl -i -H 'Origin: https://discord.com' http://localhost:8080/v1/capabilities
+```
+
+Expect HTTP 200, scaffold JSON and
+`Access-Control-Allow-Origin: https://discord.com`. Then click **Check backend
+capabilities** in DASS settings. This corrects the missing CORS header, not
+unrelated CSP, mixed-content or local-network policy failures. No plugin rebuild
+is needed for this backend-only fix. Media remains unavailable.
+
+The pre-fix endpoint was reachable with HTTP 200 but lacked CORS headers. Tests
+for the exact-origin policy and route/method isolation were added. Docker access
+was denied in the agent session, so the CORS change has not been compiled,
+formatted, tested or rebuilt by the agent; validate it with the Docker-only
+commands above and the workspace checks before relying on it.
+
 Stop the local container gracefully (SIGTERM):
 
 ```sh

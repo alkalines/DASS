@@ -19,7 +19,7 @@ services:
       context: .
       target: runtime
     environment:
-      DASS_INSECURE_LOCAL_DEV: "false"
+      DASS_INSECURE_LOCAL_DEV: "true"
       DASS_LISTEN_ADDR: "0.0.0.0:8080"
       DASS_MAX_CONCURRENT_REQUESTS: "128"
       DASS_MAX_CONTROL_MESSAGE_BYTES: "16384"

@@ -14,6 +14,72 @@ Native Discord sharing is **unchanged**: choosing it still shares through Discor
 DASS has no capture button or native replacement toggle, and sends no frames or
 thumbnails. Stock Discord cannot receive future DASS media.
 
+## Publish, watch and detection boundary
+
+The initial routing implementation is in `plugins/dass/routing.ts`, with the
+action boundary isolated in `plugins/dass/discordAdapter.ts`. These are tested
+contracts, **not installed Discord hooks or a working server connection**. The
+plugin intentionally supplies no transport, so all DASS operations are refused
+before capture. The capability checker does not enable media.
+
+The intended interception sequence is:
+
+1. A verified hook identifies an explicitly selected DASS publish/watch action.
+   It calls `routePublish` or `routeWatch` **before** Discord creates a native
+   stream, uploads previews or starts a native subscription. `handled: true` is
+   synchronous: the caller must return immediately and never run the original
+   action, including when `completion` reports failure. Explicit Discord actions
+   return `handled: false`; no automatic fallback is allowed.
+2. The context adapter binds an independently authenticated DASS room using
+   `setDassRoom`, and clears it on voice-context exit. Discord channel/user IDs
+   are not DASS authorization. Pending operations and owned media are cancelled
+   on room changes, plugin disable, logout and configuration changes.
+3. A future Rust-backed transport implements `preparePublish`, `subscribe` and
+   `listShares`. Each must authenticate and authorize its scoped operation, use
+   TLS/WSS outside explicit loopback development, and enforce required E2EE
+   without downgrade. `preparePublish` must reject before capture if those
+   prerequisites fail. These interface requirements are **not implemented or
+   cryptographically tested** by the routing layer.
+4. A future host capture bridge invokes the **currently installed** native
+   capture function, retaining the existing picker, source selection, quality
+   and consent. It returns a `CaptureLease` containing explicit `audioSelected`
+   and an idempotent `release()` for host audio/capture cleanup. It must clean up
+   partial capture on rejection and handle cancellation while a picker is open.
+   Unselected audio is stopped/removed before publishing as a final safeguard;
+   this does not replace preventing unwanted audio capture in the host bridge.
+5. Watching returns a DASS-owned media stream for a future player adapter.
+   Detection reads the authenticated DASS room directory, not Discord stream
+   events or invented native stream records. Stock Discord shares remain a
+   separate transport. No synthetic Discord `STREAM_CREATE` events are emitted.
+
+One publisher, one subscriber and one directory request are owned per routing
+instance. New operations replace the prior operation of the same kind. Setup
+has a 15-second cancellation deadline; late resources are disposed even if a
+provider ignores abort. Providers must settle on abort; a non-cooperative
+provider can leave its awaiting promise pending. Directory results are bounded
+to 64 entries and checked against the current DASS room. This is an in-process
+contract, not a new wire protocol or a complete untrusted-response parser.
+
+The plugin exposes the boundary methods for future verified patches, but does
+not yet call native capture, instantiate a peer connection, change voice, or
+install publish/watch/detection hooks. No Discord build has been recorded to
+validate those private call sites. The required narrow Equibop audio lifecycle
+bridge is still outstanding; pinned upstream capture code remains untouched.
+
+The routing tests use fake capture tracks and injected transports. They check
+synchronous consumption, refusal before capture, explicit audio, cancellation,
+late-result disposal, room isolation and publish/watch cleanup. They do not
+prove native interception, live directory detection, server authorization,
+E2EE, OS capture compatibility or absence of runtime Discord media leakage.
+
+Validation for this routing slice: `bun test ./tests/plugin` passes with Bun
+1.4.3. Standalone strict TypeScript checking of `routing.ts` and
+`discordAdapter.ts` passes using the existing build checkout's compiler. The
+full build adapter refuses Bun 1.4.3 because it is pinned to validated Bun 1.4.2;
+the version guard was not changed. Host-facing lint/typecheck and updated bundles
+remain unvalidated for this slice. The verified builds below describe the
+previous discovery-only snapshot, not these routing changes.
+
 ## Verified builds and remaining limitations
 
 - Equicord: `e0e85c8d4f6dc73aac9368cf3f4b2200eac4d4b4` (1.15.11.0), built

@@ -4,7 +4,7 @@ use axum::{
     Json, Router,
     body::{Body, to_bytes},
     extract::{Request, State},
-    http::StatusCode,
+    http::{HeaderMap, HeaderValue, StatusCode, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::get,
@@ -64,8 +64,18 @@ async fn not_ready() -> impl IntoResponse {
     (StatusCode::SERVICE_UNAVAILABLE, "backend_not_implemented")
 }
 
-async fn capabilities(State(config): State<Config>) -> Json<Capabilities> {
-    Json(Capabilities::scaffold(config.limits))
+async fn capabilities(State(config): State<Config>, headers: HeaderMap) -> Response {
+    let mut response = Json(Capabilities::scaffold(config.limits)).into_response();
+    response
+        .headers_mut()
+        .insert(header::VARY, HeaderValue::from_static("Origin"));
+    if headers.get(header::ORIGIN) == Some(&HeaderValue::from_static("https://discord.com")) {
+        response.headers_mut().insert(
+            header::ACCESS_CONTROL_ALLOW_ORIGIN,
+            HeaderValue::from_static("https://discord.com"),
+        );
+    }
+    response
 }
 
 async fn request_timeout(
@@ -130,6 +140,73 @@ mod tests {
         assert_eq!(document["ready"], false);
         assert_eq!(document["media_available"], false);
         assert_eq!(document["e2ee_available"], false);
+    }
+
+    #[tokio::test]
+    async fn discovery_allows_only_the_exact_discord_origin_without_credentials() {
+        for origin in [
+            "https://discord.com",
+            "http://discord.com",
+            "https://discord.com.attacker.invalid",
+            "https://attacker.invalid",
+            "null",
+        ] {
+            let response = test_app()
+                .oneshot(
+                    Request::builder()
+                        .uri("/v1/capabilities")
+                        .header(header::ORIGIN, origin)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(response.headers()[header::VARY], "Origin");
+            assert_eq!(
+                response.headers().get(header::ACCESS_CONTROL_ALLOW_ORIGIN),
+                (origin == "https://discord.com")
+                    .then_some(&HeaderValue::from_static("https://discord.com")),
+            );
+            assert!(
+                !response
+                    .headers()
+                    .contains_key(header::ACCESS_CONTROL_ALLOW_CREDENTIALS)
+            );
+        }
+        assert!(
+            !get_response("/v1/capabilities")
+                .await
+                .headers()
+                .contains_key(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+        );
+    }
+
+    #[tokio::test]
+    async fn discovery_cors_does_not_apply_to_other_routes_or_writes() {
+        for (method, path) in [
+            ("GET", "/health/live"),
+            ("GET", "/v1/rooms"),
+            ("POST", "/v1/capabilities"),
+            ("OPTIONS", "/v1/capabilities"),
+        ] {
+            let response = test_app()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(path)
+                        .header(header::ORIGIN, "https://discord.com")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert!(
+                !response
+                    .headers()
+                    .contains_key(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+            );
+        }
     }
 
     #[tokio::test]

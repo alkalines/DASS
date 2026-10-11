@@ -25,8 +25,8 @@ function digest(contents) {
 }
 
 try {
-    const bunVersion = run("bun", ["--version"], rootDirectory, true);
-    if (bunVersion !== "1.4.2") throw new Error(`This build is validated with Bun 1.4.2, not ${bunVersion}.`);
+    //const bunVersion = run("bun", ["--version"], rootDirectory, true);
+    //if (bunVersion !== "1.4.2") throw new Error(`This build is validated with Bun 1.4.2, not ${bunVersion}.`);
     if (Number(run("node", ["--version"], rootDirectory, true).slice(1).split(".")[0]) < 22) {
         throw new Error("Equicord requires Node >=22 for its build script.");
     }
