@@ -353,31 +353,33 @@ stores and ordinary voice untouched; preserve controller-owned capture/receiver
 tracks. Lower-level presentation controls can be reused only after checking
 their remaining dependencies and lifecycle behavior.
 
-Complete `122641` and `792251` reports close the immediate audio-widget trace:
+The user saved complete `122641`/`792251` source in
+`build/discord-volume-probe.json`, which was read locally. This is a user-supplied
+research artifact, not a production lookup or runtime acceptance test.
 
-- `122641` is a presentation media bar using animation and DOM geometry, not a
-  media-engine controller. Volume drag is vertical, clamped to normalized 0..1,
-  and forwarded through callbacks. It registers drag listeners on the supplied
-  `currentWindow`. However, unmount removes listeners from global `window`, not
-  `currentWindow`; unmount during dragging in a different popout window can
-  therefore leave listeners attached. This is a source-derived lifecycle risk,
-  not a reproduced leak. Do not reuse unchanged and claim popout cleanup safety.
-- `792251.w` converts slider percentage `s` to engine-volume units: for default
-  reference 100 and `q = s / 100`, output is `100 * q^2.8` below 100%, otherwise
-  `100 * 10^((q - 1) * 6 / 20)`. `M` is the inverse. Thus 50% gives approximately
-  14.36 engine units and 200% gives approximately 199.53; those units are not
-  independently verified as direct playback gain. A linear HTML video-volume
-  assignment is not an equivalent native slider mapping. HTML media volume also
-  cannot represent amplification above unity by itself.
-- Safe control reuse is now narrower: retain controlled DASS volume/mute state,
-  no native audio-store/actions wrapper, preserve nonlinear slider semantics,
-  and explicitly address hover timeout and correct-window drag teardown. The
-  observed audio path remains separate from the always-muted native video tag.
+- `792251.w` converts slider value `s` to native local-volume units with default
+  reference 100: zero stays zero; below 100, `100 * (s / 100)^2.8`; at or above
+  100, `100 * 10^(((s / 100) - 1) * 6 / 20)`. `792251.M` is its inverse.
+  Slider 50 therefore yields approximately 14.36 native units, 100 yields 100,
+  and 200 yields approximately 199.53. These are conversion units, not measured
+  acoustic gain or proof of how Chromium playback gain must be implemented.
+- `122641` is an animated pointer-driven media bar. VOLUME uses vertical pointer
+  position, clamped to [0, 1]; DURATION uses horizontal position. Its callbacks
+  and `setGrabber` own presentation only in this factory: there are no capture,
+  RTC, Discord-store or analytics calls here. Its animation dependency remains
+  host-owned; do not copy/bundle another runtime.
+- Drag start registers mouse listeners on the supplied `currentWindow`; drag end
+  removes them from that same window. However, unmount removes listeners from
+  global `window` instead. A non-default popout window can consequently retain
+  drag listeners if the bar unmounts during drag. Together with `20504`'s pending
+  hover timeout, this requires a narrow lifecycle adaptation or a different
+  validated presentation primitive before safe reuse across popouts.
 
-The remaining research gate is lifecycle execution and presentation projection
-coverage (selection, filmstrip, sort/title, watch, preview, zoom and popout), not
-additional generic audio-widget dumps. All findings above remain source/live-owner
-evidence; remote DASS audio and replacement UI acceptance are still unverified.
+The speaker/slider presentation path is now source-mapped through its volume
+conversion and media bar. Native stream-audio output ownership and DASS audible
+playback remain separate, unverified runtime questions. Next investigation should
+cover lifecycle execution and all participant consumers needed by the proposed
+projection, rather than gathering more duplicate player-frame source.
 
 ## Current DASS pipeline and ownership
 

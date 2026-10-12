@@ -5,7 +5,7 @@
  */
 
 /** Borrow controller-owned tracks; detaching a tile must not stop the share. */
-export function attachTilePlayback(element: HTMLVideoElement, stream: MediaStream | undefined, localPreview: boolean,
+export function attachTilePlayback(element: HTMLMediaElement, stream: MediaStream | undefined, localPreview: boolean,
     onBlocked: () => void) {
     let attached = true;
     element.muted = localPreview;

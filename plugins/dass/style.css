@@ -51,13 +51,17 @@
     height: 100%;
 }
 
+.vc-dass-grid-focused {
+    height: 100%;
+    aspect-ratio: auto;
+}
+
 .vc-dass-grid-tile video {
     width: 100%;
     height: 100%;
     object-fit: contain;
 }
 
-.vc-dass-grid-heading,
 .vc-dass-grid-controls {
     position: absolute;
     z-index: 1;
@@ -72,24 +76,65 @@
     padding: 4px 8px;
 }
 
-.vc-dass-grid-heading {
-    top: 8px;
-}
-
-.vc-dass-grid-heading p {
-    margin: 0;
-}
-
 .vc-dass-grid-controls {
     bottom: 8px;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 150ms ease;
+}
+
+.vc-dass-grid-tile:hover .vc-dass-grid-controls,
+.vc-dass-grid-tile:focus-within .vc-dass-grid-controls {
+    opacity: 1;
+    pointer-events: auto;
 }
 
 .vc-dass-grid-placeholder {
     position: absolute;
-    inset: 40px 12px 12px;
+    inset: 12px;
     display: flex;
     flex-direction: column;
     align-items: center;
     justify-content: center;
     gap: 8px;
+}
+
+.vc-dass-grid-focus {
+    width: 100%;
+    height: 100%;
+}
+
+.vc-dass-grid-live {
+    position: absolute;
+    top: 12px;
+    right: 12px;
+    pointer-events: none;
+}
+
+.vc-dass-audio-control {
+    position: relative;
+}
+
+.vc-dass-volume {
+    position: absolute;
+    display: none;
+    bottom: 100%;
+    right: 0;
+    width: 160px;
+    padding: 12px;
+    background: var(--background-floating);
+    border-radius: 8px;
+    z-index: 2;
+}
+
+.vc-dass-audio-control:hover .vc-dass-volume,
+.vc-dass-audio-control:focus-within .vc-dass-volume {
+    display: block;
+}
+
+.vc-dass-play-audio {
+    position: absolute;
+    bottom: 72px;
+    right: 16px;
+    z-index: 2;
 }

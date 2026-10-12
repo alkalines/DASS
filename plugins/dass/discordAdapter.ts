@@ -75,8 +75,8 @@ export const DISCORD_SHARE_PATCHES = [{
     toBuild: 634304,
     group: true,
     replacement: [{
-        match: /(\i=)(\i\.map\((\i)=>(\i)=>\(0,\i\.jsx\)\(\i\.Ay,\{participant:\3,channel:(\i),className:(\i\.\i),onClick:\i,onDoubleClick:\i,onContextMenu:\i,inCall:\i,width:\4,popoutType:\i\},\3\.id\)\))(?=;\(0,\i\.A\)\(\{type:\i\.ImpressionTypes.VIEW,name:\i\.ImpressionNames.CHANNEL_CALL_VIDEO_GRID_VIEW)/,
-        replace: "$1$self.useGridTiles($5.id,$2,$6)"
+        match: /(\i=)(\i\.map\((\i)=>(\i)=>\(0,\i\.jsx\)\(\i\.Ay,\{participant:\3,channel:(\i),className:(\i\.\i),onClick:(\i),onDoubleClick:(\i),onContextMenu:\i,inCall:\i,width:\4,popoutType:\i\},\3\.id\)\))(?=;\(0,\i\.A\)\(\{type:\i\.ImpressionTypes.VIEW,name:\i\.ImpressionNames.CHANNEL_CALL_VIDEO_GRID_VIEW)/,
+        replace: "$1$self.useGridTiles($5.id,$2,$6,$7,$8)"
     }, {
         match: /(keyExtractor:)(\i)(,paddingTop:64,paddingBottom:64,children:)(\i)(?=\}\))/,
         replace: "$1$self.gridTileKeyExtractor($2,$4)$3$4"
@@ -98,6 +98,126 @@ export const DISCORD_SHARE_PATCHES = [{
     }, {
         match: /if\(0===(\i)\.length\)(?=\{let \i=\i\.length>0&&!\i;return\(0,\i\.jsx\)\(\i\.A,\{channelId:\i\.id,allPoppedOut:\i\}\))/,
         replace: "if(0===$1.length&&!dassShowStreamGrid)"
+    }]
+}];
+
+export const DISCORD_PRESENTATION_PATCHES = [{
+    find: "handleFullscreenParticipant=",
+    fromBuild: 634304,
+    toBuild: 634304,
+    group: true,
+    replacement: [{
+        match: /(\(0,\i\.jsx\)\()(\i)(,\{)(?=channel:\i,guild:\i,hasConnectPermission:\i,participantsOpen:)/,
+        replace: "$1$self.CallView$3dassNativeComponent:$2,dassVideoMode:dassVideoMode,dassPopoutContext:dassPopoutContext,"
+    }, {
+        match: /(\[(\i)\.BRT.CALL_TILE_POPOUT\]:null\};)/,
+        replace: "$1let dassVideoMode=$2._Of.VIDEO,dassPopoutContext=$2.BRT.POPOUT;"
+    }, {
+        match: /(handleSelectParticipant=\((\i),(\i)\)=>\{)/,
+        replace: "$1if($self.selectCallParticipant(this.props.channel.id,$2))return;"
+    }, {
+        match: /(handleContextMenu=\((\i),\i,\i,\i\)=>\{)/,
+        replace: "$1if($self.isDassParticipant($2))return;"
+    }, {
+        match: /(selectedParticipant:)(\i)(?=,canChangeLayout:\i,canInvite:\i,onToggleChat:\i,maybeLeaveFullScreen:this\.maybeLeaveFullScreen)/,
+        replace: "$1$self.nativeParticipant($2)"
+    }, {
+        match: /(children:\[)(null!=\i&&\i\.type!==\i\.lp\.ACTIVITY&&\i\.user\.id!==\i\?\(0,\i\.jsx\)\(\i\.A,\{context:)/,
+        replace: "$1$self.isDassParticipant(this.props.selectedParticipant)?$self.renderCallAudio(this.props.selectedParticipant):$2"
+    }, {
+        match: /(onSelectParticipant:this\.handleSelectParticipant,onContextMenuParticipant:this\.handleContextMenu,)/,
+        replace: "$1onFullscreenParticipant:this.handleFullscreenParticipant,"
+    }, {
+        match: /(selectedStream:null!=)(\i)(\?\i\.A\.getActiveStreamForStreamKey\(\2\.id\):null)/,
+        replace: "$1$self.nativeParticipant($2)$3"
+    }, {
+        match: /(\(0,\i\.A\)\((\i)\);)(?=let\{participants:\i,filteredParticipants:\i,participantsVersion:\i,mode:\i,layout:\i,participantsOpen:)/,
+        replace: "$1let dassCallVideo=$self.useHasGridShares(arguments[0].channel.id)&&!$2;"
+    }, {
+        match: /(\i=)(\i===\i\._Of.VIDEO)(\?\i:\i\.DUB.MINIMUM)(?=;\i&&\i!==\i\.DUB.FULL_SCREEN)/,
+        replace: "$1(dassCallVideo||$2)$3"
+    }, {
+        match: /(participantsVersion:\i\.A\.getParticipantsVersion\(\i\.id\)\}\},\[)(\i,\i\.id,\i)(\]\))/,
+        replace: "$1$2,dassCallVideo$3"
+    }]
+}, {
+    find: /\i=\i\.Ay\.getVideoComponent\(\),\i=\i\.default\.getId\(\),\[\i,\i\]=\i\.useState\(null\)/,
+    fromBuild: 634304,
+    toBuild: 634304,
+    group: true,
+    replacement: [{
+        match: /(selectedParticipant:\i,showParticipants:\i=!0,className:\i,width:\i,height:\i,layout:\i,idle:\i\}=)(\i)(,\i=\i\.Ay\.getVideoComponent\(\))/,
+        replace: "$1$self.useFocusedCallProps($2)$3"
+    }, {
+        match: /(\i=)(!\i&&null!=)(\i)(\.streamId)/,
+        replace: "$1$2$3$4||$self.isDassParticipant($3)"
+    }]
+}, {
+    find: '.displayName="CallTile"',
+    fromBuild: 634304,
+    toBuild: 634304,
+    replacement: [{
+        match: /(\i=\i\.\$,)(\i=)(\i)(?=\})/,
+        replace: "$1$2$self.wrapCallTile($3)"
+    }]
+}, {
+    find: "cropSelfVideo:!1",
+    fromBuild: 634304,
+    toBuild: 634304,
+    group: true,
+    replacement: [{
+        match: /(switch\((\i)\.type\)\{case \i\.lp\.ACTIVITY:return)/,
+        replace: 'if($self.isDassParticipant($2))return "\\x02"+$self.dassParticipantTitle($2);$1'
+    }, {
+        match: /(\(0,\i\.partition\)\(\i,)(\i\.Xw)(\))/,
+        replace: "$1participant=>!$self.isDassParticipant(participant)&&$2(participant)$3"
+    }]
+}, {
+    find: /\i\.type===\i\.lp\.STREAM\?\i\.find\(\i=>\i\.type===\i\.lp\.USER/,
+    fromBuild: 634304,
+    toBuild: 634304,
+    replacement: [{
+        match: /(function \i\(\i,(\i),\i\)\{return)/,
+        replace: "$1 $self.isDassParticipant($2)?[]:"
+    }]
+}, {
+    find: /getCurrentUserActiveStream\(\),\i\.A\.getStreamerActiveStreamMetadata\(\)/,
+    fromBuild: 634304,
+    toBuild: 634304,
+    group: true,
+    replacement: [{
+        match: /(function (\i)\(\i\)\{let\{streamMetadata:\i,accountLinkUpsellTargetRef:\i,streamQualityIndicator:\i\}=\i)/,
+        replace: "$self.setNativeSidebarBody($2);$1"
+    }, {
+        match: /let\{guildId:(\i),analyticsContext:(\i),className:(\i)\}=(\i)(?=,\i=\i\.useRef\(null\),\i=\i\.useRef\(null\),\i=\i\.useRef\(null\))/,
+        replace: "let{guildId:$1,analyticsContext:$2,className:$3,dassSidebar}=$self.useNativeSidebarProps($4)"
+    }, {
+        match: /(return null==\i)(\?null:\(0,\i\.jsx\)\("div",\{className:\i\(\)\(\i\.\i,\i\),ref:\i,children:)/,
+        replace: "$1&&!dassSidebar$2"
+    }, {
+        match: /(children:\[)(\i)(,\(0,\i\.jsx\)\(\i,\{stream:\i,canGoLive:\i,canGoLiveActivity:)/,
+        replace: "$1dassSidebar?$self.renderNativeSidebarBody(dassSidebar.metadata):$2$3"
+    }, {
+        match: /(\(0,\i\.jsx\)\(\i,)(\{stream:\i,canGoLive:\i,canGoLiveActivity:)/,
+        replace: "$1$self.sidebarActionProps($2"
+    }, {
+        match: /(connectionApp:\i\})(\))(?=,\(0,\i\.jsx\)\(\i,\{popover:)/,
+        replace: "$1,dassSidebar)$2"
+    }, {
+        match: /(?<=,)(\(0,\i\.jsx\)\(\i,\{popover:\i,dismissPopover:)/,
+        replace: "dassSidebar?null:$1"
+    }, {
+        match: /(function\(\i\)\{)(?=let\{stream:\i,canGoLive:\i,canGoLiveActivity:)/,
+        replace: "$1let dassStop=arguments[0].dassStop;"
+    }, {
+        match: /(\i\.useCallback\(\(\)=>\{)(\(0,\i\.A\)\((\i)\))(\},\[\3)(\]\))/,
+        replace: "$1$self.stopSidebarStream(dassStop,()=>$2)$4,dassStop$5"
+    }, {
+        match: /(\i=\(\)=>\{\i\(\),)(\(0,\i\.X\)\(\i,\i\.O\.STREAM,!1\))(?=\},\i=\i\.\i,)/,
+        replace: "$1dassStop||$2"
+    }, {
+        match: /(\(\i\?\?\i\)==null\?\(0,\i\.jsx\)\(\i,\{isActivity:)/,
+        replace: "dassStop?null:$1"
     }]
 }];
 

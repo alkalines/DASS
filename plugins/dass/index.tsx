@@ -5,23 +5,27 @@
  */
 
 import { definePluginSettings } from "@api/Settings";
+import ErrorBoundary from "@components/ErrorBoundary";
 import { Paragraph } from "@components/Paragraph";
 import definePlugin, { OptionType } from "@utils/types";
 import { SelectedChannelStore, showToast, UserStore } from "@webpack/common";
+import type { ComponentType } from "react";
 
 import { forgetRememberedAccount, readRememberedAccount, writeRememberedAccount } from "./accountStorage";
 import { createCallDiscovery } from "./callDiscovery";
+import { isDassParticipant, participantTitle, projectParticipants } from "./callPresentation";
 import { type EquibopCaptureBridge, LocalCaptureCheck } from "./capture";
 import { DiscoveryController } from "./controller";
 import { logDiagnostic } from "../../clients/spike/diagnostics";
-import { DISCORD_SHARE_PATCHES, isLocalPublisherLive, type PublishIntent, routePublish, routeWatch, type WatchIntent } from "./discordAdapter";
-import { gridTileKeyExtractor } from "./gridPresentation";
-import { type GridRuntime, type GridTileRenderer, useGridTiles, useHasGridShares } from "./gridTile";
-import { PublishController } from "./publishing";
+import { DISCORD_PRESENTATION_PATCHES, DISCORD_SHARE_PATCHES, isLocalPublisherLive, type PublishIntent, routePublish, routeWatch, type WatchIntent } from "./discordAdapter";
+import { gridShares, gridTileKeyExtractor } from "./gridPresentation";
+import { CallAudioControl, callPresentation, type CallTileProps, type CallViewProps, type FocusedCallProps, type GridRuntime, type GridTileRenderer, NativeCallView, NativeGridTile, type TileAction, useFocusedCallProps, useGridTiles, useHasGridShares } from "./gridTile";
+import { hasAcceptedPublishCapture, PublishController } from "./publishing";
 import type { DassShare } from "./routing";
 import { DassSession } from "./session";
 import { SettingsPanel } from "./settingsPanel";
 import { NativeShareButton, type ShareButtonProps, usePublisherStatus, usePublishingState } from "./shareButton";
+import { sidebarActionProps, type SidebarBodyProps, type SidebarState, stopSidebarStream } from "./sidebarPresentation";
 import { SpikePeer } from "../../clients/spike/peer";
 import { stopSpikeTest } from "./spikeTest";
 import { WatchController } from "./watching";
@@ -44,6 +48,7 @@ let gridWatchEpoch = 0;
 function stopGridWatching() {
     ++gridWatchEpoch;
     watching.reset();
+    callPresentation.reset();
 }
 
 async function watchGridShare(share: DassShare) {
@@ -63,7 +68,13 @@ async function watchGridShare(share: DassShare) {
 }
 
 const gridRuntime: GridRuntime = { publisher, directory, watching, currentCall, isActive: () => pluginActive,
-    watch: share => { void watchGridShare(share); }, stopWatching: stopGridWatching };
+    watch: share => { void watchGridShare(share); }, stopWatching: stopGridWatching, stopPublishing: () => publisher.reset() };
+
+function currentParticipants(channelId: string) {
+    return projectParticipants(gridShares(channelId, currentCall(), pluginActive, !!publisher.getPreviewStream(), directory.getSnapshot(), watching.getSnapshot()));
+}
+
+let NativeSidebarBody: ComponentType<SidebarBodyProps> | undefined;
 
 function stopMedia() {
     publisher.reset();
@@ -163,8 +174,8 @@ export default definePlugin({
     // Add the maintainer's confirmed Discord ID before distribution; never invent one.
     authors: [],
     settings,
-    patches: DISCORD_SHARE_PATCHES,
-    settingsAboutComponent: () => <Paragraph>Configure your account once, then use the call's Share button. Supported builds show your local LIVE badge and DASS preview/watch tiles in the ordinary grid. Runtime verification, remote voice-row badges and full native player integration remain incomplete. The temporary test viewer remains in Advanced options.</Paragraph>,
+    patches: [...DISCORD_SHARE_PATCHES, ...DISCORD_PRESENTATION_PATCHES],
+    settingsAboutComponent: () => <Paragraph>Configure your account once, then use the call's Share button. Supported builds route DASS tiles through the call grid, focused layout and filmstrip, with independent share audio controls and a local sidebar card. Runtime verification, zoom, individual tile popouts and remote voice-row badges remain incomplete. The temporary test viewer remains in Advanced options.</Paragraph>,
     ShareButton(props: ShareButtonProps) {
         return <NativeShareButton {...props} controller={publisher} />;
     },
@@ -177,13 +188,54 @@ export default definePlugin({
         return isLocalPublisherLive({ pluginActive, publisherPhase: status.phase, discordUserId, discordChannelId,
             localDiscordUserId: UserStore.getCurrentUser()?.id, currentDiscordChannelId: currentCall() });
     },
-    useGridTiles(channelId: string, nativeTiles: GridTileRenderer[], className: string) {
-        return useGridTiles(gridRuntime, channelId, nativeTiles, className);
+    useGridTiles(channelId: string, nativeTiles: GridTileRenderer[], className: string, onClick?: TileAction, onDoubleClick?: TileAction) {
+        return useGridTiles(gridRuntime, channelId, nativeTiles, className, onClick, onDoubleClick);
     },
     useHasGridShares(channelId: string) {
         return useHasGridShares(gridRuntime, channelId);
     },
     gridTileKeyExtractor,
+    isDassParticipant,
+    dassParticipantTitle: participantTitle,
+    nativeParticipant(participant: unknown) {
+        return isDassParticipant(participant) ? null : participant;
+    },
+    CallView(props: CallViewProps) {
+        return <NativeCallView {...props} runtime={gridRuntime} />;
+    },
+    useFocusedCallProps(props: FocusedCallProps) {
+        return useFocusedCallProps(gridRuntime, props);
+    },
+    selectCallParticipant(channelId: string, participant: unknown) {
+        const handled = callPresentation.select(channelId, participant, currentParticipants(channelId));
+        if (handled && isDassParticipant(participant) && participant.dassShare.kind === "remote") {
+            const status = watching.getSnapshot();
+            if (!status.stream && status.phase !== "loading") gridRuntime.watch(participant.dassShare.share);
+        }
+        return handled;
+    },
+    wrapCallTile(NativeTile: ComponentType<CallTileProps>) {
+        return ErrorBoundary.wrap((props: CallTileProps) => isDassParticipant(props.participant)
+            ? <NativeGridTile {...props} runtime={gridRuntime} /> : <NativeTile {...props} />, { message: "Call tile failed." });
+    },
+    renderCallAudio(participant: unknown) {
+        return isDassParticipant(participant) && participant.dassShare.kind === "remote" ? <CallAudioControl /> : null;
+    },
+    useNativeSidebarProps<T extends Record<string, unknown>>(props: T) {
+        const status = usePublisherStatus(publisher);
+        const preview = publisher.getPreviewStream();
+        const dassSidebar: SidebarState | undefined = pluginActive && hasAcceptedPublishCapture(status.phase) && preview
+            ? { metadata: { sourceName: preview.getVideoTracks()[0]?.label || undefined }, stop: gridRuntime.stopPublishing } : undefined;
+        return { ...props, dassSidebar };
+    },
+    setNativeSidebarBody(Body: ComponentType<SidebarBodyProps>) {
+        NativeSidebarBody = ErrorBoundary.wrap(Body, { message: "DASS native stream card failed." });
+    },
+    renderNativeSidebarBody(metadata: SidebarState["metadata"]) {
+        return NativeSidebarBody ? <NativeSidebarBody streamMetadata={metadata} /> : <Paragraph>DASS native stream card unavailable.</Paragraph>;
+    },
+    sidebarActionProps,
+    stopSidebarStream,
     chooseShareTransport(nativeStart: () => void) {
         logDiagnostic("share action intercepted", { pluginActive, defaultDass: settings.store.defaultDass,
             inCall: !!currentCall(), configured: session.getSnapshot().configured });

@@ -13,10 +13,16 @@ The capability checker described below is still a separate scaffold-only check.
 Automatic authenticated call discovery is retained, but the separate DASS Streams
 button and call watch panel were removed after user feedback.
 The user reports local preview and LIVE presentation in the intended grid space.
-DASS-owned preview/watch tiles now use the existing unselected
-call grid, without a separate panel. Remote voice-row badges and full native
-player/selected-layout integration remain incomplete; remote playback/audio are
-not yet runtime-verified. Streaming state now begins after OS source selection
+DASS-owned preview/watch tiles use the existing call grid, without a separate
+panel. The latest revision projects DASS-owned selection into the connected call
+view and reuses the focused layout and filmstrip, with guarded DASS tile rendering.
+The sidebar now reuses Discord's existing activity-panel frame, stream-card body,
+source icon, title, action button, Stop icon and localized tooltip above Voice
+Connected. It replaces only the local display metadata and DASS Stop callback,
+without registering a native Discord stream. The rejected custom card and its
+stylesheet are removed.
+These changes and remote playback/audio are not yet runtime-verified. Remote
+voice-row badges remain unavailable. Streaming state begins after OS source selection
 and quality/audio consent complete, rather than during authentication or the
 open picker. Remote Watch Stream requests audible playback, with a Play fallback
 only when autoplay is blocked; local preview stays muted. These latest changes
@@ -27,10 +33,18 @@ needed to trace those remaining private hooks. No backend changes are required
 by this client integration; latest publisher/viewer runtime acceptance is still
 outstanding.
 
-The latest tile revision reuses Discord's actual frame and LIVE badge rather
-than the generic Card. Its DASS video and watch content remain independent of
-Discord's media engine. Native selection, filmstrip, popout and zoom are still
-unimplemented, and the frame revision needs runtime acceptance.
+Tiles reuse Discord's actual frame and LIVE badge rather than the generic Card.
+Their DASS video and watch content remain independent of Discord's media engine.
+All tile videos are muted, including filmstrip previews; the connected call owns
+separate audible playback of the receiver stream. Share mute/volume is independent
+of Discord voice and uses the researched nonlinear curve over 0..100%, without
+amplification. The hover/focus slider uses the host Slider rather than the native
+audio-store wrapper or the media bar with the documented popout listener risk.
+It is not an exact reproduction of the native vertical speaker widget.
+Browser video controls are removed. Call-level fullscreen/popout controls retain
+their native routes, but popout media/audio handoff still needs runtime testing;
+individual tile popouts and zoom are unavailable. Tile overlays use DASS-owned
+hover/focus styling rather than the complete native idle/overlay implementation.
 
 ## Sharing diagnostics
 
