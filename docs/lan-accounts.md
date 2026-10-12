@@ -70,7 +70,8 @@ shown below. Both files are private and ignored by Git.
 ```
 
 - At most 128 KiB, 256 unique accounts and 16 distinct room grants per account.
-  Usernames/room IDs are 1–64 ASCII letters, digits, underscores or hyphens.
+  Usernames and exact room IDs are 1–64 ASCII letters, digits, underscores or
+  hyphens. Account grants also accept the explicit all-rooms selector `"*"` below.
 - Admin-created passwords must be 12–512 UTF-8 bytes without control characters.
   Use strong, unique passwords. Password hashes use the existing pinned Argon2id
   parameters: version 19, 19,456 KiB memory, two iterations, one lane, 16-byte
@@ -87,11 +88,59 @@ shown below. Both files are private and ignored by Git.
   Do not share one account between clients. Account login is bounded/rate-limited,
   but this is not a completed production brute-force or multi-device system.
 
+### Temporary all-rooms access for trusted accounts
+
+For dynamic DM/group calls, use this grant in an account's `rooms` array:
+
+```json
+"rooms": [
+  { "room_id": "*", "access": true, "publish": true, "subscribe": true }
+]
+```
+
+Only the literal `"*"` is supported, not patterns such as `"dm_*"`. This option
+is account-only (`DASS_USERS` / `create-user`); legacy invite grants remain exact.
+Exact grants remain the default. Set `publish` or `subscribe` to false to restrict
+the all-rooms role. Authentication, account expiry/revocation and media-session
+limits still apply. Wildcard selection is server configuration, not a valid room
+ID in signaling messages.
+
+**Security limitation:** this grants access to every DASS room on this backend,
+including calls the account does not belong to in Discord. Knowing/guessing a
+channel ID is not proof of membership. Use only for trusted users on a private
+backend; do not use this as isolation between unrelated users. Grants are
+additive: an exact grant with `false` permissions does not override permissions
+already granted by `"*"`. To exclude a room, remove wildcard access and use exact
+grants instead. Remove the wildcard grant to revoke broad access, regenerate
+the private backend environment file and recreate the backend.
+
+**Future authorization work:** replace broad wildcard grants with authenticated,
+short-lived call-scoped admission, server-enforced publisher/viewer membership
+and revocation when membership changes. Dynamic DMs should not require manual
+channel lists, but neither client-provided Discord IDs nor extracted Discord
+tokens may become authorization. This is a design requirement, not functionality
+provided by the current implementation.
+
+The admin CLI accepts the same selector in its `ROOM_ID` argument. Quote it so
+the shell cannot expand it into filenames:
+
+```sh
+docker compose run --rm tooling cargo run --locked -p dass-backend -- \
+  create-user .secrets/accounts/alice.json .secrets/accounts/alice-password.txt \
+  alice '*' both "$DASS_ACCOUNT_EXPIRES" 'Alice'
+```
+
+Run from the repository root after preparing the private password file and expiry
+as described below. Existing account record files are not overwritten. For an
+existing user, edit only their grants in the private JSON; no password rehash is
+required. Rebuild the backend before enabling wildcard records on older binaries.
+
 ### Generate the hash without exposing the password
 
 The `lan_test` identifiers in the transport examples below are placeholders.
 For the current call-based plugin UI, substitute the actual Discord call/channel
-ID in each backend room grant and `create-user` command. Users do not enter it
+ID in each exact backend room grant and `create-user` command, or explicitly use
+the trusted-account wildcard above. Users do not enter it
 into plugin configuration; the server must still authorize it explicitly.
 
 All commands here run from the **DASS repository root**. Rust tools run in Docker.

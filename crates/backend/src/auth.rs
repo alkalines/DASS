@@ -17,10 +17,12 @@ pub const MAX_ACCOUNT_PASSWORD_BYTES: usize = dass_protocol::signaling::MAX_LOGI
 pub const MIN_ACCOUNT_PASSWORD_BYTES: usize = 12;
 const MAX_GRANTS: usize = 16;
 const MAX_DISPLAY_NAME_BYTES: usize = dass_protocol::signaling::MAX_PUBLISHER_DISPLAY_NAME_BYTES;
+const ALL_ROOMS_GRANT: &str = "*";
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RoomGrant {
+    /// Exact room ID, or "*" for explicit backend-wide account access (not invites).
     pub room_id: String,
     pub access: bool,
     pub publish: bool,
@@ -95,13 +97,13 @@ fn valid_display_name(value: &str) -> bool {
         && !value.chars().any(char::is_control)
 }
 
-fn valid_room_grants(rooms: &[RoomGrant]) -> bool {
+fn valid_room_grants(rooms: &[RoomGrant], allow_all_rooms: bool) -> bool {
     if rooms.len() > MAX_GRANTS {
         return false;
     }
     let mut unique_rooms = HashSet::new();
     rooms.iter().all(|grant| {
-        valid_identifier(&grant.room_id)
+        (valid_identifier(&grant.room_id) || (allow_all_rooms && grant.room_id == ALL_ROOMS_GRANT))
             && unique_rooms.insert(&grant.room_id)
             && (grant.access || (!grant.publish && !grant.subscribe))
     })
@@ -165,7 +167,7 @@ impl InviteStore {
                     .display_name
                     .as_deref()
                     .is_some_and(|name| !valid_display_name(name))
-                || !valid_room_grants(&invite.rooms)
+                || !valid_room_grants(&invite.rooms, false)
             {
                 return Err("invalid invite record");
             }
@@ -198,7 +200,7 @@ impl InviteStore {
                     .display_name
                     .as_deref()
                     .is_some_and(|name| !valid_display_name(name))
-                || !valid_room_grants(&user.rooms)
+                || !valid_room_grants(&user.rooms, true)
             {
                 return Err("invalid DASS_USERS record");
             }
@@ -290,9 +292,15 @@ impl InviteStore {
         permission: Permission,
         now_seconds: u32,
     ) -> bool {
+        if !valid_identifier(room_id) {
+            return false;
+        }
         self.current(invite_id, now_seconds).is_some_and(|invite| {
             invite.rooms.iter().any(|grant| {
-                grant.room_id == room_id
+                // TODO: Replace broad trusted-account access with authenticated,
+                // call-scoped admission. A Discord channel ID is not membership proof.
+                (grant.room_id == room_id
+                    || (self.account_ids.contains(invite_id) && grant.room_id == ALL_ROOMS_GRANT))
                     && grant.access
                     && match permission {
                         Permission::Access => true,
@@ -377,7 +385,7 @@ pub fn create_user(
         || display_name
             .as_deref()
             .is_some_and(|name| !valid_display_name(name))
-        || !valid_room_grants(&rooms)
+        || !valid_room_grants(&rooms, true)
     {
         return Err("invalid DASS user record");
     }
@@ -494,6 +502,102 @@ mod tests {
                 .is_err()
         );
         assert!(InviteStore::from_bytes(&vec![b' '; MAX_INVITE_FILE_BYTES + 1]).is_err());
+    }
+
+    #[test]
+    fn all_rooms_account_grant_preserves_permissions_expiry_and_revocation() {
+        let user = create_user(
+            "alice".into(),
+            "correct horse battery staple",
+            None,
+            vec![RoomGrant {
+                room_id: ALL_ROOMS_GRANT.into(),
+                access: true,
+                publish: false,
+                subscribe: true,
+            }],
+            100,
+        )
+        .unwrap();
+        let bytes = serde_json::to_vec(&UsersFile {
+            version: 1,
+            users: vec![user],
+        })
+        .unwrap();
+        let mut store = InviteStore::from_users_bytes(&bytes).unwrap();
+        for room_id in ["room_1", "room_2", "123456789"] {
+            assert!(store.authorize("alice", room_id, Permission::Access, 99));
+            assert!(store.authorize("alice", room_id, Permission::Subscribe, 99));
+            assert!(!store.authorize("alice", room_id, Permission::Publish, 99));
+            assert!(!store.authorize("unknown", room_id, Permission::Access, 99));
+            assert!(!store.authorize("alice", room_id, Permission::Access, 100));
+        }
+        for room_id in ["", "*", "room/*", "room/name", &"x".repeat(65)] {
+            assert!(!store.authorize("alice", room_id, Permission::Access, 99));
+        }
+        store.invites.get_mut("alice").unwrap().revoked = true;
+        assert!(!store.authorize("alice", "new_dm", Permission::Subscribe, 99));
+    }
+
+    #[test]
+    fn wildcard_grants_are_explicit_account_only_and_not_glob_patterns() {
+        let grant = |room_id: &str| RoomGrant {
+            room_id: room_id.into(),
+            access: true,
+            publish: true,
+            subscribe: false,
+        };
+        assert!(valid_room_grants(&[grant("*")], true));
+        assert!(!valid_room_grants(&[grant("*")], false));
+        assert!(!valid_room_grants(&[grant("*"), grant("*")], true));
+        for pattern in ["room_*", "**", " *", "* "] {
+            assert!(!valid_room_grants(&[grant(pattern)], true));
+        }
+        assert!(!valid_room_grants(
+            &[RoomGrant {
+                room_id: "*".into(),
+                access: false,
+                publish: true,
+                subscribe: false,
+            }],
+            true,
+        ));
+        assert!(!valid_room_grants(
+            &(0..=MAX_GRANTS)
+                .map(|index| grant(&format!("room_{index}")))
+                .collect::<Vec<_>>(),
+            true,
+        ));
+        let (_, _, mut invite) = sample();
+        invite.rooms = vec![grant("*")];
+        let bytes = serde_json::to_vec(&InviteFile {
+            version: 1,
+            invites: vec![invite],
+        })
+        .unwrap();
+        assert!(InviteStore::from_bytes(&bytes).is_err());
+    }
+
+    #[test]
+    fn exact_and_all_rooms_grants_are_additive_not_deny_overrides() {
+        let (mut store, _) = sample_user_store();
+        store.invites.get_mut("alice").unwrap().rooms.push(RoomGrant {
+            room_id: ALL_ROOMS_GRANT.into(),
+            access: true,
+            publish: true,
+            subscribe: false,
+        });
+        assert!(store.authorize("alice", "room_1", Permission::Publish, 99));
+        assert!(store.authorize("alice", "room_1", Permission::Subscribe, 99));
+        assert!(store.authorize("alice", "new_dm", Permission::Publish, 99));
+        assert!(!store.authorize("alice", "new_dm", Permission::Subscribe, 99));
+        store.invites.get_mut("alice").unwrap().rooms = vec![RoomGrant {
+            room_id: ALL_ROOMS_GRANT.into(),
+            access: false,
+            publish: false,
+            subscribe: false,
+        }];
+        assert!(!store.authorize("alice", "new_dm", Permission::Access, 99));
     }
 
     #[test]

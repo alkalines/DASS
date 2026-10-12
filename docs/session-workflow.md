@@ -42,6 +42,10 @@ No client helper executable, subprocess, proxy or external encoder is introduced
 The backend still checks scoped room grants: provision the Discord call/channel ID
 as `room_id` in the account's grant instead of an unrelated `lan_test` room. This
 ID selects context only; it is not proof of Discord membership or authorization.
+For trusted private-backend users with dynamic DM calls, account grants can use
+`"room_id": "*"` for all rooms. This is backend-wide access, not verified call
+membership. See the limitations and future authorization note in
+[lan-accounts.md](lan-accounts.md#temporary-all-rooms-access-for-trusted-accounts).
 
 ## Publisher names
 
