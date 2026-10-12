@@ -381,7 +381,139 @@ playback remain separate, unverified runtime questions. Next investigation shoul
 cover lifecycle execution and all participant consumers needed by the proposed
 projection, rather than gathering more duplicate player-frame source.
 
+### Participant filtering and native media ownership follow-up
+
+The complete user-supplied `build/discord-native-ownership-probe.json` resolves
+all requested imports; none of its module sources were truncated.
+
+| Boundary | Source evidence | DASS consequence |
+| --- | --- | --- |
+| Native participant video data, `803301` | VideoStreamStore maps user + guild + media context to an engine stream ID on `RTC_CONNECTION_VIDEO`. Voice-state updates remove mappings and can clear local-session data. Timeout state is separately keyed by user/context. | Participant video IDs are engine projections, not arbitrary share IDs; do not dispatch fake connection-video events to populate them. |
+| Audio actions, `827343` | Local mute dispatches `AUDIO_TOGGLE_LOCAL_MUTE`; local volume converts/clamps through `386723.z`, dispatches `AUDIO_SET_LOCAL_VOLUME` and schedules user-volume telemetry. | Never route DASS playback controls through native audio action creators. |
+| Audio state/application, `192820` | Mute/volume handlers update context-specific settings through `nh`, which normally persists audio settings, then call `tt.eachConnection(..., context)` to apply native connection mute/volume. Self-user updates are ignored. | Native speaker state is intentionally shared with native media ownership; replacing only a displayed value would leave wrong side effects. |
+| Auxiliary focused participants, `947580.Cf` | Builds the selected stream owner's camera, the selected user's stream, and the local camera using native participant types, user IDs and engine stream IDs. | A DASS branch must guard this entire helper before any native identity assumptions. The current uncommitted adapter has a matching early-return patch; execution is not established by this source report. |
+| Web media registry, `201327` | `ju` allocates a generated stream ID and stores a stream, `yL` retrieves it, `it` deletes the entry. | This registry is distinct from VideoStreamStore. Native registry membership is not DASS authorization or transport ownership. Do not insert DASS media to unlock native UI. |
+| Video mount activity, `782425` | `NM` increments a per-stream count and calls a registered callback on the zero-to-one transition. `gm` decrements and calls it at zero; `EV` installs the callback. | Mount/unmount/pause can affect native media behavior even when tracks are borrowed. Callback registration/implementation must be traced before considering reuse. |
+
+`192820` creates its engine via `205693.hB(205693.WI())`. Remaining source targets
+are that engine selector and `113634`'s registry registration/deletion and
+mount-activity callback callers. Their execution order, track ownership and
+stop/source-end effects remain unknown. Do not equate static imports or a
+successful presentation patch with runtime lifecycle coverage.
+
+The checkout also now contains unrelated/uncommitted presentation implementation
+work (`callPresentation.ts`, `sidebarPresentation.ts`, adapter/tile changes and
+tests). This research preserves it. Research conclusions are not acceptance of
+its focus, popout, audio ownership or lifecycle behavior.
+
+### Web-engine lifecycle and separate audio output
+
+`build/discord-native-media-lifecycle-probe.json` supplies complete factories
+`113634` and `205693`. It finds only two loaded numeric-import consumers of
+`201327`/`782425`: `113634` and `157667`. The latter is truncated at one million
+characters; absence of a caller in that excerpt is not absence in the full module.
+
+`205693.WI` selects the first supported native or web engine, and `hB` constructs
+it. The earlier live video owner was the web engine's `e9`, but this does not
+independently validate all platform branches or the current engine after restart.
+
+Source-level web-engine capture/ownership chain:
+
+```text
+MediaEngineWebRTC.getDesktopSource(constraints, audioRequested)
+  -> DesktopInputPool.acquire
+  -> desktop input e6.get
+  -> installed navigator.mediaDevices.getDisplayMedia
+  -> desktop input owns returned stream and registers its video ID
+  -> pool retains accepted input by source ID
+
+MediaEngineWebRTC.setGoLiveSource(source, STREAM context)
+  -> pool.get(source.desktopDescription.id), removing pooled entry
+  -> matching publisher connection.setDesktopInput(input)
+  -> connection input.setDesktop(input)
+  -> merged desktop tracks become publisher input stream
+  -> if no publisher consumes it, return input to pool
+```
+
+The input's source-end event propagates from the video track through desktop
+input, combined connection input, connection and engine. Its final stream-state
+dispatch/stop caller still needs execution evidence. Ordinary input teardown
+deletes the registry entry and stops every captured track; a separate explicit
+reuse branch removes listeners and returns the input to its pool. Do not borrow
+these native teardown methods for DASS-owned capture leases.
+
+Native remote output `er` owns a received MediaStream and a separate audio
+element. Adding a track initializes audio playback, reports interaction-required
+failure, and registers video separately for the muted video renderer. Audio
+mute/volume are applied to this audio element; the web output rounds/clamps volume
+and divides by 100. Connection output volume also incorporates per-user volume
+and priority-speaker attenuation. This explains the separate native audio path;
+it is not remote-audio verification for DASS.
+
+`MediaEngineWebRTC` installs `handleActiveSinksChange` through `782425.EV`.
+Mount/pause counts call it, and it forwards each change to every connection's
+`setHasActiveVideoOutputSink`. Therefore the native video component participates
+in connection sink management, not only rendering. The inherited downstream
+sink implementation has not been traced; no network outcome is claimed.
+
+Next gate: user-driven native runtime phase ordering. The bounded observer in
+`scripts/discord-native-lifecycle-observer.js` subscribes only to selected event
+names and stores relative times, never event payloads. It does not patch capture,
+dispatch fake events or initiate sharing. Store-handler ordering and capture
+acceptance cannot be inferred solely from dispatcher subscriber timestamps;
+manual phase markers and later targeted breakpoints supplement that evidence.
+
+### First native runtime event trace
+
+The user supplied `build/discord-native-lifecycle-events.json` after running the
+observer with DASS disabled. It reports `active: false`, zero dropped events and
+one STREAM_START-to-STREAM_CLOSE/DELETE sequence. There are no manual phase
+markers beyond observer installation. Times below are relative to STREAM_START;
+they are one observed interaction, not performance measurements or guarantees.
+
+| Relative time | Observed event |
+| --- | --- |
+| 0 ms | STREAM_START |
+| +294 ms | STREAM_CREATE |
+| +1,221 ms | RTC_CONNECTION_VIDEO |
+| +1,240 ms | CLEAR_VIDEO_STREAM_READY_TIMEOUT |
+| +1,734 ms | VOICE_CHANNEL_SELECT |
+| +1,735 ms | CHANNEL_RTC_SELECT_PARTICIPANT |
+| +1,815 ms | CLEAR_VIDEO_STREAM_READY_TIMEOUT |
+| +3,763 ms | CHANNEL_RTC_UPDATE_LAYOUT |
+| +5,251 ms | STREAM_UPDATE |
+| +9,864 ms | VOICE_CHANNEL_SELECT |
+| +9,865 ms | CHANNEL_RTC_SELECT_PARTICIPANT |
+| +9,912 ms | CLEAR_VIDEO_STREAM_READY_TIMEOUT |
+| +18,079 ms | STREAM_CLOSE |
+| +18,276 ms | STREAM_DELETE |
+| +18,277 ms | RTC_CONNECTION_VIDEO |
+
+This confirms event ordering for one ordinary native local-share lifecycle and
+two selection actions. The paired VOICE_CHANNEL_SELECT/selection events agree
+with the effectful native selection handler source; they do not prove a change
+of voice channel or a voice reconnect. No STREAM_WATCH was observed.
+
+Because payloads were deliberately excluded, the last RTC_CONNECTION_VIDEO event
+cannot be asserted to contain a null stream ID. The trace also does not identify
+which selection cleared/focused the tile, the selected layout value, popout
+state, the exact capture-acceptance point or whether closure came from Stop or
+source end. No event establishes picker cancellation; a cancelled attempt can
+leave no events in this observer. These gaps do not invalidate the recorded
+lifecycle and do not require repeating the entire test merely for cleaner marks.
+
+Implication for the proposed presentation boundary: stream existence, available
+video and selected/focused layout progress separately. Do not couple DASS
+selection to a fabricated native start or assume capture acceptance means the
+remote media is ready. Preserve owned preparing/publishing/receiving states and
+reconcile selected participants when their authorized share disappears.
+
 ## Current DASS pipeline and ownership
+
+This section records the original handoff snapshot. The newer connected-call,
+focused-layout and sidebar implementation is audited against the follow-up native
+evidence in [native-presentation-audit.md](native-presentation-audit.md), including
+remaining lifecycle and presentation mismatches.
 
 ```text
 supported Share action

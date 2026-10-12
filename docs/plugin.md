@@ -2,6 +2,9 @@
 
 For native screenshare UI continuation and the pipeline investigation, see
 [native-screenshare-handoff.md](native-screenshare-handoff.md).
+The follow-up [native presentation audit](native-presentation-audit.md) maps the
+current adapter to the traced native state/media owners and prioritizes remaining
+integration gaps. Passing unit tests does not establish native UI acceptance.
 
 Discord Alternative ScreenShare (DASS) now has a build-time Equicord userplugin
 in `plugins/dass`. It now includes an experimental authenticated directory and
