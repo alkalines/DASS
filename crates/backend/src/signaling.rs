@@ -331,7 +331,10 @@ async fn upgrade(
         || headers.contains_key(header::AUTHORIZATION)
         || headers.contains_key(header::COOKIE)
     {
-        tracing::warn!(code = "unexpected_auth_or_query", "signaling upgrade rejected");
+        tracing::warn!(
+            code = "unexpected_auth_or_query",
+            "signaling upgrade rejected"
+        );
         return StatusCode::BAD_REQUEST.into_response();
     }
     let Ok(upgrade) = upgrade else {
