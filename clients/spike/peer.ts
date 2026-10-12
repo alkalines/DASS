@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
+import { logDiagnostic } from "./diagnostics";
 import type { CaptureLease } from "../../plugins/dass/routing";
 import { type DassAuthentication, SpikeSignaling, SpikeSignalingError } from "./signaling";
 
@@ -141,9 +142,11 @@ export class SpikePeer {
             const sdp = peer.localDescription?.sdp;
             if (!sdp) throw new SpikePreparationError("missing_offer");
             connection.offer = ipv4Offer(sdp);
+            logDiagnostic("peer prepared", { publisher: !!options.capture, candidateCount: connection.candidates.length });
             return connection;
         } catch (error) {
             const cancelled = connection.closed.aborted || options.signal.aborted;
+            logDiagnostic("peer preparation failed", { code: error instanceof SpikePreparationError ? error.code : cancelled ? "cancelled" : stage }, true);
             connection.close();
             throw error instanceof SpikePreparationError ? error : new SpikePreparationError(cancelled ? "cancelled" : stage);
         }
@@ -231,6 +234,7 @@ export class SpikePeer {
     }
 
     private closeWithDiagnostic(message: string) {
+        if (this.active) logDiagnostic("peer failed", { diagnostic: message }, true);
         if (this.active) this.closeDiagnostic = message;
         this.close();
     }
@@ -238,6 +242,7 @@ export class SpikePeer {
     private readonly onSignalingClosed = () => this.closeWithDiagnostic(this.activationFailure(this.signaling?.closed.reason));
 
     private readonly onState = () => {
+        logDiagnostic("peer connection state", { connection: this.peer.connectionState, ice: this.peer.iceConnectionState, stage: this.activationStage });
         if (this.peer.connectionState === "connected") clearTimeout(this.timer);
         else if (["failed", "closed", "disconnected"].includes(this.peer.connectionState)) {
             this.closeWithDiagnostic(`Media stopped [connection:${this.peer.connectionState}]. Check the UDP path and peer lifecycle.`);
@@ -248,6 +253,7 @@ export class SpikePeer {
         if (!this.active || this.capture || !["audio", "video"].includes(event.track.kind) || this.receivedStream.getTracks().length >= 2
             || this.receivedStream.getTracks().some(track => track.kind === event.track.kind)) { event.track.stop(); return; }
         this.receivedStream.addTrack(event.track);
+        logDiagnostic("viewer track received", { kind: event.track.kind });
         // Script-driven MediaStream.addTrack does not emit the UA addtrack event.
         this.tracksChanged.dispatchEvent(new Event("change"));
         event.track.addEventListener("ended", this.close, { once: true });

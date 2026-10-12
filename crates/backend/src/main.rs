@@ -109,7 +109,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tokio::net::TcpListener::bind(config.listen_addr).await?,
         tls,
     );
-    tracing::warn!("media and E2EE unavailable; readiness remains false");
+    tracing::info!(
+        tls = config.tls.is_some(),
+        signaling = state.is_some(),
+        "backend listening"
+    );
+    tracing::warn!("production media and E2EE unavailable; readiness remains false");
     let abort_reload = reload_task.as_ref().map(|task| task.abort_handle());
     axum::serve(
         listener,

@@ -76,8 +76,13 @@ try {
     const sources = new Map(readdirSync(sourceDirectory).map(name => [name, readFileSync(join(sourceDirectory, name), "utf8")
         .replaceAll('"../../clients/spike/peer"', '"./spikePeer"')
         .replaceAll('"../../clients/spike/signaling"', '"./spikeSignaling"')
+        .replaceAll('"../../clients/spike/diagnostics"', '"./diagnostics"')
         .replaceAll('"../../crates/protocol/generated/signaling"', '"./protocolSignaling"')]));
     const clientSources = [
+        ["diagnostics.ts", "clients/spike/diagnostics.ts", [
+            ['/** Callers', 'import { Logger } from "@utils/Logger";\n\nconst logger = new Logger("DASS");\n\n/** Callers'],
+            ['console.error', 'logger.error'], ['console.info', 'logger.info']
+        ]],
         ["spikePeer.ts", "clients/spike/peer.ts", [['"../../plugins/dass/routing"', '"./routing"'], ['"./signaling"', '"./spikeSignaling"']]],
         ["spikeSignaling.ts", "clients/spike/signaling.ts", [['"../../crates/protocol/generated/signaling"', '"./protocolSignaling"'], ['"../../crates/protocol/generated/validate"', '"./protocolValidate"']]],
         ["protocolSignaling.ts", "crates/protocol/generated/signaling.ts", []],

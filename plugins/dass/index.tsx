@@ -12,6 +12,7 @@ import { SelectedChannelStore, showToast } from "@webpack/common";
 import { forgetRememberedAccount, readRememberedAccount, writeRememberedAccount } from "./accountStorage";
 import { type EquibopCaptureBridge, LocalCaptureCheck } from "./capture";
 import { DiscoveryController } from "./controller";
+import { logDiagnostic } from "../../clients/spike/diagnostics";
 import { DISCORD_SHARE_PATCHES, type PublishIntent, routePublish, routeWatch, type WatchIntent } from "./discordAdapter";
 import { PublishController } from "./publishing";
 import { DassSession } from "./session";
@@ -80,6 +81,7 @@ const settings = definePluginSettings({
 function startRuntime() {
     if (pluginActive) return;
     pluginActive = true;
+    logDiagnostic("plugin started", { defaultDass: settings.store.defaultDass });
     discovery.start();
     watching.start();
     publisher.start();
@@ -96,6 +98,7 @@ function startRuntime() {
 }
 
 function stopRuntime() {
+    logDiagnostic("plugin stopped");
     pluginActive = false;
     unsubscribeWatchStatus?.();
     unsubscribePublishStatus?.();
@@ -119,6 +122,8 @@ export default definePlugin({
         return <NativeShareButton {...props} controller={publisher} />;
     },
     chooseShareTransport(nativeStart: () => void) {
+        logDiagnostic("share action intercepted", { pluginActive, defaultDass: settings.store.defaultDass,
+            inCall: !!currentCall(), configured: session.getSnapshot().configured });
         if (!pluginActive || !settings.store.defaultDass) return nativeStart();
         if (!["idle", "failed"].includes(publisher.getSnapshot().phase)) return publisher.reset();
         if (!currentCall()) return showToast("Join a Discord call before sharing.");

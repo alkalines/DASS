@@ -27,13 +27,20 @@ use dass_protocol::{
 use std::{
     collections::{HashMap, HashSet},
     net::{IpAddr, Ipv4Addr},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::{
     sync::{OwnedSemaphorePermit, Semaphore, watch},
     time::Instant,
 };
+use tracing::Instrument;
+
+// Process-local diagnostics only; unrelated to credentials, rooms or wire session IDs.
+static NEXT_CONNECTION: AtomicU64 = AtomicU64::new(1);
 
 const MAX_UNAUTHENTICATED_CONNECTIONS: usize = 16;
 const MAX_REQUEST_IDS: usize = 256;
@@ -244,6 +251,7 @@ fn register_publisher(
         session_id: joined.session_id.clone(),
         publishers: state.publishers.clone(),
     });
+    tracing::info!("connected publisher registered in directory");
     Ok(())
 }
 
@@ -316,19 +324,23 @@ async fn upgrade(
     upgrade: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
 ) -> Response {
     if !exact_origin(&headers) {
+        tracing::warn!(code = "origin", "signaling upgrade rejected");
         return StatusCode::FORBIDDEN.into_response();
     }
     if uri.query().is_some()
         || headers.contains_key(header::AUTHORIZATION)
         || headers.contains_key(header::COOKIE)
     {
+        tracing::warn!(code = "unexpected_auth_or_query", "signaling upgrade rejected");
         return StatusCode::BAD_REQUEST.into_response();
     }
     let Ok(upgrade) = upgrade else {
+        tracing::warn!(code = "invalid_upgrade", "signaling upgrade rejected");
         return StatusCode::BAD_REQUEST.into_response();
     };
     let upgrade = upgrade.protocols(["dass.v1"]);
     if upgrade.selected_protocol().is_none() {
+        tracing::warn!(code = "subprotocol", "signaling upgrade rejected");
         return StatusCode::BAD_REQUEST.into_response();
     }
     // Only the accepted TCP socket's peer address is authoritative here. Do
@@ -344,12 +356,15 @@ async fn upgrade(
         .is_some_and(SpikeConfig::auto_lan_peers_enabled)
         && !observed_peer_ip.is_some_and(crate::rtc::auto_lan_ip)
     {
+        tracing::warn!(code = "auto_lan_peer_policy", "signaling upgrade rejected");
         return StatusCode::FORBIDDEN.into_response();
     }
     let Ok(connection) = state.connections.clone().try_acquire_owned() else {
+        tracing::warn!(code = "connection_limit", "signaling upgrade rejected");
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
     let Ok(unauthenticated) = state.unauthenticated.clone().try_acquire_owned() else {
+        tracing::warn!(code = "unauthenticated_limit", "signaling upgrade rejected");
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
     let maximum = state.maximum_message_bytes;
@@ -359,7 +374,14 @@ async fn upgrade(
         .max_write_buffer_size(maximum * 2)
         .max_message_size(maximum)
         .max_frame_size(maximum)
-        .on_upgrade(move |socket| run(socket, state, connection, unauthenticated, observed_ip))
+        .on_upgrade(move |socket| {
+            run(socket, state, connection, unauthenticated, observed_ip).instrument(
+                tracing::info_span!(
+                    "signaling",
+                    connection = NEXT_CONNECTION.fetch_add(1, Ordering::Relaxed)
+                ),
+            )
+        })
 }
 
 pub fn now_seconds() -> Result<u32, &'static str> {
@@ -372,24 +394,42 @@ pub fn now_seconds() -> Result<u32, &'static str> {
 }
 
 async fn send(socket: &mut WebSocket, request_id: String, operation: ServerOperation) -> bool {
+    if let ServerOperation::Rejected { code } = &operation {
+        tracing::warn!(code = error_code(code), "signaling request rejected");
+    }
     let response = ServerMessage {
         protocol_version: PROTOCOL_VERSION,
         request_id,
         operation,
     };
     let Ok(json) = serde_json::to_string(&response) else {
+        tracing::error!(code = "serialization", "signaling response failed");
         return false;
     };
     if json.len() > MAX_MESSAGE_BYTES {
+        tracing::warn!(code = "size_limit", "signaling response failed");
         return false;
     }
-    matches!(
+    let sent = matches!(
         tokio::time::timeout(SEND_TIMEOUT, socket.send(Message::Text(json.into()))).await,
         Ok(Ok(()))
-    )
+    );
+    if !sent {
+        tracing::warn!(code = "socket_or_timeout", "signaling response failed");
+    }
+    sent
 }
 
 async fn close(socket: &mut WebSocket, session: Option<&JoinedSession>, reason: CloseReason) {
+    let code = match &reason {
+        CloseReason::Left => "left",
+        CloseReason::Expired => "expired",
+        CloseReason::Revoked => "revoked",
+        CloseReason::SetupTimeout => "setup_timeout",
+        CloseReason::Overloaded => "overloaded",
+        CloseReason::TransportFailed => "transport_failed",
+    };
+    tracing::info!(code, joined = session.is_some(), "signaling closing");
     if let Some(session) = session {
         // Invalidate discovery before awaiting a potentially slow close send.
         if let Some(publisher) = &session.publisher
@@ -510,6 +550,7 @@ async fn run(
     unauthenticated: OwnedSemaphorePermit,
     observed_ip: Option<IpAddr>,
 ) {
+    tracing::info!("signaling socket opened");
     let observed_peer_ip = observed_ip.and_then(|ip| match ip {
         IpAddr::V4(ip) => Some(ip),
         IpAddr::V6(_) => None,
@@ -543,6 +584,7 @@ async fn run(
         }
     };
     drop(unauthenticated);
+    tracing::info!("signaling authenticated");
     let Ok(now) = now_seconds() else {
         return;
     };
@@ -586,6 +628,7 @@ async fn run(
                 }
                 if let Some(peer) = session.as_mut().and_then(|session| session.receive_peer.as_mut())
                     && peer.timeout().await.is_err() {
+                    tracing::warn!(stage = "rtc_tick", "media transport failed");
                     close(&mut socket, session.as_ref(), CloseReason::TransportFailed).await;
                     break;
                 }
@@ -618,6 +661,7 @@ async fn run(
                 }
                 let media_response = media_operation(&state, &store, &identity.invite_id, now,
                     &message.operation, &mut session).await;
+                let operation_type = operation_name(&message.operation);
                 let response = match media_response {
                     Ok(Some(response)) => response,
                     Ok(None) => operate_for_peer(
@@ -630,16 +674,24 @@ async fn run(
                         &mut last_left,
                     ),
                     Err(()) => {
+                        tracing::warn!(operation = operation_type, "media operation failed");
                         close(&mut socket, session.as_ref(), CloseReason::TransportFailed).await;
                         break;
                     }
                 };
+                if operation_type != "directory" {
+                    tracing::info!(operation = operation_type, rejected = matches!(&response, ServerOperation::Rejected { .. }), "signaling operation completed");
+                }
                 if !send(&mut socket, message.request_id, response).await { break; }
             }
             datagram = receive_datagram(session.as_ref(), &mut udp_buffer) => {
-                let Ok((length, source)) = datagram else { break; };
+                let Ok((length, source)) = datagram else {
+                    tracing::warn!(stage = "udp_receive", "media transport failed");
+                    break;
+                };
                 if let Some(peer) = session.as_mut().and_then(|session| session.receive_peer.as_mut())
                     && peer.receive(&udp_buffer[..length], source).await.is_err() {
+                    tracing::warn!(stage = "rtc_receive", "media transport failed");
                     close(&mut socket, session.as_ref(), CloseReason::TransportFailed).await;
                     break;
                 }
@@ -647,6 +699,34 @@ async fn run(
         }
     }
     // RAII releases membership and the exclusive credential lease on every exit.
+    tracing::info!("signaling socket ended; releasing session resources");
+}
+
+fn error_code(code: &ErrorCode) -> &'static str {
+    match code {
+        ErrorCode::InvalidMessage => "invalid_message",
+        ErrorCode::UnsupportedVersion => "unsupported_version",
+        ErrorCode::Unauthorized => "unauthorized",
+        ErrorCode::Replay => "replay",
+        ErrorCode::E2eeUnavailable => "e2ee_unavailable",
+        ErrorCode::Overloaded => "overloaded",
+        ErrorCode::InvalidState => "invalid_state",
+        ErrorCode::TransportUnavailable => "transport_unavailable",
+    }
+}
+
+fn operation_name(operation: &ClientOperation) -> &'static str {
+    match operation {
+        ClientOperation::Login { .. } => "login",
+        ClientOperation::AccountLogin { .. } => "account_login",
+        ClientOperation::Directory { .. } => "directory",
+        ClientOperation::Join { .. } => "join",
+        ClientOperation::Leave { .. } => "leave",
+        ClientOperation::Publish { .. } => "publish",
+        ClientOperation::Subscribe { .. } => "subscribe",
+        ClientOperation::Offer { .. } => "offer",
+        ClientOperation::Ice { .. } => "ice",
+    }
 }
 
 async fn receive_datagram(

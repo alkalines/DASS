@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
+import { browserFailureCode, logDiagnostic } from "../../clients/spike/diagnostics";
 import { routeWatch } from "./discordAdapter";
 import { type DassShare, ScreenshareRouting, type ScreenshareTransport } from "./routing";
 import { SpikePeer } from "../../clients/spike/peer";
@@ -47,6 +48,7 @@ export class WatchController implements ScreenshareTransport {
     };
 
     private update(status: WatchStatus) {
+        if (status.phase !== this.status.phase) logDiagnostic("viewer phase", { phase: status.phase }, status.phase === "failed" || status.phase === "unauthorized");
         this.status = status;
         for (const listener of this.listeners) listener();
     }
@@ -90,6 +92,7 @@ export class WatchController implements ScreenshareTransport {
     }
 
     private failure(error: unknown) {
+        logDiagnostic("viewer setup failed", { code: error instanceof SpikeSignalingError ? error.code : browserFailureCode(error) }, true);
         const code = error instanceof SpikeSignalingError ? error.code : "";
         const unauthorized = code === "rejected:unauthorized" || code === "expired" || code === "server:expired" || code === "server:revoked";
         const disconnected = code === "socket" || code === "closed" || code === "server:transport_failed";

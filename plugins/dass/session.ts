@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
+import { browserFailureCode, logDiagnostic } from "../../clients/spike/diagnostics";
 import { type DassAuthentication, signalingUrl, SpikeSignaling, SpikeSignalingError } from "../../clients/spike/signaling";
 
 export interface AccountCredentials {
@@ -116,6 +117,7 @@ export class DassSession {
             }
         } catch (error) {
             if (this.active && this.epoch === epoch) {
+                logDiagnostic("account login failed", { code: error instanceof SpikeSignalingError ? error.code : browserFailureCode(error) }, true);
                 this.clear();
                 this.phase = "failed";
                 this.message = "DASS login failed. Check your account, TLS and LAN connection. No Discord fallback.";
@@ -174,5 +176,8 @@ export class DassSession {
 
     stop() { this.active = false; this.clear(); }
     async forget() { this.clear(); await this.storage?.forget(); }
-    private notify() { for (const listener of this.listeners) listener(); }
+    private notify() {
+        logDiagnostic("account state", { phase: this.phase, configured: !!this.access }, this.phase === "failed");
+        for (const listener of this.listeners) listener();
+    }
 }

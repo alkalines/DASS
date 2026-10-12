@@ -654,6 +654,7 @@ impl SpikePeer {
                     datagrams.push((transmit.destination, transmit.contents.to_vec()));
                 }
                 Output::Event(Event::Connected) => {
+                    tracing::info!(subscriber = self.is_subscriber(), "RTC transport connected");
                     self.connected = true;
                     if let PeerRoute::Subscriber(route) = &self.route {
                         route.set_ready().map_err(|_| SpikeFailure)?;
@@ -701,6 +702,7 @@ impl SpikePeer {
                 Output::Event(Event::IceConnectionStateChange(
                     IceConnectionState::Disconnected,
                 )) => {
+                    tracing::warn!(code = "ice_disconnected", "RTC transport failed");
                     return Err(SpikeFailure);
                 }
                 // No decoding, recording, media logging, control-plane JSON or IPC.

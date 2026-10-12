@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
+import { browserFailureCode, logDiagnostic } from "../../clients/spike/diagnostics";
 import type { CaptureLease } from "./routing";
 
 export interface EquibopCaptureBridge {
@@ -15,9 +16,18 @@ export interface EquibopCaptureBridge {
 export function createEquibopCapture(bridge?: EquibopCaptureBridge) {
     return async (signal: AbortSignal): Promise<CaptureLease> => {
         if (signal.aborted || bridge?.version !== 1 || typeof bridge.capture !== "function") {
+            logDiagnostic("capture unavailable", { code: signal.aborted ? "cancelled" : "bridge_missing_or_incompatible" }, true);
             throw new Error("The Equibop DASS capture bridge is unavailable.");
         }
-        return bridge.capture(signal);
+        logDiagnostic("capture picker requested");
+        try {
+            const lease = await bridge.capture(signal);
+            logDiagnostic("capture acquired", { audioSelected: lease.audioSelected });
+            return lease;
+        } catch (error) {
+            logDiagnostic("capture failed or cancelled", { code: signal.aborted ? "cancelled" : browserFailureCode(error) }, true);
+            throw error;
+        }
     };
 }
 

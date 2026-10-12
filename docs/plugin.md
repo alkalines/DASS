@@ -7,6 +7,44 @@ supervised LAN procedure and unverified exit condition. The earlier manual
 transport has user-reported LAN video evidence, not a completed transport gate.
 The capability checker described below is still a separate scaffold-only check.
 
+## Sharing diagnostics
+
+Rebuild from the repository root with `bun scripts/build-plugin.mjs`, then fully
+quit and restart the client using the custom build. In Equibop, the selected
+custom Equicord location should be `build/Equicord/dist`, not its `equibop` child.
+
+Open the client's Developer Tools Console, enable Info and Error levels, turn on
+Preserve log, and filter for `DASS`. Diagnostics are enabled by default and use
+Equicord's `Logger` in the staged plugin. They record share-action interception,
+account state, publisher/viewer phases, picker availability, fixed failure codes,
+signaling operation types, and peer connection/ICE state. They do not record
+credentials, usernames, room/channel IDs, backend URLs, candidate addresses, SDP,
+track labels or captured media. Browser exception messages and stacks are omitted.
+
+If `share action intercepted` is absent after clicking a supported Share button,
+check Equicord's patch warnings and plugin loading; the hooks are build-specific.
+`bridge_missing_or_incompatible` means the required Equibop capture bridge is not
+installed. `rejected:unauthorized` indicates backend authorization failure.
+An applied answer followed by a connection timeout points to the UDP path or
+peer lifecycle, not necessarily an authentication problem.
+
+Backend JSON diagnostics go to container stdout. From the repository root:
+
+```sh
+docker compose up -d --build backend
+docker compose logs --follow --tail=200 backend
+```
+
+Use the equivalent logs command for your LAN deployment's Compose file/service.
+The local scaffold Compose configuration is not a TLS media deployment. Backend
+logs record upgrade rejection categories, authentication, operation completion
+and rejection codes, RTC connection, publisher directory registration, and
+closure reasons. A process-local `connection` number groups socket events; it is
+not a user identifier and is not shared with the client. Directory polls and media
+packets are not logged. Third-party RTC logs remain filtered out, even if
+`RUST_LOG` is set. These diagnostics do not establish runtime compatibility or
+production readiness.
+
 The current [session and Share-button workflow](session-workflow.md) and
 [LAN account setup](lan-accounts.md) replace the manual publishing/refusal path
 below. Accounts can be remembered with OS-backed encryption and authenticate

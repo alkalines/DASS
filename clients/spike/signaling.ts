@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
+import { logDiagnostic } from "./diagnostics";
 import { type ClientOperation, type CloseReason, type ErrorCode, LOGIN_DEADLINE_MS, MAX_MESSAGE_BYTES, PROTOCOL_VERSION, type ServerOperation } from "../../crates/protocol/generated/signaling";
 import { parseClientMessage, parseServerMessage } from "../../crates/protocol/generated/validate";
 
@@ -82,6 +83,7 @@ export class SpikeSignaling {
         let socket: BrowserSocket;
         try { socket = createSocket(url, "dass.v1"); } catch { throw new Error("DASS socket could not be opened."); }
         const connection = new SpikeSignaling(socket, options.signal);
+        logDiagnostic("signaling connecting", { accountLogin });
         try {
             await connection.waitForOpen();
             const authenticated = await connection.request(validatedLogin.operation, "authenticated");
@@ -90,6 +92,7 @@ export class SpikeSignaling {
             if (expiryMs <= 0) throw new Error("DASS credential has expired.");
             // The backend also enforces expiry and the ten-minute connection ceiling.
             connection.expiryTimer = setTimeout(() => connection.close("expired"), Math.min(expiryMs, 600_000));
+            logDiagnostic("signaling authenticated");
             return connection;
         } catch (error) {
             connection.close();
@@ -132,6 +135,7 @@ export class SpikeSignaling {
             if (message.operation.type !== pending.expectedType) return this.close("protocol");
             this.pending = undefined;
             clearTimeout(pending.timer);
+            if (message.operation.type !== "directory") logDiagnostic("signaling response", { type: message.operation.type });
             pending.resolve(message.operation);
         } catch {
             this.close("protocol");
@@ -150,6 +154,7 @@ export class SpikeSignaling {
             return Promise.reject(new Error("DASS connection is overloaded."));
         }
         return new Promise((resolve, reject) => {
+            if (operation.type !== "directory") logDiagnostic("signaling request", { type: operation.type });
             this.pending = { requestId, expectedType, resolve, reject, timer: setTimeout(() => this.close("timeout"), LOGIN_DEADLINE_MS) };
             try { this.socket.send(message); } catch { this.close("socket"); }
         });
@@ -157,6 +162,7 @@ export class SpikeSignaling {
 
     close(code: SignalingFailureCode = "closed") {
         // Pending waits are rejected even if cancellation preceded wait registration.
+        if (this.active) logDiagnostic("signaling closed", { code, pendingType: this.pending?.expectedType ?? "none" }, !["closed", "cancelled"].includes(code));
         if (this.active) this.failureCode = code;
         const error = new SpikeSignalingError(this.failureCode);
         if (this.openWait) { clearTimeout(this.openWait.timer); this.openWait.reject(error); this.openWait = undefined; }
