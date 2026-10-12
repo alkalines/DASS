@@ -111,21 +111,39 @@ Source: [Chromium Linux certificate management](https://chromium.googlesource.co
 
 In the publisher's root Docker shell, from the DASS root:
 
+Use the single `compose.yaml`, not overlays. Prepare `.secrets/backend.env` and
+the `.secrets/runtime` TLS/invite files using
+[the invite configuration](control-plane.md#configuration-and-local-tls-testing). For this LAN
+signaling test, set the following in `.env`:
+
+```dotenv
+DASS_BIND_IP=X.X.X.1
+DASS_LAN_SERVER_IPV4=X.X.X.1
+DASS_INSECURE_LOCAL_DEV=false
+DASS_RTC_SPIKE=false
+DASS_RTC_AUTO_LAN_PEERS=false
+```
+
+Copy the previously generated `.secrets/lan-test/cert.pem`, `key.pem` and
+`invites.json` into `.secrets/runtime`, preserving restrictive permissions and
+ensuring container UID/GID `10001:10001` can read them. Replace the example IPs
+with the actual backend LAN IP if different.
+
 ```sh
-docker compose -f compose.yaml -f compose.direct-lan.example.yaml config --quiet
-docker compose -f compose.yaml -f compose.direct-lan.example.yaml up -d --build backend
+docker compose config --quiet
+docker compose up -d --build backend
 curl --cacert .secrets/lan-test/cert.pem --tlsv1.3 \
     -o /dev/null -w '%{http_code}\n' https://X.X.X.1:8080/health/live
 ```
 
 Expect liveness HTTP **204**. Readiness remains **503** even during this experiment.
 No `curl -k`, `noTLSVerify`, ignored certificate errors or disabled sandbox.
-Starting this override changes port 8080 from HTTP to HTTPS, including its
-loopback publication. An existing HTTP Cloudflare origin on that port will stop
+This configuration changes port 8080 from HTTP to HTTPS and publishes it only
+on the selected LAN address, not loopback. An existing HTTP Cloudflare origin on that port will stop
 working until reconfigured; it is deliberately not part of this LAN test.
 
-The Compose overrides retain non-root/read-only/capability-free/resource-bounded
-runtime settings. TCP is published only on loopback and the selected LAN address.
+The single Compose file retains non-root/read-only/capability-free/resource-bounded
+runtime settings. TCP is published only on the selected LAN address.
 Publication is not a source-IP firewall: review host/Docker firewall policy and
 restrict the LAN listener to these test clients before startup. Do not expose it
 on a router, public interface or Tailscale. The helper does not configure firewall
@@ -146,14 +164,15 @@ browser security. Set the DASS backend URL on both to
 
 ## 4. Media activation remains the next supervised step
 
-Only after both HTTPS checks succeed, append `compose.lan-spike.example.yaml` to
-the same Compose stack. It publishes UDP 50000–50001 on the backend LAN IP. Scope
+Only after both HTTPS checks succeed, set `DASS_RTC_SPIKE=true` in `.env` and
+recreate the backend with the same Compose file. UDP 50000–50001 are already
+published on the backend LAN IP but media is disabled until this opt-in. Scope
 firewall access to the clients; do not forward ports on the router.
 
 ### Default: exact client endpoints
 
 The default policy remains an exact IPv4-and-UDP-port allowlist. Set
-`DASS_TEST_ALLOWED_PEERS` to the fresh endpoints shown by both prepared clients
+`DASS_RTC_ALLOWED_PEERS` to the fresh endpoints shown by both prepared clients
 before starting the backend. A changed client port requires updating the list and
 recreating the backend before preparing/authenticating peers, as before. Do not
 reuse old gathered ports after peers stop.
@@ -164,24 +183,22 @@ The newer [LAN account setup](lan-accounts.md) uses username/password accounts
 with hashed server records and `DASS_RTC_AUTO_LAN_PEERS=true`. It needs neither
 client IP lists nor fresh per-stream UDP ports: authenticated candidates must
 match the observed WSS LAN peer IP and are admitted only for that RTC session.
-Its account overlay replaces the invite-based overlays in this older procedure.
+Its private account configuration replaces the invite configuration in this older procedure.
 The static trusted-IP and exact-port paths below remain explicit alternatives.
 
 ### Optional: trusted client IPv4 addresses
 
 To avoid a backend restart for every new Chromium UDP port, explicitly set
-`DASS_TEST_TRUSTED_CLIENT_IPS` to the clients' literal IPv4 addresses as seen by
-the backend; Compose passes it to the backend as
-`DASS_RTC_TRUSTED_CLIENT_IPS`. For example, in the publisher's root Docker shell,
+`DASS_RTC_TRUSTED_CLIENT_IPS` to the clients' literal IPv4 addresses as seen by
+the backend. For example, in the publisher's root Docker shell,
 replace the example with the actual client addresses and keep the variable set
 for both Compose commands:
 
 ```sh
-export DASS_TEST_TRUSTED_CLIENT_IPS='X.X.X.2'
-docker compose -f compose.yaml -f compose.direct-lan.example.yaml \
-    -f compose.lan-spike.example.yaml config --quiet
-docker compose -f compose.yaml -f compose.direct-lan.example.yaml \
-    -f compose.lan-spike.example.yaml up -d --build backend
+export DASS_RTC_SPIKE=true
+export DASS_RTC_TRUSTED_CLIENT_IPS='X.X.X.2'
+docker compose config --quiet
+docker compose up -d --build backend
 ```
 
 This is an explicit server-side trust setting: at most 16 comma-separated IPv4
@@ -191,7 +208,7 @@ documentation, benchmarking, shared-CGNAT, metadata and selected reserved
 destinations) and candidate ports below 1024. It checks the actual UDP source
 address as well as candidates and every outbound destination; client-supplied IP
 claims cannot add trusted addresses. Exact endpoints remain
-accepted if `DASS_TEST_ALLOWED_PEERS` is also set. With neither setting populated,
+accepted if `DASS_RTC_ALLOWED_PEERS` is also set. With neither setting populated,
 startup fails closed; with this option enabled, the exact list may be empty.
 
 Prepare each client normally after this one-time backend configuration. Its

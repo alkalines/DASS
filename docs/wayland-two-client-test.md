@@ -123,18 +123,18 @@ must be configured separately. Networking instructions will be finalized after
 the address/certificate choice is confirmed; installing the client alone cannot
 make the current loopback backend accessible to the other machine.
 
-`compose.lan-spike.example.yaml` is an opt-in override for the selected backend
-LAN address and UDP ports 50000–50001. Use it **after**
-`compose.signaling.example.yaml`; it retains the base loopback TCP publication
-and runtime hardening. It requires `DASS_TEST_ALLOWED_PEERS` containing fresh
-exact endpoints from both client panels, with no guessed/wildcard destinations.
+The single `compose.yaml` now replaces the old signaling/media overrides. Set
+the LAN bind/advertised IPs, TLS and explicit media opt-in as described in
+[direct-lan-test.md](direct-lan-test.md). Runtime hardening is retained. Static
+invite-based tests require `DASS_RTC_ALLOWED_PEERS` containing fresh exact
+endpoints from both client panels, with no guessed/wildcard destinations.
 The old endpoints recorded above must not be used after peers stop or expire.
-The override has not been run or Compose-validated by the agent (Docker access
-remains unavailable). No firewall, tunnel or networking changes were applied.
+No firewall, tunnel or networking changes were applied by the agent.
 
 Before any activation:
 
-- Supply `.secrets/cert.pem`, `.secrets/key.pem` and `.secrets/invites.json` as
+- Supply `.secrets/runtime/cert.pem`, `.secrets/runtime/key.pem` and
+  `.secrets/runtime/invites.json`, plus `.secrets/backend.env`, as
   described in [control-plane.md](control-plane.md), readable by the non-root
   backend without making the private key/credentials world-readable.
 - The public Cloudflare edge certificate is distinct from the backend PEM

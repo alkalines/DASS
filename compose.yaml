@@ -19,13 +19,32 @@ services:
     build:
       context: .
       target: runtime
+    # Compose >= 2.30: raw preserves Argon2 '$' characters in DASS_USERS.
+    # Optional so the default loopback discovery scaffold needs no secrets.
+    env_file:
+      - path: ./.secrets/backend.env
+        required: false
+        format: raw
     environment:
-      DASS_INSECURE_LOCAL_DEV: "true"
+      DASS_INSECURE_LOCAL_DEV: "${DASS_INSECURE_LOCAL_DEV:-true}"
       DASS_LISTEN_ADDR: "0.0.0.0:8080"
       DASS_MAX_CONCURRENT_REQUESTS: "128"
       DASS_MAX_CONTROL_MESSAGE_BYTES: "16384"
+      DASS_RTC_SPIKE: "${DASS_RTC_SPIKE:-false}"
+      DASS_RTC_BIND_IP: "0.0.0.0"
+      DASS_RTC_ADVERTISED_IP: "${DASS_LAN_SERVER_IPV4:-127.0.0.1}"
+      DASS_RTC_FIRST_PORT: "50000"
+      DASS_RTC_AUTO_LAN_PEERS: "${DASS_RTC_AUTO_LAN_PEERS:-false}"
+      DASS_RTC_ALLOWED_PEERS: "${DASS_RTC_ALLOWED_PEERS:-}"
+      DASS_RTC_TRUSTED_CLIENT_IPS: "${DASS_RTC_TRUSTED_CLIENT_IPS:-}"
     ports:
-      - "127.0.0.1:8080:8080"
+      # Never change DASS_BIND_IP from loopback while insecure mode is enabled.
+      - "${DASS_BIND_IP:-127.0.0.1}:8080:8080/tcp"
+      - "${DASS_BIND_IP:-127.0.0.1}:50000:50000/udp"
+      - "${DASS_BIND_IP:-127.0.0.1}:50001:50001/udp"
+    volumes:
+      # Only runtime TLS/invite files belong here, never password source files.
+      - ./.secrets/runtime:/run/dass:ro
     read_only: true
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]

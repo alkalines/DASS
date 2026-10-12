@@ -31,6 +31,13 @@ Follow the backend guide to generate `Cargo.lock`, run checks and start the cont
 Bun is used for TypeScript plugin tests and Equibop build tooling, not the server.
 Client tooling can run locally; only backend/Rust tooling is Docker-only.
 
+There is one Compose file: `compose.yaml`. For LAN settings, copy `.env.example`
+to `.env` and set your server IP. **Users are configured in
+`.secrets/accounts/users.json`**, generated with the Docker `create-user` command,
+then loaded through the private `.secrets/backend.env` file. See the exact
+[account setup commands](docs/lan-accounts.md#generate-the-hash-without-exposing-the-password).
+No `.env` or secrets means loopback-only discovery, not a working media server.
+
 To build Equicord with DASS, run `bun scripts/build-plugin.mjs` from this repository
 root (Bun 1.4.2, Node >=22 and Git required). In Equibop's Developer Options, select
 the printed `build/Equicord/dist` directory, fully restart, then enable **DASS** in

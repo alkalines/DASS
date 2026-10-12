@@ -9,7 +9,7 @@ invite-backed HTTPS/WSS control plane now passes user-run Docker validation; see
 
 ## Prerequisites
 
-- Docker Engine with the Compose v2 plugin and permission to use the daemon.
+- Docker Engine with Compose >= 2.30 and permission to use the daemon.
 - Network access to pull `rust:1.90.0-bookworm`, `debian:bookworm-slim` and crates.
 - No host Rust, Cargo, Bun, encoder or media helper is required for backend work.
 
@@ -118,7 +118,8 @@ docker compose up -d backend
 docker compose logs backend
 ```
 
-Only `127.0.0.1:8080` on the host is published. Inside the container the service
+With no `.env` or `.secrets/backend.env`, TCP 8080 and UDP 50000–50001 are
+published only on `127.0.0.1`; the UDP media listener is disabled. Inside the container the service
 binds to `0.0.0.0:8080`; other containers on the Compose network may reach it, so
 keep that network isolated. The runtime is non-root, read-only, has no Linux
 capabilities, and is capped at 1 CPU, 256 MiB memory and 64 processes/threads.
@@ -195,11 +196,21 @@ per-IP denial-of-service protection.
 
 ## Configuration
 
+`compose.yaml` is the only Compose file. `.env.example` documents the opt-in LAN
+settings: copy it to `.env` and edit the two IPs for your host. Never select a
+non-loopback `DASS_BIND_IP` while `DASS_INSECURE_LOCAL_DEV=true`. TLS/authentication
+variables belong in `.secrets/backend.env`, loaded without interpolation (raw
+format). Only `.secrets/runtime` is mounted read-only into the backend as
+`/run/dass`; keep password source files out of it. See
+[LAN account setup](lan-accounts.md) for user generation, permissions and startup.
+Without those private files, the default remains local discovery only.
+
 | Variable | Default | Behavior |
 | --- | --- | --- |
 | `DASS_INSECURE_LOCAL_DEV` | unset | Exactly `true` permits isolated loopback/container plaintext; otherwise TLS files and invite policy are required |
 | `DASS_TLS_CERT_FILE`, `DASS_TLS_KEY_FILE` | unset | Configure both for TLS 1.3; never combine with insecure mode |
-| `DASS_INVITE_FILE` | unset | Enables the timed-login control plane; mandatory in TLS mode |
+| `DASS_INVITE_FILE` | unset | Enables legacy invite login; TLS requires this or `DASS_USERS`, never both |
+| `DASS_USERS` | unset | Bounded hashed-account JSON; see [LAN accounts](lan-accounts.md) |
 | `DASS_LISTEN_ADDR` | `127.0.0.1:8080` | Literal IP/port; Compose sets `0.0.0.0:8080` for container networking |
 | `DASS_MAX_CONCURRENT_REQUESTS` | 128 | 1–1024; immediately reject excess active HTTP handlers with 503 |
 | `DASS_MAX_CONTROL_MESSAGE_BYTES` | 16384 | Discovery-only: 1–65536; with invites: minimum 1024, clamped to protocol maximum 16384; cap HTTP bodies/WS messages |

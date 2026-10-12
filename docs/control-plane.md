@@ -178,12 +178,33 @@ Supply a certificate trusted by the actual client for the hostname it connects
 to. No command here installs a root CA or bypasses browser certificate, CSP,
 mixed-content or local-network checks.
 
-`compose.signaling.example.yaml` is an optional local override mounting only
-those three files, read-only, and retaining the loopback host port from the base
-Compose file. After validation and preparing backend-readable files:
+Use the single `compose.yaml`. For loopback-only invite signaling, set these
+values in the repository-root `.env` (do not copy the LAN example for this mode):
+
+```dotenv
+DASS_BIND_IP=127.0.0.1
+DASS_INSECURE_LOCAL_DEV=false
+DASS_RTC_SPIKE=false
+DASS_RTC_AUTO_LAN_PEERS=false
+```
+
+Place the three backend-readable files in `.secrets/runtime` as `cert.pem`,
+`key.pem` and `invites.json`; that directory is mounted read-only at `/run/dass`.
+Create a private mode-0600 `.secrets/backend.env` with the following unquoted
+lines (no `DASS_USERS` in invite mode):
+
+```dotenv
+DASS_TLS_CERT_FILE=/run/dass/cert.pem
+DASS_TLS_KEY_FILE=/run/dass/key.pem
+DASS_INVITE_FILE=/run/dass/invites.json
+```
+
+Compose >= 2.30 is required for the raw environment-file format. After validation
+and preparing backend-readable files:
 
 ```sh
-docker compose -f compose.yaml -f compose.signaling.example.yaml up -d --build backend
+docker compose config --quiet
+docker compose up -d --build backend
 ```
 
 This is **local testing**, not authorization to expose the scaffold publicly.
@@ -235,7 +256,7 @@ Set `revoked: true`, remove a record, or reduce its grants in the admin file and
 signal the backend:
 
 ```sh
-docker compose -f compose.yaml -f compose.signaling.example.yaml kill -s SIGHUP backend
+docker compose kill -s SIGHUP backend
 ```
 
 Every reload invalidates **all existing authenticated connections**, including
@@ -243,10 +264,11 @@ unchanged invites, so no session retains stale permissions. A malformed/unreadab
 reload replaces policy with an empty deny-all store; it does not retain old access.
 SIGINT/SIGTERM similarly invalidate sessions before draining HTTP.
 
-The example uses individual file bind mounts. Atomic replacement of a host file
-may leave the container seeing its old inode: verify the mounted document or
-recreate the container after replacement. Do not assume SIGHUP notices host rename
-through a file bind mount. The production policy-management/storage strategy is
+The single Compose file mounts the containing `.secrets/runtime` directory,
+so atomic replacement of `invites.json` inside that directory is visible to
+the container. Keep replacement-file permissions readable by the backend and
+signal SIGHUP after the edit. Replacing the mounted directory itself requires
+recreating the container. The production policy-management/storage strategy is
 not implemented, and the file format has no public writable admin API.
 
 ## Capability truthfulness and next gate

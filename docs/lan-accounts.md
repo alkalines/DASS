@@ -42,6 +42,11 @@ restart capture or reconnect a failed stream without a user action.
 
 ## Account environment format
 
+**Edit `.secrets/accounts/users.json` to manage users.** Generate each password
+hash with `create-user` below; never put plaintext passwords in this JSON.
+After editing, regenerate `.secrets/backend.env` and recreate the backend as
+shown below. Both files are private and ignored by Git.
+
 `DASS_USERS` is UTF-8 JSON with this shape (the hash placeholder is **not valid**):
 
 ```json
@@ -111,28 +116,54 @@ private file. For example, with local Bun (tooling only, not a server):
 umask 077
 bun -e 'const users = []; for (const path of Bun.argv.slice(1)) users.push(...(await Bun.file(path).json()).users); await Bun.write(".secrets/accounts/users.json", JSON.stringify({ version: 1, users }));' \
   .secrets/accounts/alice.json .secrets/accounts/bob.json
-export DASS_USERS="$(cat .secrets/accounts/users.json)"
+```
+
+For one account, copy its generated JSON to `users.json` instead of combining
+records (`cp .secrets/accounts/alice.json .secrets/accounts/users.json` on first
+setup only). Then generate the backend's private environment file (also after any
+account edit). These commands replace that file; use this account mode **or**
+legacy invite mode, never both:
+
+```sh
+umask 077
+bun -e 'const users = await Bun.file(".secrets/accounts/users.json").json(); await Bun.write(".secrets/backend.env", "DASS_TLS_CERT_FILE=/run/dass/cert.pem\nDASS_TLS_KEY_FILE=/run/dass/key.pem\nDASS_USERS=" + JSON.stringify(users) + "\n");'
+chmod 600 .secrets/backend.env
 ```
 
 Protect hash records and environment access too: Docker administrators can inspect
 container environment variables. Do not paste `docker inspect`, expanded Compose
 configuration, account JSON or authentication messages into bug reports. Avoid
 manually placing unescaped Argon2 `$` strings into interpolating `.env` files.
+Compose loads `.secrets/backend.env` in **raw** mode, preserving those characters;
+do not wrap its JSON value in shell quotes. Compose >= 2.30 is required.
 
 ## One-time direct-LAN server setup
 
 Keep the TLS certificate/trust, native capture build and firewall prerequisites
-from [direct-lan-test.md](direct-lan-test.md). The new account overlay replaces the
-invite-based signaling/direct-LAN/media overlays; **do not combine them**.
-Its certificate mounts reuse `.secrets/lan-test/cert.pem` and `key.pem`.
+from [direct-lan-test.md](direct-lan-test.md). All modes now use **one**
+`compose.yaml`; there are no overlay files. Put only the backend-readable TLS
+certificate/key in `.secrets/runtime/cert.pem` and `.secrets/runtime/key.pem`.
+If upgrading, copy your existing `.secrets/lan-test` certificate/key there,
+preserving their restrictive permissions. The directory must be traversable and
+the files readable by container UID/GID `10001:10001`; do not make keys
+world-readable. Password input files and account JSON stay outside this mount.
 Set the actual private IPv4 of this backend host; it must match the certificate
 SAN and the client's HTTPS URL:
 
 ```sh
-export DASS_LAN_SERVER_IPV4='X.X.X.1'
-docker compose -f compose.yaml -f compose.lan-accounts.example.yaml config --quiet
-docker compose -f compose.yaml -f compose.lan-accounts.example.yaml up -d --build backend
+cp .env.example .env
+# Edit .env: set DASS_BIND_IP and DASS_LAN_SERVER_IPV4 to your actual LAN IP.
+docker compose config --quiet
+docker compose up -d --build backend
 ```
+
+Copy the example only on first setup, not over an existing `.env`. Its TLS LAN
+settings explicitly disable insecure mode and enable media/automatic admission.
+Never publish plaintext discovery on a LAN/public interface. After account
+changes, regenerate `.secrets/backend.env` above and run
+`docker compose up -d --force-recreate backend`; no image rebuild is needed for
+account-only changes. Keep `.env` for network/mode settings and
+`.secrets/backend.env` for TLS paths and `DASS_USERS`.
 
 This is an explicit user startup command, not a service deployed by the agent.
 It retains the non-root, read-only, capability-free, bounded backend container.
@@ -192,6 +223,12 @@ images or network policies were installed on the user's behalf.
 
 Client validation with Bun 1.4.3 passed: **113 tests, 508 assertions**, generated
 protocol freshness, plugin lint, full Equicord typecheck and both desktop/Equibop
-bundles (including secure-login native helpers). The new account Compose overlay
-also passed `config --quiet` using an empty, non-secret account fixture; this is
-configuration parsing only, not a running authenticated backend.
+bundles (including secure-login native helpers). The former account overlay
+passed `config --quiet` using an empty, non-secret account fixture; that evidence
+was configuration parsing only, not a running authenticated backend.
+
+The consolidated `compose.yaml` passed isolated Compose 5.6.0 configuration
+checks for default discovery, TLS invite signaling, LAN accounts and static LAN
+media policies, including literal hash dollar signs and retained container
+hardening. Checking the real repository configuration was blocked by `.secrets`
+permissions. These checks did not start a backend or validate account/media runtime.
