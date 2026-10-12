@@ -12,7 +12,7 @@ const REMEMBERED_ACCOUNT_KEY = "DASS_rememberedAccount_v1";
 
 export interface AccountCredentials {
     backendUrl: string;
-    roomId: string;
+    roomId?: string;
     username: string;
     password: string;
 }

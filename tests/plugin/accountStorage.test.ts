@@ -29,7 +29,7 @@ Object.assign(globalThis, { VencordNative: { pluginHelpers: { DASS: {
     decryptRememberedAccount: (value: unknown) => native.decryptRememberedAccount(undefined as never, value)
 } } } });
 const storage = await import("../../plugins/dass/accountStorage");
-const account = { backendUrl: "https://dass.example", roomId: "room", username: "alice", password: "a_separate_password" };
+const account = { backendUrl: "https://dass.example", username: "alice", password: "a_separate_password" };
 
 test("remembered storage persists only native-produced ciphertext and can forget it", async () => {
     await storage.writeRememberedAccount(account);
@@ -39,6 +39,13 @@ test("remembered storage persists only native-produced ciphertext and can forget
     expect(await storage.readRememberedAccount()).toEqual(account);
     await storage.forgetRememberedAccount();
     expect(await storage.readRememberedAccount()).toBeUndefined();
+});
+
+test("old encrypted accounts migrate without retaining a manually selected room", async () => {
+    const ciphertext = Buffer.from("legacy_ciphertext").toString("base64");
+    encryptedPayloads.set(ciphertext, JSON.stringify({ version: 1, ...account, roomId: "old_room" }));
+    const result = await native.decryptRememberedAccount(undefined as never, ciphertext);
+    expect(result).toEqual({ success: true, account });
 });
 
 test("Linux basic-text and unknown keyrings never persist account passwords", async () => {

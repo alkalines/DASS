@@ -11,12 +11,14 @@ viewer backend-wide, TLS/DTLS-SRTP, no E2EE, and readiness still returns 503.
 
 1. An administrator provisions each DASS account with a salted Argon2id hash,
    room grants, expiry/revocation state and optional display name.
-2. On first use, a person enters their **DASS** username/password and authorized
-   room in the plugin. These are not their Discord credentials.
-3. With **Remember login securely** selected, the plugin stores only OS-encrypted
+2. Configure the **DASS** username/password in plugin settings once. These are
+   not Discord credentials. No room is entered: the current Discord call determines
+   context. Backend `room_id` grants must authorize that call's channel ID.
+3. **Save account configuration** stores only OS-encrypted
    account data. On plugin load or a Discord login after logout, it unlocks the
    saved account and authenticates over WSS to the same configured backend origin.
-   Without secure remembering, sign in once each client session.
+   Secure-storage failure leaves a successful login memory-only and reports the
+   failure; there is no plaintext persistence fallback.
 4. The backend obtains the IPv4 address from the accepted WSS TCP socket. The
    plugin does **not** send a claimed local IP at startup: the server-observed
    address is authoritative. Login alone does not authorize any UDP port or
@@ -86,6 +88,11 @@ shown below. Both files are private and ignored by Git.
   but this is not a completed production brute-force or multi-device system.
 
 ### Generate the hash without exposing the password
+
+The `lan_test` identifiers in the transport examples below are placeholders.
+For the current call-based plugin UI, substitute the actual Discord call/channel
+ID in each backend room grant and `create-user` command. Users do not enter it
+into plugin configuration; the server must still authorize it explicitly.
 
 All commands here run from the **DASS repository root**. Rust tools run in Docker.
 Prepare a private `.secrets/accounts` directory and a mode-0600 password file,
@@ -174,8 +181,9 @@ The static exact/trusted-IP policies remain the default in other configurations;
 setting the automatic flag enables the new behavior explicitly.
 
 Rebuild both backend and plugin, select `build/Equicord/dist` in Equibop and fully
-restart. Sign in once, select secure remembering if available, and use Share or
-**Find DASS streams**. See [session-workflow.md](session-workflow.md).
+restart. Save account configuration once, then use the call's Share button.
+The temporary test viewer is behind **Show advanced options**; native stream
+tiles/watch/player integration remains incomplete. See [session-workflow.md](session-workflow.md).
 
 ## Network and storage limits
 
@@ -199,7 +207,7 @@ restart. Sign in once, select secure remembering if available, and use Share or
   to plaintext settings/storage is permitted. OS keyring prompts may occur.
 - In-memory passwords/connections are cleared on logout/disable/backend change.
   Remembered ciphertext survives those actions by explicit consent so the next
-  plugin load can authenticate. **Sign out and forget saved login** deletes it.
+  plugin load can authenticate. **Forget saved account** in Advanced deletes it.
   Saved credentials are bound to their backend origin; a different configured
   backend never receives them automatically. Encryption at rest does not protect
   against malicious renderer plugins, a compromised account or a compromised OS.
@@ -221,7 +229,7 @@ Docker socket/build-context permissions. Run the Docker-only checks in
 [backend.md](backend.md) before claiming runtime acceptance. No hashes, passwords,
 images or network policies were installed on the user's behalf.
 
-Client validation with Bun 1.4.3 passed: **113 tests, 508 assertions**, generated
+Client validation with Bun 1.4.3 passed: **116 tests, 520 assertions**, generated
 protocol freshness, plugin lint, full Equicord typecheck and both desktop/Equibop
 bundles (including secure-login native helpers). The former account overlay
 passed `config --quiet` using an empty, non-secret account fixture; that evidence

@@ -4,6 +4,26 @@ import { AccountCredentials, DassSession } from "../../plugins/dass/session";
 
 const account: AccountCredentials = { backendUrl: "https://dass.example", roomId: "room", username: "alice", password: "separate_dass_password" };
 
+test("call context is derived live and saved credentials contain no room selection", async () => {
+    let callId: string | undefined;
+    let saved: AccountCredentials | undefined;
+    const session = new DassSession({ read: async () => undefined, write: async value => { saved = value; }, forget: async () => {} },
+        async () => fakeConnection().connection, () => callId);
+    try {
+        await session.start(account.backendUrl);
+        await session.login({ backendUrl: account.backendUrl, username: account.username, password: account.password }, true);
+        expect(session.getSnapshot().configured).toBe(true);
+        expect(saved).toEqual({ backendUrl: account.backendUrl, username: account.username, password: account.password });
+        expect(() => session.getAccess()).toThrow("Join a Discord call");
+        callId = "123456789";
+        expect(session.getAccess().roomId).toBe(callId);
+        callId = "987654321";
+        expect(session.getAccess().roomId).toBe(callId);
+        callId = undefined;
+        expect(() => session.getAccess()).toThrow("Join a Discord call");
+    } finally { session.stop(); }
+});
+
 function fakeConnection() {
     const closed = new AbortController();
     const connection = { closed: closed.signal, close: () => closed.abort(new SpikeSignalingError("closed")) } as unknown as SpikeSignaling;
@@ -82,7 +102,7 @@ test("secure remembering failure retains only the in-memory authenticated sessio
     } finally { session.stop(); }
 });
 
-test("denied account login clears access and deletes stale remembered credentials", async () => {
+test("denied account login clears access without destroying saved configuration", async () => {
     let forgotten = 0;
     const session = new DassSession({ read: async () => account, write: async () => {}, forget: async () => { forgotten++; } }, async () => {
         throw new SpikeSignalingError("rejected:unauthorized");
@@ -90,7 +110,7 @@ test("denied account login clears access and deletes stale remembered credential
     await session.start(account.backendUrl);
     expect(session.getSnapshot().phase).toBe("failed");
     expect(session.getSnapshot().configured).toBe(false);
-    expect(forgotten).toBe(1);
+    expect(forgotten).toBe(0);
     session.stop();
 });
 

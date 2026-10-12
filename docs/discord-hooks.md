@@ -1,5 +1,20 @@
 # Discord hook investigation
 
+## Current UI revision
+
+The separate user-area DASS button and share modal were removed. Settings own
+encrypted account configuration and an initially collapsed Advanced panel. The
+existing center Share component is wrapped on build 634304 to reflect capture
+through its native `streamActive` prop; clicking either supported start callback
+again stops DASS. This source-based wrapper still requires live verification.
+Disabling DASS transport in settings explicitly selects native Discord sharing.
+
+The recorded source below is insufficient for native stream tile/watch/player
+integration. Those hooks remain unimplemented; no synthetic Discord stream
+records are inserted. The temporary viewer is available only in Advanced.
+Media context comes from the current call's channel ID, checked against backend
+grants; the client has no room selection field.
+
 Discord Alternative ScreenShare (DASS) must consume explicitly selected DASS
 actions before native stream creation, capture or preview upload. Private hook
 implementation belongs in `plugins/dass/discordAdapter.ts`.

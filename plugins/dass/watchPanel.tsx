@@ -37,7 +37,7 @@ export function WatchPanel({ controller, backendUrl, beforePrepare, session }: {
     }, [status.stream]);
     const loading = status.phase === "loading";
     return <div>
-        <Paragraph>DASS streams in your authorized room. Native Discord watching remains separate. Finding streams does not request capture.</Paragraph>
+        <Paragraph>Temporary test viewer for this call. Native Discord watching remains separate until its UI hooks are implemented. Finding streams does not request capture.</Paragraph>
         {session && <Button disabled={loading || !!status.stream || !session.getSnapshot().configured} onClick={() => {
             beforePrepare();
             void (async () => {
@@ -45,23 +45,22 @@ export function WatchPanel({ controller, backendUrl, beforePrepare, session }: {
                 await controller.prepareAndBind(backendUrl, access.roomId, access);
             })().catch(() => { controller.reset(); });
         }}>Find DASS streams</Button>}
-        <details><summary>Advanced: prepare viewer and exact UDP allowlist</summary>
+        {!session && <details><summary>Advanced: prepare viewer and exact UDP allowlist</summary>
         <Button disabled={loading || status.candidates.length > 0} onClick={() => { beforePrepare(); void controller.prepareViewer(); }}>Prepare DASS viewer</Button>
         {status.candidates.length > 0 && <Paragraph>Allowlist viewer UDP endpoints: {status.candidates.join(", ")}</Paragraph>}
-        {!session && <div><TextInput placeholder="Authorized DASS room ID (not a Discord channel ID)" value={roomId} onChange={setRoomId} disabled={loading} />
-            <TextInput type="password" placeholder="Separate DASS credential (memory only)" value={credential} onChange={setCredential} disabled={loading} /></div>}
-        <Button disabled={loading || !(session ? session.getSnapshot().configured : credential && roomId) || !!status.stream} onClick={() => {
-            const access = session?.getAccess();
-            const submitted = access ?? credential;
+        <div><TextInput placeholder="Authorized DASS room ID" value={roomId} onChange={setRoomId} disabled={loading} />
+            <TextInput type="password" placeholder="Separate DASS credential (memory only)" value={credential} onChange={setCredential} disabled={loading} /></div>
+        <Button disabled={loading || !credential || !roomId || !!status.stream} onClick={() => {
+            const submitted = credential;
             setCredential("");
-            void controller.bind(backendUrl, access?.roomId ?? roomId, submitted);
+            void controller.bind(backendUrl, roomId, submitted);
         }}>Bind room and discover</Button>
-        </details>
+        </details>}
         <Paragraph role="status" aria-live="polite">{status.phase}: {status.message}</Paragraph>
-        {status.phase === "ready" && status.shares.length === 0 && <Paragraph>No shares listed. Bind an authorized room and wait for a connected publisher.</Paragraph>}
+        {status.phase === "ready" && status.shares.length === 0 && <Paragraph>No shares listed. Wait for a connected publisher in this authorized call.</Paragraph>}
         {status.shares.map(share => <Button key={share.shareId} disabled={loading || !status.candidates.length || !!status.stream}
             onClick={() => void controller.watch(share)}>Watch {share.displayName ?? "Unnamed DASS publisher"}</Button>)}
-        <Button onClick={() => { setCredential(""); controller.reset(); }}>Close DASS viewer and room</Button>
+        <Button onClick={() => { setCredential(""); controller.reset(); }}>Close test viewer</Button>
         {status.stream && <div>
             <Paragraph>Sharing: {status.watchingShare?.displayName ?? "Unnamed DASS publisher"}</Paragraph>
             <video ref={video} muted controls playsInline aria-label={`DASS stream from ${status.watchingShare?.displayName ?? "unnamed publisher"}`} />

@@ -12,10 +12,14 @@ export const DISCORD_SHARE_PATCHES = [{
     find: /renderNUXHighlight:\i,buttonRef:\i,onClick:null!=\i\?\i:\i(?=\}\))/,
     fromBuild: 634304,
     toBuild: 634304,
-    replacement: {
+    group: true,
+    replacement: [{
+        match: /(?<=\(0,\i\.jsx\)\()(\i\.\i),\{\.\.\.(\i)(?=,centerButton:!0,disabled:\i\|\|!\i,className:\i\.\i,hasPermission:\i,streamActive:)/,
+        replace: "$self.ShareButton,{dassNativeComponent:$1,...$2"
+    }, {
         match: /onClick:null!=(\i)\?(\i):(\i)(?=\}\))/,
         replace: "onClick:null!=$1?$2:()=>$self.chooseShareTransport($3)"
-    }
+    }]
 }, {
     find: VOICE_PANEL_SHARE_START_MATCH,
     fromBuild: 634304,

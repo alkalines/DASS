@@ -11,16 +11,28 @@ import { createShareSelection, DISCORD_SHARE_PATCHES, TRANSPORT_UNAVAILABLE_MESS
 const OBSERVED_BUTTON_SOURCE = 'return(0,i.jsx)(ee.h,{...l,centerButton:!0,disabled:c||!r,className:ev.uH,hasPermission:r,streamActive:null!=C,videoBlocked:o,isSelfStream:!0,onPopoutClick:s?function(e){t?.(e)}:null,popoutOpen:n,shouldShowTooltip:!n,renderNUXHighlight:N,buttonRef:f,onClick:null!=C?S:_})';
 const OBSERVED_VOICE_PANEL_CALLBACK = 'f=em.useCallback(()=>{(0,vT.A)(_,n.id,o)},[_,n.id,o]),I=c.find(e=>e.ownerId===d?.id)';
 const patch = DISCORD_SHARE_PATCHES[0];
+const clickReplacement = patch.replacement[1];
 const find = new RegExp(patch.find.source.replaceAll("\\i", "(?:[A-Za-z_$][\\w$]*)"));
-const match = new RegExp(patch.replacement.match.source.replaceAll("\\i", "(?:[A-Za-z_$][\\w$]*)"));
+const match = new RegExp(clickReplacement.match.source.replaceAll("\\i", "(?:[A-Za-z_$][\\w$]*)"));
 
 describe("build 634304 share button patch", () => {
+    test("wraps the existing component and preserves native UI props", () => {
+        let source = OBSERVED_BUTTON_SOURCE;
+        for (const replacement of patch.replacement) {
+            const regex = new RegExp(replacement.match.source.replaceAll("\\i", "(?:[A-Za-z_$][\\w$]*)"));
+            expect([...source.matchAll(new RegExp(regex.source, "g"))]).toHaveLength(1);
+            source = source.replace(regex, replacement.replace);
+        }
+        expect(source).toContain("$self.ShareButton,{dassNativeComponent:ee.h,...l,centerButton:!0");
+        expect(source).toContain("onClick:null!=C?S:()=>$self.chooseShareTransport(_)");
+        expect(() => new Function("i", "ee", "$self", source)).not.toThrow();
+    });
     test("matches the supplied button source once and preserves stop", () => {
         expect(patch.fromBuild).toBe(634304);
         expect(patch.toBuild).toBe(634304);
         expect(find.test(OBSERVED_BUTTON_SOURCE)).toBe(true);
         expect([...OBSERVED_BUTTON_SOURCE.matchAll(new RegExp(match.source, "g"))]).toHaveLength(1);
-        const patched = OBSERVED_BUTTON_SOURCE.replace(match, patch.replacement.replace);
+        const patched = OBSERVED_BUTTON_SOURCE.replace(match, clickReplacement.replace);
         expect(patched).toContain("onClick:null!=C?S:()=>$self.chooseShareTransport(_)");
         expect(patched).toContain("onPopoutClick:s?function(e){t?.(e)}:null");
     });
@@ -33,7 +45,7 @@ describe("build 634304 share button patch", () => {
         ];
         expect(modules.filter(source => find.test(source))).toEqual([OBSERVED_BUTTON_SOURCE]);
         const firstMatch = modules.find(source => find.test(source));
-        expect(firstMatch?.replace(match, patch.replacement.replace)).toContain("chooseShareTransport");
+        expect(firstMatch?.replace(match, clickReplacement.replace)).toContain("chooseShareTransport");
     });
 
     test("renamed identifiers work and changed syntax is not guessed", () => {
@@ -42,7 +54,7 @@ describe("build 634304 share button patch", () => {
     });
 
     test("patched click defers native start until an explicit Discord selection", () => {
-        const expression = "(0,i.jsx)(ee.h,{onClick:null!=C?S:_})".replace(match, patch.replacement.replace);
+        const expression = "(0,i.jsx)(ee.h,{onClick:null!=C?S:_})".replace(match, clickReplacement.replace);
         const nativeCalls: string[] = [];
         const nativeStart = () => { nativeCalls.push("STREAM_START", "capture", "thumbnail POST"); };
         let select: ReturnType<typeof createShareSelection> | undefined;

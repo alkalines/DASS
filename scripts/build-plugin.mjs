@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -97,18 +97,22 @@ try {
     }
     const sourceFiles = [...sources.keys()];
     const currentHashes = {};
+    const obsoleteFiles = [];
     if (existsSync(stagedDirectory)) {
         for (const name of readdirSync(stagedDirectory)) {
             const stagedContents = readFileSync(join(stagedDirectory, name));
-            if (!sourceFiles.includes(name) || (stagedContents.toString("utf8") !== sources.get(name) && digest(stagedContents) !== previousHashes[name])) {
+            if (digest(stagedContents) !== previousHashes[name] && stagedContents.toString("utf8") !== sources.get(name)) {
                 throw new Error(`Staged plugin ${name} has unfamiliar changes; edit plugins/dass instead. Nothing was overwritten.`);
             }
+            if (!sourceFiles.includes(name)) obsoleteFiles.push(name);
         }
     }
 
     writeFileSync(manifestPath, adaptedManifest);
     writeFileSync(lockPath, lockContents);
     mkdirSync(stagedDirectory, { recursive: true });
+    // Delete only adapter-owned copies whose hashes matched the prior staging record.
+    for (const name of obsoleteFiles) unlinkSync(join(stagedDirectory, name));
     for (const name of sourceFiles) {
         const contents = sources.get(name);
         writeFileSync(join(stagedDirectory, name), contents);

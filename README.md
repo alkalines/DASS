@@ -21,10 +21,14 @@ E2EE is unavailable and readiness remains 503. Native Discord watching is separa
 Supported build-634304 Share buttons now connect to the DASS publisher by default,
 with reusable in-memory session access. This new wiring still needs live-client
 acceptance; it does not intercept every Discord share entry point.
-Separate DASS accounts can optionally be remembered with OS-backed encryption
+Separate DASS accounts are configured in plugin settings with OS-backed encryption
 and authenticate on plugin load. LAN media endpoints are then admitted per RTC
 session using the observed WSS peer IP, without manual client-port updates.
 These new account/admission paths still require live-client/backend acceptance.
+There is no separate DASS call button or sharing modal. Call context is derived
+from the current channel; backend grants must authorize it. Diagnostics and the
+temporary viewer are hidden behind Advanced options. Native stream tiles and
+watch/player integration remain incomplete; this is not yet a drop-in replacement.
 
 The backend is built, tested and run using Docker, with no host Rust installation.
 Follow the backend guide to generate `Cargo.lock`, run checks and start the container.

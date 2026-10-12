@@ -8,7 +8,7 @@ import { type DassAuthentication, signalingUrl, SpikeSignaling, SpikeSignalingEr
 
 export interface AccountCredentials {
     backendUrl: string;
-    roomId: string;
+    roomId?: string;
     username: string;
     password: string;
 }
@@ -31,9 +31,10 @@ export class DassSession {
     private message = "Sign in with a separate DASS username and password.";
     private listeners = new Set<() => void>();
 
-    constructor(private readonly storage?: AccountStorage, private readonly authenticate = SpikeSignaling.connect) {}
+    constructor(private readonly storage?: AccountStorage, private readonly authenticate = SpikeSignaling.connect,
+        private readonly currentCall?: () => string | undefined) {}
 
-    getSnapshot = () => ({ roomId: this.access?.roomId ?? "", username: this.access?.username ?? "", configured: !!this.access,
+    getSnapshot = () => ({ roomId: this.currentCall?.() ?? this.access?.roomId ?? "", username: this.access?.username ?? "", configured: !!this.access,
         phase: this.phase, message: this.message });
     subscribe = (listener: () => void) => {
         this.listeners.add(listener);
@@ -69,10 +70,10 @@ export class DassSession {
             this.notify();
             return;
         }
-        if (!/^[A-Za-z0-9_-]{1,64}$/.test(account.roomId) || !/^[A-Za-z0-9_-]{1,64}$/.test(account.username)
+        if ((account.roomId !== undefined && !/^[A-Za-z0-9_-]{1,64}$/.test(account.roomId)) || !/^[A-Za-z0-9_-]{1,64}$/.test(account.username)
             || !account.password || account.password.includes("\0") || new TextEncoder().encode(account.password).byteLength > 512) {
             this.phase = "failed";
-            this.message = "Enter a valid DASS room, username and password.";
+            this.message = "Enter a valid DASS username and password.";
             this.notify();
             return;
         }
@@ -90,7 +91,7 @@ export class DassSession {
             if (!this.active || this.epoch !== epoch || request.signal.aborted) { connection.close(); return; }
             this.idleConnection = connection;
             this.backendUrl = account.backendUrl;
-            this.access = { roomId: account.roomId, username: account.username, password: account.password };
+            this.access = { roomId: this.currentCall ? "" : account.roomId ?? "", username: account.username, password: account.password };
             connection.closed.addEventListener("abort", () => {
                 if (this.idleConnection !== connection) return;
                 this.idleConnection = undefined;
@@ -107,7 +108,7 @@ export class DassSession {
             this.notify();
             if (remember && this.storage) {
                 try {
-                    await this.storage.write(account);
+                    await this.storage.write({ backendUrl: account.backendUrl, username: account.username, password: account.password });
                     if (this.epoch === epoch) { this.message = "DASS login remembered with OS-backed encryption. It will sign in when the plugin loads."; this.notify(); }
                 } catch {
                     if (this.epoch === epoch) { this.message = "Signed in for this session, but secure remembering is unavailable. No password was stored as plaintext."; this.notify(); }
@@ -118,7 +119,6 @@ export class DassSession {
                 this.clear();
                 this.phase = "failed";
                 this.message = "DASS login failed. Check your account, TLS and LAN connection. No Discord fallback.";
-                if (error instanceof SpikeSignalingError && /unauthorized|expired|revoked/.test(error.code)) void this.storage?.forget().catch(() => {});
                 this.notify();
             }
         }
@@ -154,7 +154,9 @@ export class DassSession {
 
     getAccess() {
         if (!this.access) throw new Error("DASS session setup is required.");
-        return { ...this.access };
+        const roomId = this.currentCall ? this.currentCall() : this.access.roomId;
+        if (!roomId || !/^[A-Za-z0-9_-]{1,64}$/.test(roomId)) throw new Error("Join a Discord call before sharing or watching.");
+        return { ...this.access, roomId };
     }
 
     clear() {

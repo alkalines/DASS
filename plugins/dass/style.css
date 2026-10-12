@@ -1,0 +1,42 @@
+.vc-dass-settings,
+.vc-dass-advanced,
+.vc-dass-field {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.vc-dass-settings {
+    padding-block: 8px;
+}
+
+.vc-dass-field {
+    gap: 8px;
+}
+
+.vc-dass-actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 12px;
+}
+
+.vc-dass-advanced {
+    border-top: 1px solid var(--background-modifier-accent);
+    padding-top: 16px;
+}
+
+.vc-dass-advanced > div {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.vc-dass-advanced .vc-dass-actions {
+    flex-direction: row;
+}
+
+.vc-dass-advanced video {
+    width: 100%;
+    max-height: 60vh;
+}

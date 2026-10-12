@@ -6,10 +6,10 @@
 
 import { type IpcMainInvokeEvent, safeStorage } from "electron";
 
-const VERSION = 1;
+const VERSION = 2;
 const MAX_BACKEND_ORIGIN_LENGTH = 320;
 const MAX_CIPHERTEXT_BYTES = 8192;
-const ACCOUNT_FIELDS = ["backendUrl", "roomId", "username", "password"] as const;
+const ACCOUNT_FIELDS = ["backendUrl", "username", "password"] as const;
 const VERSIONED_ACCOUNT_FIELDS = ["version", ...ACCOUNT_FIELDS] as const;
 const INVALID_ACCOUNT_ERROR = "Invalid DASS account details.";
 const STORAGE_UNAVAILABLE_ERROR = "Secure account storage is unavailable.";
@@ -17,7 +17,6 @@ const DECRYPTION_ERROR = "Remembered DASS account could not be unlocked.";
 
 interface AccountCredentials {
     backendUrl: string;
-    roomId: string;
     username: string;
     password: string;
 }
@@ -37,7 +36,6 @@ function hasExactKeys(value: unknown, expected: readonly string[]): value is Rec
 
 function isValidAccountFields(value: Record<string, unknown>): boolean {
     if (typeof value.backendUrl !== "string" || value.backendUrl.length > MAX_BACKEND_ORIGIN_LENGTH
-        || typeof value.roomId !== "string" || !/^[A-Za-z0-9_-]{1,64}$/.test(value.roomId)
         || typeof value.username !== "string" || !/^[A-Za-z0-9_-]{1,64}$/.test(value.username)
         || typeof value.password !== "string" || value.password.length === 0 || value.password.includes("\0")
         || Buffer.byteLength(value.password, "utf8") > 512) return false;
@@ -57,6 +55,11 @@ function isAccountCredentials(value: unknown): value is AccountCredentials {
 
 function isVersionedAccountCredentials(value: unknown): value is VersionedAccountCredentials {
     return hasExactKeys(value, VERSIONED_ACCOUNT_FIELDS) && value.version === VERSION && isValidAccountFields(value);
+}
+
+function isLegacyAccount(value: unknown): value is AccountCredentials & { version: 1; roomId: string; } {
+    return hasExactKeys(value, ["version", ...ACCOUNT_FIELDS, "roomId"]) && value.version === 1
+        && typeof value.roomId === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(value.roomId) && isValidAccountFields(value);
 }
 
 function canUseSecureStorage(): boolean {
@@ -95,10 +98,10 @@ export async function decryptRememberedAccount(_: IpcMainInvokeEvent, ciphertext
             return { success: false, error: DECRYPTION_ERROR };
         }
         const payload: unknown = JSON.parse(safeStorage.decryptString(encrypted));
-        if (!isVersionedAccountCredentials(payload)) return { success: false, error: DECRYPTION_ERROR };
+        if (!isVersionedAccountCredentials(payload) && !isLegacyAccount(payload)) return { success: false, error: DECRYPTION_ERROR };
 
-        const { backendUrl, roomId, username, password } = payload;
-        return { success: true, account: { backendUrl, roomId, username, password } };
+        const { backendUrl, username, password } = payload;
+        return { success: true, account: { backendUrl, username, password } };
     } catch {
         return { success: false, error: DECRYPTION_ERROR };
     }

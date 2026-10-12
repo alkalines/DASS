@@ -5,7 +5,7 @@ buttons to the experimental Rust transport. This is not a production service:
 there is no E2EE, the backend still supports one publisher/one viewer, and stock
 Discord cannot receive the stream.
 
-## Setup once, with optional automatic login
+## Account configuration in settings
 
 1. Configure the TLS backend and per-person hashed DASS accounts using
    [LAN accounts and automatic UDP admission](lan-accounts.md). Keep the trusted
@@ -21,23 +21,27 @@ Discord cannot receive the stream.
    restart. The upstream pins are unchanged: Equicord
    `e0e85c8d4f6dc73aac9368cf3f4b2200eac4d4b4`, Equibop
    `27219be3566589280c0c933b04753805381d3bc8`.
-3. In DASS settings, set the trusted HTTPS backend URL. Enter the authorized room,
-   DASS username and password, then **Sign in to DASS**. Select **Remember login
-   securely** to store only OS-encrypted account data and sign in automatically
-   when the plugin loads. Without a supported secure keyring, remembering fails
-   closed and the authenticated session remains memory-only. Ordinary plugin
-   settings, URLs and Discord never receive the password.
+3. In DASS settings, set the trusted HTTPS backend URL, username and password,
+   then **Save account configuration**. Saving requests OS-backed encryption and
+   enables automatic login on plugin load. Leave the password field blank to keep
+   an existing saved password. Without a supported secure keyring, persistence
+   fails closed; a successful login remains memory-only. Ordinary plugin settings,
+   URLs and Discord never receive the password. There is no client room field:
+   media uses the current Discord call's channel ID as its DASS context.
 4. Enable `DASS_RTC_AUTO_LAN_PEERS=true` in the backend configuration (the new
    account Compose overlay does this). The backend binds incoming candidate ports
    to the observed authenticated WSS LAN IP. No manual client-IP or port updates
    are needed for new shares/viewers. It does not change firewall rules or work
    around proxy/NAT address mismatches. Static allowlist modes remain available.
-5. **Sign out and forget saved login** clears the account and deletes remembered
+5. **Forget saved account**, under **Show advanced options**, clears the account and deletes remembered
    ciphertext. Logout/disable/backend change clear in-memory passwords and media,
    but retain explicitly remembered ciphertext for the next load. Voice-context
    exit stops media while retaining the signed-in account for the next call.
 
 No client helper executable, subprocess, proxy or external encoder is introduced.
+The backend still checks scoped room grants: provision the Discord call/channel ID
+as `room_id` in the account's grant instead of an unrelated `lan_test` room. This
+ID selects context only; it is not proof of Discord membership or authorization.
 
 ## Publisher names
 
@@ -56,48 +60,41 @@ backend and clients together for the updated directory metadata contract.
 
 On Discord stable build **634304**, the center call Share button and the left
 Voice Connected Share callback use DASS by default. With session setup present,
-clicking Share opens the DASS controls, authenticates, invokes the **installed**
+clicking Share authenticates, invokes the **installed**
 Equibop source/quality/audio picker, gathers Chromium candidates and activates
-the publisher automatically. Without setup, the same controls ask for it first.
+the publisher automatically, without an extra modal. Missing setup produces a
+notification directing the user to plugin settings.
 Selecting share audio remains explicit; the microphone is not acquired implicitly.
 
-Closing the controls does **not** stop the share. Click Share again or open DASS
-settings to see its status and use **Stop sharing**. Source end, voice-context
+Click the supported Share button again to stop. The center call button wraps its
+existing native component to reflect DASS capture through `streamActive`; no
+new user-area button or synthetic stream record is added. Source end, voice-context
 exit, logout, disable and backend changes cancel pending work and release capture.
-The controls do not fabricate a Discord live badge or stream record.
-An additional DASS screenshare icon in the user panel opens these controls without
-starting capture; it glows while DASS owns capture, including local preparation.
-Use it to reopen the controls and stop sharing after closing the panel.
 
-The viewer configures its own session, joins its voice context, and selects
-**Find DASS streams** in the same controls/settings. Preparation and authenticated
+Native stream tiles, watch clicks and player attachment are **not implemented**.
+For testing only, expand **Show advanced options** in plugin settings and select
+**Find DASS streams** while in the call. Preparation and authenticated
 directory binding happen together, with no copied publisher ID or repeated
 credential entry. Choose a listed DASS stream to watch. Video starts muted;
 **Enable audio** is an explicit playback gesture. Closing a panel detaches its
 player; use **Close DASS viewer and room** to release the receiving connection.
 Publishing and watching replace each other to keep one media session per client.
 
-Disable **Use DASS directly from supported Share buttons** to restore the explicit
-Discord/DASS/Cancel chooser. Only an explicit Discord choice invokes native
-sharing. DASS failures never invoke the native callback, upload previews or fall
+Disable **Use DASS instead of Discord for screen sharing in calls** to select
+native Discord sharing explicitly. There is no transport-chooser modal.
+DASS failures never invoke the native callback, upload previews or fall
 back to Discord. Other Share entry points remain native; other Discord builds
 are not patched. This is two supported buttons, **not** universal interception.
 
 ## Exact-port policy and diagnostics
 
-If keeping the default exact-endpoint backend policy, expand the advanced sections:
+Capability checks, local capture tests, reconnect/forget controls and the temporary
+viewer are hidden behind **Show advanced options**. Layout uses spaced fields and
+wrapping action rows. No diagnostic buttons appear in the normal call UI.
 
-- Publisher: **Prepare capture only**, configure the shown endpoints in the
-  backend, then **Activate prepared share** within 180 seconds.
-- Viewer: **Prepare DASS viewer**, configure its endpoints, then **Bind room and
-  discover**. Session access is reused; no credential repaste is necessary.
-
-Prepare-only capture stays local and postpones media activation until backend
-recreation is complete. Account login may already hold an idle WSS connection;
-if recreation closes it, activation authenticates again. Legacy invite preparation
-opens no WSS before activation. The manual transport panel remains under diagnostics for
-comparison, not the normal sharing workflow. Replacing a prepared peer changes
-its ports. Do not disable TLS/browser security or expose an open UDP policy.
+The normal UI targets automatic LAN admission, not manual publisher prepare-and-
+recreate. Older exact-port procedures remain transport experiments, not the
+current settings UI. Do not disable TLS/browser security or expose an open UDP policy.
 
 ## Evidence boundary
 
@@ -107,9 +104,10 @@ custom bundle builds cannot establish live hook matching, media isolation or
 Wayland/X11 capture behavior. Re-test both Share buttons, picker cancellation,
 source end, disable/logout/context exit during setup, denied access, independent
 Discord voice, directory removal and absence of native stream/thumbnail requests.
-The native Discord Stop button is unchanged; DASS owns its separate Stop control.
+The Share wrapper's native styling/stop-state rendering needs live acceptance.
+It does not establish the complete native stream lifecycle or viewer integration.
 
-Client validation passed with Bun 1.4.3: **113 plugin tests, 508 assertions**,
+Client validation passed with Bun 1.4.3: **116 tests, 520 assertions**,
 generated-protocol freshness, DASS lint, full Equicord typecheck, and desktop/Equibop
 bundle builds. Run from the repository root:
 
