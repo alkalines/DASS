@@ -63,7 +63,6 @@ export function SettingsPanel({ session, publisher, watching, discovery, localCa
         beforeAction();
         setMessage("");
         let submitted = password;
-        setPassword("");
         try {
             if (!submitted) {
                 const saved = await readRememberedAccount();
@@ -72,7 +71,8 @@ export function SettingsPanel({ session, publisher, watching, discovery, localCa
             if (generation.current !== epoch) return;
             if (!submitted) { setMessage("Enter a password to save this account configuration."); return; }
             await session.login({ backendUrl, username, password: submitted }, true);
-            if (generation.current === epoch && session.getSnapshot().configured) {
+            if (generation.current === epoch && (session.getSnapshot().phase === "ready" || !session.getSnapshot().configured)) setPassword("");
+            if (generation.current === epoch && session.getSnapshot().phase === "ready") {
                 const saved = await readRememberedAccount();
                 if (generation.current === epoch) setSavedUsername(saved?.backendUrl === new URL(backendUrl).origin ? saved.username : "");
             }

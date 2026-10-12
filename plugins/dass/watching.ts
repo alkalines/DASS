@@ -8,7 +8,7 @@ import { browserFailureCode, logDiagnostic } from "../../clients/spike/diagnosti
 import { routeWatch } from "./discordAdapter";
 import { type DassShare, ScreenshareRouting, type ScreenshareTransport } from "./routing";
 import { SpikePeer } from "../../clients/spike/peer";
-import { type DassAuthentication, SpikeSignaling, SpikeSignalingError } from "../../clients/spike/signaling";
+import { type DassAuthentication, isAuthenticationRejected, signalingFailureMessage, SpikeSignaling, SpikeSignalingError } from "../../clients/spike/signaling";
 
 export interface WatchStatus {
     phase: "idle" | "loading" | "ready" | "watching" | "disconnected" | "unauthorized" | "failed";
@@ -94,11 +94,10 @@ export class WatchController implements ScreenshareTransport {
     private failure(error: unknown) {
         logDiagnostic("viewer setup failed", { code: error instanceof SpikeSignalingError ? error.code : browserFailureCode(error) }, true);
         const code = error instanceof SpikeSignalingError ? error.code : "";
-        const unauthorized = code === "rejected:unauthorized" || code === "expired" || code === "server:expired" || code === "server:revoked";
-        const disconnected = code === "socket" || code === "closed" || code === "server:transport_failed";
-        this.reset(unauthorized ? "unauthorized" : disconnected ? "disconnected" : "failed", unauthorized
-            ? "DASS access denied, expired or revoked. Supply an authorized room credential."
-            : disconnected ? "DASS connection disconnected. Prepare and authenticate again; no Discord fallback."
+        const unauthorized = isAuthenticationRejected(error);
+        const disconnected = ["socket", "closed", "timeout", "expired", "server:expired", "server:transport_failed"].includes(code);
+        this.reset(unauthorized ? "unauthorized" : disconnected ? "disconnected" : "failed", error instanceof SpikeSignalingError
+            ? signalingFailureMessage(error)
                 : "DASS setup failed. Check TLS, room access, LAN IP matching and the UDP path. No Discord fallback.");
     }
 

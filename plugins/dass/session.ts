@@ -5,7 +5,7 @@
  */
 
 import { browserFailureCode, logDiagnostic } from "../../clients/spike/diagnostics";
-import { type DassAuthentication, signalingUrl, SpikeSignaling, SpikeSignalingError } from "../../clients/spike/signaling";
+import { type DassAuthentication, isAuthenticationRejected, signalingFailureMessage, signalingUrl, SpikeSignaling, SpikeSignalingError } from "../../clients/spike/signaling";
 
 export interface AccountCredentials {
     backendUrl: string;
@@ -85,7 +85,6 @@ export class DassSession {
         this.message = "Signing in to DASS. The backend observes the connection IP; no capture is requested.";
         this.notify();
         try {
-            if (!remember && !restored) await this.storage?.forget();
             if (!this.active || this.epoch !== epoch || request.signal.aborted) return;
             const connection = await this.authenticate({ experimental: true, backendUrl: account.backendUrl,
                 username: account.username, password: account.password, signal: request.signal });
@@ -97,7 +96,7 @@ export class DassSession {
                 if (this.idleConnection !== connection) return;
                 this.idleConnection = undefined;
                 const { reason } = connection.closed;
-                if (reason instanceof SpikeSignalingError && /unauthorized|revoked/.test(reason.code)) this.clear();
+                if (isAuthenticationRejected(reason)) this.clear();
                 else {
                     this.message = "DASS idle connection closed. Your account will authenticate again automatically when sharing or watching.";
                     this.notify();
@@ -107,6 +106,7 @@ export class DassSession {
             this.phase = "ready";
             this.message = "DASS account signed in. Media endpoints will be admitted only for an authorized active LAN session.";
             this.notify();
+            if (!remember && !restored) await this.storage?.forget();
             if (remember && this.storage) {
                 try {
                     await this.storage.write({ backendUrl: account.backendUrl, username: account.username, password: account.password });
@@ -118,9 +118,16 @@ export class DassSession {
         } catch (error) {
             if (this.active && this.epoch === epoch) {
                 logDiagnostic("account login failed", { code: error instanceof SpikeSignalingError ? error.code : browserFailureCode(error) }, true);
-                this.clear();
+                if (isAuthenticationRejected(error)) this.clear();
+                else {
+                    // Retain retry access, not a claim that authentication succeeded.
+                    this.idleConnection?.close();
+                    this.idleConnection = undefined;
+                    this.backendUrl = account.backendUrl;
+                    this.access = { roomId: this.currentCall ? "" : account.roomId ?? "", username: account.username, password: account.password };
+                }
                 this.phase = "failed";
-                this.message = "DASS login failed. Check your account, TLS and LAN connection. No Discord fallback.";
+                this.message = signalingFailureMessage(error);
                 this.notify();
             }
         }

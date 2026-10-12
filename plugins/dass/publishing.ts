@@ -9,7 +9,7 @@ import { browserFailureCode, logDiagnostic } from "../../clients/spike/diagnosti
 import { type CaptureLease } from "./routing";
 import { type DassSession } from "./session";
 import { preparationFailureMessage, SpikePeer } from "../../clients/spike/peer";
-import { SpikeSignaling, SpikeSignalingError } from "../../clients/spike/signaling";
+import { isAuthenticationRejected, signalingFailureMessage, SpikeSignaling, SpikeSignalingError } from "../../clients/spike/signaling";
 
 export interface PublishStatus {
     phase: "idle" | "authenticating" | "capturing" | "preparing" | "prepared" | "activating" | "publishing" | "failed";
@@ -83,8 +83,8 @@ export class PublishController {
                     if (this.current(operation)) {
                         const { reason } = operation.signaling!.closed;
                         logDiagnostic("publisher signaling closed", { code: reason instanceof SpikeSignalingError ? reason.code : "unknown" }, true);
-                        if (reason instanceof SpikeSignalingError && /unauthorized|expired|revoked/.test(reason.code)) this.session.clear();
-                        this.fail(operation, "DASS connection closed. Set up again if access was denied. No Discord fallback.");
+                        if (isAuthenticationRejected(reason)) this.session.clear();
+                        this.fail(operation, signalingFailureMessage(reason));
                     }
                 }, { once: true });
                 if (operation.signaling.closed.aborted) throw operation.signaling.closed.reason;
@@ -108,8 +108,8 @@ export class PublishController {
                 logDiagnostic("publisher setup failed", { phase: this.status.phase,
                     code: error instanceof SpikeSignalingError ? error.code : browserFailureCode(error),
                     preparation: this.status.phase === "preparing" ? preparationFailureMessage(error) : "not_preparing" }, true);
-                if (error instanceof SpikeSignalingError && /unauthorized|expired|revoked/.test(error.code)) this.session.clear();
-                this.fail(operation, operation.signaling ? preparationFailureMessage(error) : "DASS authentication or capture failed. Check session access and the host bridge. No Discord fallback.");
+                if (isAuthenticationRejected(error)) this.session.clear();
+                this.fail(operation, this.status.phase === "authenticating" ? signalingFailureMessage(error) : preparationFailureMessage(error));
             }
         }
     }
@@ -127,13 +127,16 @@ export class PublishController {
         } catch (error) {
             logDiagnostic("publisher activation failed", { code: error instanceof SpikeSignalingError ? error.code : browserFailureCode(error),
                 diagnostic: operation.peer.closeMessage }, true);
-            if (this.current(operation)) this.fail(operation, operation.peer.closeMessage || "DASS activation failed. Check authorization and the server's UDP policy. No Discord fallback.");
+            if (this.current(operation)) {
+                if (isAuthenticationRejected(error)) this.session.clear();
+                this.fail(operation, error instanceof SpikeSignalingError ? signalingFailureMessage(error)
+                    : operation.peer.closeMessage || "DASS activation failed. Check the server's UDP policy. No Discord fallback.");
+            }
         }
     }
 
     private fail(operation: NonNullable<PublishController["operation"]>, message: string) {
         if (this.operation !== operation) return;
-        if (/unauthorized|expired|revoked/.test(message)) this.session.clear();
         this.reset();
         this.update({ phase: "failed", message, candidates: [] });
     }

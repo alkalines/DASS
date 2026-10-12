@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { SpikePeer } from "../../clients/spike/peer";
-import { BrowserSocket, SpikeSignaling } from "../../clients/spike/signaling";
+import { BrowserSocket, SpikeSignaling, SpikeSignalingError } from "../../clients/spike/signaling";
 import { WatchController } from "../../plugins/dass/watching";
 
 class Socket extends EventTarget implements BrowserSocket {
@@ -90,6 +90,22 @@ test("unauthorized discovery is explicit and exposes no shares", async () => {
         expect(f.socket.readyState).toBe(3);
     } finally { f.controller.stop(); }
 });
+
+for (const code of ["socket", "timeout", "expired", "server:expired", "server:transport_failed"] as const) {
+    test(`viewer ${code} is a disconnect, not a credential rejection`, async () => {
+        const controller = new WatchController(() => "voice_context", {
+            connect: async () => { throw new SpikeSignalingError(code); },
+            prepare: async () => { throw new Error("Unexpected preparation"); }
+        });
+        controller.start();
+        try {
+            await controller.bind("https://dass.example", "room", "secret");
+            expect(controller.getSnapshot().phase).toBe("disconnected");
+            expect(controller.getSnapshot().message).toContain("credentials were kept");
+            expect(controller.getSnapshot().shares).toEqual([]);
+        } finally { controller.stop(); }
+    });
+}
 
 test("late directory response cannot restore a room after context exit", async () => {
     const f = fixture();

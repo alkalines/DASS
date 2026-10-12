@@ -21,7 +21,7 @@ export function WatchPanel({ controller, backendUrl, beforePrepare, session }: {
         const unsubscribe = controller.subscribeStatus(() => {
             const snapshot = controller.getSnapshot();
             setStatus(snapshot);
-            if (["unauthorized", "failed", "disconnected"].includes(snapshot.phase)) setCredential("");
+            if (snapshot.phase === "unauthorized") setCredential("");
             if (snapshot.phase === "unauthorized") session?.clear();
         });
         return () => { unsubscribe(); if (!session) controller.reset(); };
@@ -52,7 +52,6 @@ export function WatchPanel({ controller, backendUrl, beforePrepare, session }: {
             <TextInput type="password" placeholder="Separate DASS credential (memory only)" value={credential} onChange={setCredential} disabled={loading} /></div>
         <Button disabled={loading || !credential || !roomId || !!status.stream} onClick={() => {
             const submitted = credential;
-            setCredential("");
             void controller.bind(backendUrl, roomId, submitted);
         }}>Bind room and discover</Button>
         </details>}

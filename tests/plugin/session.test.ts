@@ -111,7 +111,44 @@ test("denied account login clears access without destroying saved configuration"
     expect(session.getSnapshot().phase).toBe("failed");
     expect(session.getSnapshot().configured).toBe(false);
     expect(forgotten).toBe(0);
+    expect(session.getSnapshot().message).toContain("backend rejected");
     session.stop();
+});
+
+for (const code of ["socket", "timeout", "protocol", "server:transport_failed", "expired", "server:expired", "rejected:overloaded"] as const) {
+    test(`startup ${code} retains remembered credentials for an authenticated retry`, async () => {
+        let forgotten = 0;
+        let attempts = 0;
+        const session = new DassSession({ read: async () => account, write: async () => {}, forget: async () => { forgotten++; } }, async options => {
+            expect(options.password).toBe(account.password);
+            if (++attempts === 1) throw new SpikeSignalingError(code);
+            return fakeConnection().connection;
+        });
+        try {
+            await session.start(account.backendUrl);
+            expect(session.getSnapshot()).toMatchObject({ phase: "failed", configured: true, username: account.username });
+            expect(session.getSnapshot().message).toContain("credentials were kept");
+            expect(session.getSnapshot().message).not.toContain("backend rejected");
+            expect(JSON.stringify(session.getSnapshot())).not.toContain(account.password);
+            const connection = await session.connect({ experimental: true, backendUrl: account.backendUrl, ...session.getAccess(), signal: new AbortController().signal });
+            expect(attempts).toBe(2);
+            expect(forgotten).toBe(0);
+            connection.close();
+        } finally { session.stop(); }
+    });
+}
+
+test("unsuccessful unremembered login does not erase a saved account", async () => {
+    let forgotten = 0;
+    const session = new DassSession({ read: async () => undefined, write: async () => {}, forget: async () => { forgotten++; } }, async () => {
+        throw new SpikeSignalingError("socket");
+    });
+    try {
+        await session.start(account.backendUrl);
+        await session.login(account, false);
+        expect(session.getAccess().password).toBe(account.password);
+        expect(forgotten).toBe(0);
+    } finally { session.stop(); }
 });
 
 test("invalid backend origins fail before sending account credentials", async () => {

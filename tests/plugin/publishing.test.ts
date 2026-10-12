@@ -13,6 +13,7 @@ function fixture() {
     const events: string[] = [];
     let releases = 0;
     let deny = false;
+    let failure: SpikeSignalingError | undefined;
     const signalingClosed = new AbortController();
     const signaling = { closed: signalingClosed.signal, close: () => signalingClosed.abort() } as unknown as SpikeSignaling;
     const peerClosed = new AbortController();
@@ -30,13 +31,14 @@ function fixture() {
             events.push("authenticate");
             expect(options.credential).toBe("separate_secret");
             if (deny) throw new SpikeSignalingError("rejected:unauthorized");
+            if (failure) throw failure;
             return signaling;
         },
         prepare: async () => { events.push("prepare"); return peer; }
     });
     controller.start();
     return { session, controller, bridge, events, peer, lease, signalingClosed, releases: () => releases,
-        deny: () => { deny = true; }, exit: () => { context = undefined; controller.reset(); } };
+        deny: () => { deny = true; }, failConnection: (error: SpikeSignalingError) => { failure = error; }, exit: () => { context = undefined; controller.reset(); } };
 }
 
 test("session snapshots never contain credentials; setup is reused and can be forgotten", () => {
@@ -74,6 +76,40 @@ test("denied login prevents capture and invalidates session credentials", async 
         expect(f.events).toEqual(["authenticate"]);
         expect(f.controller.getSnapshot().phase).toBe("failed");
         expect(f.session.getSnapshot().configured).toBe(false);
+    } finally { f.controller.stop(); }
+});
+
+for (const code of ["socket", "timeout", "expired", "server:expired", "server:transport_failed"] as const) {
+    test(`publisher ${code} retains credentials and does not request capture`, async () => {
+        const f = fixture();
+        f.failConnection(new SpikeSignalingError(code));
+        try {
+            await f.controller.publish("https://dass.example", f.bridge);
+            expect(f.events).toEqual(["authenticate"]);
+            expect(f.controller.getSnapshot().phase).toBe("failed");
+            expect(f.controller.getSnapshot().message).toContain("credentials were kept");
+            expect(f.session.getAccess().credential).toBe("separate_secret");
+        } finally { f.controller.stop(); }
+    });
+
+    test(`active publisher ${code} releases capture without invalidating credentials`, async () => {
+        const f = fixture();
+        try {
+            await f.controller.publish("https://dass.example", f.bridge);
+            f.signalingClosed.abort(new SpikeSignalingError(code));
+            expect(f.controller.getSnapshot().phase).toBe("failed");
+            expect(f.releases()).toBeGreaterThan(0);
+            expect(f.session.getAccess().credential).toBe("separate_secret");
+        } finally { f.controller.stop(); }
+    });
+}
+
+test("capture error text cannot invalidate credentials", async () => {
+    const f = fixture();
+    try {
+        await f.controller.publish("https://dass.example", { version: 1, capture: async () => { throw new Error("unauthorized expired revoked"); } });
+        expect(f.controller.getSnapshot().phase).toBe("failed");
+        expect(f.session.getSnapshot().configured).toBe(true);
     } finally { f.controller.stop(); }
 });
 
