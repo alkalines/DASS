@@ -1,4 +1,4 @@
-import { type ClientMessage, MAX_DIRECTORY_SHARES, MAX_MESSAGE_BYTES, PROTOCOL_VERSION, type ServerMessage } from "./signaling";
+import { type ClientMessage, MAX_DIRECTORY_SHARES, MAX_LOGIN_PASSWORD_BYTES, MAX_MESSAGE_BYTES, MAX_PUBLISHER_DISPLAY_NAME_BYTES, PROTOCOL_VERSION, type ServerMessage } from "./signaling";
 
 const encoder = new TextEncoder();
 const identifier = (value: unknown) => typeof value === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(value);
@@ -7,11 +7,14 @@ const text = (maximumBytes: number) => (value: unknown) => typeof value === "str
 const boolean = (value: unknown) => typeof value === "boolean";
 const seconds = (value: unknown) => typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= 0xFFFFFFFF;
 const member = (values: string[]) => (value: unknown) => typeof value === "string" && values.includes(value);
+const displayName = (value: unknown) => typeof value === "string" && text(MAX_PUBLISHER_DISPLAY_NAME_BYTES)(value)
+    && value.trim().length > 0 && ![...value].some(character => /\p{Cc}/u.test(character));
 
 type Validator = (value: unknown) => boolean;
 type Shape = Record<string, Validator>;
 const clientShapes: Record<string, Shape> = {
     login: { credential: text(512) },
+    account_login: { username: identifier, password: text(MAX_LOGIN_PASSWORD_BYTES) },
     join: { room_id: identifier, require_e2ee: boolean },
     directory: { room_id: identifier },
     publish: { session_id: identifier },
@@ -24,7 +27,12 @@ const serverShapes: Record<string, Shape> = {
     authenticated: { expires_at_unix_seconds: seconds },
     joined: { session_id: identifier },
     directory: { room_id: identifier, publisher_ids: value => Array.isArray(value) && value.length <= MAX_DIRECTORY_SHARES
-        && value.every(identifier) && new Set(value).size === value.length },
+        && value.every(identifier) && new Set(value).size === value.length,
+    publishers: value => Array.isArray(value) && value.length <= MAX_DIRECTORY_SHARES
+        && value.every(publisher => record(publisher) && exact(publisher, {
+            publisher_id: identifier,
+            display_name: displayName
+        })) },
     accepted: { session_id: identifier },
     answer: { session_id: identifier, sdp: text(12288) },
     ice: { session_id: identifier, candidate: text(2048) },
@@ -53,7 +61,14 @@ function parse(message: string, shapes: Record<string, Shape>): unknown {
         request_id: identifier,
         operation: operation => {
             if (!record(operation) || typeof operation.type !== "string" || !Object.hasOwn(shapes, operation.type)) return false;
-            return exact(operation, { type: type => type === operation.type, ...shapes[operation.type] });
+            if (!exact(operation, { type: type => type === operation.type, ...shapes[operation.type] })) return false;
+            if (shapes === serverShapes && operation.type === "directory") {
+                const ids = operation.publisher_ids as string[];
+                const publishers = operation.publishers as Array<{ publisher_id: string; display_name: string; }>;
+                return ids.length === publishers.length
+                    && ids.every((id, index) => id === publishers[index].publisher_id);
+            }
+            return true;
         }
     })) throw new Error("Invalid DASS control message");
     return value;

@@ -1,4 +1,4 @@
-# DASS plugin scaffold
+# DASS plugin
 
 Discord Alternative ScreenShare (DASS) now has a build-time Equicord userplugin
 in `plugins/dass`. It now includes an experimental authenticated directory and
@@ -7,12 +7,19 @@ supervised LAN procedure and unverified exit condition. The earlier manual
 transport has user-reported LAN video evidence, not a completed transport gate.
 The capability checker described below is still a separate scaffold-only check.
 
+The current [session and Share-button workflow](session-workflow.md) and
+[LAN account setup](lan-accounts.md) replace the manual publishing/refusal path
+below. Accounts can be remembered with OS-backed encryption and authenticate
+on plugin load; LAN client endpoints are admitted per session automatically.
+Supported Share buttons start DASS by default. The older sections document the
+development history, not the current normal workflow.
+
 The capability checker sends no credentials, rejects redirects, requires HTTPS except for explicitly
 enabled loopback HTTP, and bounds discovery to 5 seconds and 16 KiB. Only the
 version-1 scaffold contract is accepted. Discovery is not authentication or an
 authorization to capture. There is no production transport or E2EE to configure.
 
-On Discord stable build **634304**, the center voice tray and left Voice Connected
+**Historical chooser-only behavior:** On Discord stable build **634304**, the center voice tray and left Voice Connected
 panel share buttons now declare an explicit Discord/DASS chooser before their
 native start callbacks. The center chooser/refusal is user-observed; the new left
 panel patch is not yet runtime-verified. DASS only

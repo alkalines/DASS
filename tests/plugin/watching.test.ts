@@ -21,7 +21,8 @@ class Socket extends EventTarget implements BrowserSocket {
         if (operation.type === "login") queueMicrotask(() => reply({ type: "authenticated", expires_at_unix_seconds: Math.floor(Date.now() / 1000) + 60 }));
         else if (operation.type === "directory") {
             this.directoryReply = () => reply(this.deny ? { type: "rejected", code: "unauthorized" }
-                : { type: "directory", room_id: operation.room_id, publisher_ids: ["real_source"] });
+                : { type: "directory", room_id: operation.room_id, publisher_ids: ["real_source"],
+                    publishers: [{ publisher_id: "real_source", display_name: "Workstation" }] });
             if (!this.delay) queueMicrotask(this.directoryReply);
         }
     }
@@ -74,7 +75,7 @@ test("directory binds an independently authorized room, never using Discord clai
     try {
         await f.controller.bind("https://dass.example", "authorized_room", "separate_secret");
         expect(f.socket.operations).toEqual([{ type: "login", credential: "separate_secret" }, { type: "directory", room_id: "authorized_room" }]);
-        expect(f.controller.getSnapshot().shares).toEqual([{ roomId: "authorized_room", shareId: "real_source" }]);
+        expect(f.controller.getSnapshot().shares).toEqual([{ roomId: "authorized_room", shareId: "real_source", displayName: "Workstation" }]);
         expect(f.controller.getSnapshot().phase).toBe("ready");
     } finally { f.controller.stop(); }
 });
@@ -118,6 +119,7 @@ test("one prepared decoder survives initial authentication; watch consumes DASS 
         f.deliver();
         expect(await watch).toEqual({ ok: true, value: f.stream });
         expect(f.controller.getSnapshot().stream).toBe(f.stream);
+        expect(f.controller.getSnapshot().watchingShare?.displayName).toBe("Workstation");
         expect(f.activations()).toBe(1);
         expect(f.socket.operations.some(operation => "discord_channel_id" in operation)).toBe(false);
         f.exit();
@@ -135,4 +137,24 @@ test("cross-room watches cannot activate the viewer", async () => {
         expect((await f.controller.watch({ roomId: "other_room", shareId: "source" })).ok).toBe(false);
         expect(f.activations()).toBe(0);
     } finally { f.controller.stop(); }
+});
+
+test("automatic viewer setup binds once without repeating credentials", async () => {
+    const f = fixture();
+    try {
+        await f.controller.prepareAndBind("https://dass.example", "room", "secret");
+        expect(f.prepares()).toBe(1);
+        expect(f.controller.getSnapshot().shares[0].displayName).toBe("Workstation");
+        expect(f.socket.operations.filter(operation => operation.type === "login").length).toBe(1);
+    } finally { f.controller.stop(); }
+});
+
+test("cancelled automatic preparation cannot bind an old credential later", async () => {
+    const f = fixture();
+    const preparing = f.controller.prepareAndBind("https://dass.example", "room", "secret");
+    f.controller.reset();
+    await preparing;
+    expect(f.socket.operations.length).toBe(0);
+    expect(f.controller.getSnapshot().shares).toEqual([]);
+    f.controller.stop();
 });

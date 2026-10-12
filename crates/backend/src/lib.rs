@@ -140,6 +140,7 @@ mod tests {
             request_timeout: Duration::from_secs(5),
             tls: None,
             invite_file: None,
+            users_json: None,
         })
     }
 

@@ -8,13 +8,18 @@ export const MAX_QUEUED_MESSAGES = 32;
 export const LOGIN_DEADLINE_MS = 5000;
 export const SETUP_DEADLINE_MS = 15000;
 export const MAX_DIRECTORY_SHARES = 64;
+export const MAX_PUBLISHER_DISPLAY_NAME_BYTES = 128;
+export const MAX_LOGIN_PASSWORD_BYTES = 512;
 
 export type ClientMessage = { protocol_version: number; request_id: string; operation: ClientOperation };
 
 export type ServerMessage = { protocol_version: number; request_id: string; operation: ServerOperation };
 
+export type PublisherMetadata = { publisher_id: string; display_name: string };
+
 export type ClientOperation =
     | { type: "login"; credential: string }
+    | { type: "account_login"; username: string; password: string }
     | { type: "join"; room_id: string; require_e2ee: boolean }
     | { type: "directory"; room_id: string }
     | { type: "publish"; session_id: string }
@@ -26,7 +31,7 @@ export type ClientOperation =
 export type ServerOperation =
     | { type: "authenticated"; expires_at_unix_seconds: number }
     | { type: "joined"; session_id: string }
-    | { type: "directory"; room_id: string; publisher_ids: Array<string> }
+    | { type: "directory"; room_id: string; publisher_ids: Array<string>; publishers: Array<PublisherMetadata> }
     | { type: "accepted"; session_id: string }
     | { type: "answer"; session_id: string; sdp: string }
     | { type: "ice"; session_id: string; candidate: string }

@@ -7,7 +7,7 @@
 import { routeWatch } from "./discordAdapter";
 import { type DassShare, ScreenshareRouting, type ScreenshareTransport } from "./routing";
 import { SpikePeer } from "../../clients/spike/peer";
-import { SpikeSignaling, SpikeSignalingError } from "../../clients/spike/signaling";
+import { type DassAuthentication, SpikeSignaling, SpikeSignalingError } from "../../clients/spike/signaling";
 
 export interface WatchStatus {
     phase: "idle" | "loading" | "ready" | "watching" | "disconnected" | "unauthorized" | "failed";
@@ -15,6 +15,7 @@ export interface WatchStatus {
     shares: readonly DassShare[];
     candidates: readonly string[];
     stream?: MediaStream;
+    watchingShare?: DassShare;
 }
 
 /** One independently authorized room, one prepared/active decoder, no native streams. */
@@ -95,10 +96,10 @@ export class WatchController implements ScreenshareTransport {
         this.reset(unauthorized ? "unauthorized" : disconnected ? "disconnected" : "failed", unauthorized
             ? "DASS access denied, expired or revoked. Supply an authorized room credential."
             : disconnected ? "DASS connection disconnected. Prepare and authenticate again; no Discord fallback."
-                : "DASS setup failed. Check TLS, room access and the UDP allowlist. No Discord fallback.");
+                : "DASS setup failed. Check TLS, room access, LAN IP matching and the UDP path. No Discord fallback.");
     }
 
-    async bind(backendUrl: string, roomId: string, credential: string) {
+    async bind(backendUrl: string, roomId: string, credential: string | DassAuthentication) {
         if (this.busy || this.signaling || this.contextId !== this.currentContext()) this.reset();
         this.update({ ...this.status, phase: "loading", message: "Authenticating the DASS room directory…", shares: [] });
         this.contextId = this.currentContext();
@@ -113,7 +114,8 @@ export class WatchController implements ScreenshareTransport {
         this.roomId = roomId;
         this.routing.setRoom(roomId);
         try {
-            const signaling = await this.dependencies.connect({ experimental: true, backendUrl, credential, signal: this.abort.signal });
+            const authentication = typeof credential === "string" ? { credential } : credential;
+            const signaling = await this.dependencies.connect({ experimental: true, backendUrl, ...authentication, signal: this.abort.signal });
             if (!this.current(epoch)) { signaling.close(); return; }
             this.signaling = signaling;
             signaling.closed.addEventListener("abort", () => {
@@ -134,7 +136,7 @@ export class WatchController implements ScreenshareTransport {
         if (!this.current(epoch)) return;
         this.busy = false;
         if (!result.ok) { this.reset("failed", result.message); return; }
-        this.update({ ...this.status, phase: "ready", message: "Authorized DASS shares only. Prepare the viewer and allowlist its UDP endpoints before watching.", shares: result.value });
+        this.update({ ...this.status, phase: "ready", message: "Authorized DASS shares only. Media follows the backend's LAN admission policy; no Discord fallback.", shares: result.value });
         // At most 120 directory requests in the transport's ten-minute lifetime.
         this.poll = setTimeout(() => void this.refresh(), 5_000);
     }
@@ -156,10 +158,17 @@ export class WatchController implements ScreenshareTransport {
                 if (this.current(epoch)) this.reset("disconnected", peer.closeMessage);
             }, { once: true });
             if (peer.closed.aborted) throw new Error("Viewer closed.");
-            this.update({ ...this.status, phase: "ready", message: "Viewer prepared for 180 seconds. Allowlist these endpoints before binding the directory. No capture is requested.",
+            this.update({ ...this.status, phase: "ready", message: "Viewer prepared for 180 seconds. Automatic LAN admission needs no port updates; static policies require allowlisting. No capture is requested.",
                 candidates: peer.candidates.map(candidate => { const fields = candidate.split(/\s+/); return `${fields[4]}:${fields[5]}`; }) });
         } catch (error) { if (this.current(epoch)) this.failure(error); }
         finally { if (this.current(epoch)) { this.busy = false; void this.refresh(); } }
+    }
+
+    async prepareAndBind(backendUrl: string, roomId: string, credential: string | DassAuthentication) {
+        this.reset();
+        const { epoch } = this;
+        await this.prepareViewer();
+        if (this.current(epoch) && this.peer && !this.peer.closed.aborted) await this.bind(backendUrl, roomId, credential);
     }
 
     async watch(share: DassShare) {
@@ -175,7 +184,8 @@ export class WatchController implements ScreenshareTransport {
         const result = await intercepted.completion;
         if (this.current(epoch)) {
             this.busy = false;
-            if (result.ok) this.update({ ...this.status, phase: "watching", message: "DASS tracks attached. Use Enable audio to permit sound playback.", stream: result.value });
+            if (result.ok) this.update({ ...this.status, phase: "watching", message: "DASS tracks attached. Use Enable audio to permit sound playback.", stream: result.value,
+                watchingShare: this.status.shares.find(listed => listed.shareId === share.shareId) ?? { roomId: share.roomId, shareId: share.shareId } });
             else this.reset("failed", result.message);
         }
         return result;
@@ -186,7 +196,11 @@ export class WatchController implements ScreenshareTransport {
         if (!this.current(epoch) || roomId !== this.roomId || !this.signaling || signal.aborted) throw new Error("Unbound room.");
         const response = await this.signaling.request({ type: "directory", room_id: roomId }, "directory");
         if (!this.current(epoch) || signal.aborted || response.type !== "directory" || response.room_id !== roomId) throw new Error("Stale directory.");
-        return response.publisher_ids.map(shareId => ({ roomId, shareId }));
+        return response.publishers.map(publisher => ({
+            roomId,
+            shareId: publisher.publisher_id,
+            displayName: publisher.display_name
+        }));
     }
 
     async subscribe(share: DassShare, signal: AbortSignal) {
@@ -219,5 +233,5 @@ export class WatchController implements ScreenshareTransport {
         }
     }
 
-    async preparePublish(): Promise<never> { throw new Error("Publishing uses the separate manual spike panel."); }
+    async preparePublish(): Promise<never> { throw new Error("Publishing is owned by the DASS session publisher, not the viewer routing instance."); }
 }

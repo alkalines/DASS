@@ -75,7 +75,8 @@ try {
     const previousHashes = existsSync(markerPath) ? JSON.parse(readFileSync(markerPath, "utf8")) : {};
     const sources = new Map(readdirSync(sourceDirectory).map(name => [name, readFileSync(join(sourceDirectory, name), "utf8")
         .replaceAll('"../../clients/spike/peer"', '"./spikePeer"')
-        .replaceAll('"../../clients/spike/signaling"', '"./spikeSignaling"')]));
+        .replaceAll('"../../clients/spike/signaling"', '"./spikeSignaling"')
+        .replaceAll('"../../crates/protocol/generated/signaling"', '"./protocolSignaling"')]));
     const clientSources = [
         ["spikePeer.ts", "clients/spike/peer.ts", [['"../../plugins/dass/routing"', '"./routing"'], ['"./signaling"', '"./spikeSignaling"']]],
         ["spikeSignaling.ts", "clients/spike/signaling.ts", [['"../../crates/protocol/generated/signaling"', '"./protocolSignaling"'], ['"../../crates/protocol/generated/validate"', '"./protocolValidate"']]],
@@ -123,6 +124,10 @@ try {
     const distDirectory = join(checkoutDirectory, "dist");
     for (const [target, entryPoint] of [["desktop", "patcher.js"], ["equibop", "main.js"]]) {
         if (!existsSync(join(distDirectory, target, entryPoint))) throw new Error(`${target} entry point was not built.`);
+        const nativeBundle = readFileSync(join(distDirectory, target, entryPoint), "utf8");
+        if (!nativeBundle.includes("encryptRememberedAccount") || !nativeBundle.includes("decryptRememberedAccount")) {
+            throw new Error(`Built ${target} entry point does not contain DASS secure-login native helpers.`);
+        }
         const renderer = readFileSync(join(distDirectory, target, "renderer.js"), "utf8");
         if (!renderer.includes("Discord Alternative ScreenShare: experimental authenticated directory and viewer.")) {
             throw new Error(`Built ${target} renderer does not contain the DASS plugin.`);

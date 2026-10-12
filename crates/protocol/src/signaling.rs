@@ -10,6 +10,8 @@ pub const MAX_QUEUED_MESSAGES: usize = 32;
 pub const LOGIN_DEADLINE_MS: usize = 5_000;
 pub const SETUP_DEADLINE_MS: usize = 15_000;
 pub const MAX_DIRECTORY_SHARES: usize = 64;
+pub const MAX_PUBLISHER_DISPLAY_NAME_BYTES: usize = 128;
+pub const MAX_LOGIN_PASSWORD_BYTES: usize = 512;
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -25,6 +27,10 @@ pub struct ClientMessage {
 pub enum ClientOperation {
     Login {
         credential: String,
+    },
+    AccountLogin {
+        username: String,
+        password: String,
     },
     Join {
         room_id: String,
@@ -62,6 +68,13 @@ pub struct ServerMessage {
 }
 
 #[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PublisherMetadata {
+    pub publisher_id: String,
+    pub display_name: String,
+}
+
+#[derive(Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ServerOperation {
     Authenticated {
@@ -73,6 +86,7 @@ pub enum ServerOperation {
     Directory {
         room_id: String,
         publisher_ids: Vec<String>,
+        publishers: Vec<PublisherMetadata>,
     },
     Accepted {
         session_id: String,
@@ -153,6 +167,9 @@ impl ClientMessage {
         }
         match &self.operation {
             ClientOperation::Login { credential } => valid_text(credential, 512),
+            ClientOperation::AccountLogin { username, password } => {
+                valid_id(username) && valid_text(password, MAX_LOGIN_PASSWORD_BYTES)
+            }
             ClientOperation::Join { room_id, .. } | ClientOperation::Directory { room_id } => {
                 valid_id(room_id)
             }
@@ -204,6 +221,47 @@ mod tests {
         assert!(!valid_text("", 512));
         assert!(!valid_text("secret\0", 512));
         assert!(!valid_text(&"é".repeat(257), 512));
+    }
+
+    #[test]
+    fn account_login_is_bounded_without_replacing_invite_login() {
+        let account_login = ClientMessage {
+            protocol_version: crate::PROTOCOL_VERSION,
+            request_id: "login_1".into(),
+            operation: ClientOperation::AccountLogin {
+                username: "alice_1".into(),
+                password: "correct horse battery staple".into(),
+            },
+        };
+        assert!(account_login.is_valid());
+        let too_long_password = ClientMessage {
+            operation: ClientOperation::AccountLogin {
+                username: "alice_1".into(),
+                password: "é".repeat(MAX_LOGIN_PASSWORD_BYTES / 2 + 1),
+            },
+            ..account_login
+        };
+        assert!(!too_long_password.is_valid());
+        for username in ["", "invalid/name", &"x".repeat(65)] {
+            let invalid_username = ClientMessage {
+                protocol_version: crate::PROTOCOL_VERSION,
+                request_id: "login_1".into(),
+                operation: ClientOperation::AccountLogin {
+                    username: username.into(),
+                    password: "correct horse battery staple".into(),
+                },
+            };
+            assert!(!invalid_username.is_valid());
+        }
+        let invalid_password = ClientMessage {
+            protocol_version: crate::PROTOCOL_VERSION,
+            request_id: "login_1".into(),
+            operation: ClientOperation::AccountLogin {
+                username: "alice_1".into(),
+                password: "bad\0password".into(),
+            },
+        };
+        assert!(!invalid_password.is_valid());
     }
 
     #[test]

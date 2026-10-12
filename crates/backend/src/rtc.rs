@@ -26,6 +26,9 @@ use tokio::{
 
 const MAX_PEERS: usize = 2;
 const MAX_CANDIDATES: usize = 16;
+const MAX_TRUSTED_CLIENT_IPS: usize = 16;
+const MAX_TRUSTED_CLIENT_IPS_CONFIG_BYTES: usize =
+    MAX_TRUSTED_CLIENT_IPS * 15 + (MAX_TRUSTED_CLIENT_IPS - 1);
 const MAX_OUTPUTS_PER_MUTATION: usize = 256;
 const MAX_DATAGRAM_BYTES: usize = 2_048;
 const MAX_PENDING_DATAGRAMS: usize = 32;
@@ -39,12 +42,21 @@ pub struct SpikeConfig {
     bind_ip: Ipv4Addr,
     advertised_ip: Ipv4Addr,
     first_port: u16,
+    // Exact endpoint allowlisting remains the default. Trusted IPs are an
+    // explicit alternative for Chromium's per-session UDP ports. Automatic
+    // admission is scoped to the authenticated WSS peer and its SDP candidates.
     allowed_peers: HashSet<SocketAddr>,
+    trusted_client_ips: HashSet<Ipv4Addr>,
+    auto_lan_peers: bool,
     admission: Arc<Semaphore>,
     hub: Arc<SpikeHub>,
 }
 
 impl SpikeConfig {
+    pub(crate) fn auto_lan_peers_enabled(&self) -> bool {
+        self.auto_lan_peers
+    }
+
     /// Disabled unless explicitly requested. This spike requires TLS signaling.
     pub fn from_env(tls_enabled: bool) -> Result<Option<Self>, &'static str> {
         Self::from_lookup(tls_enabled, |name| std::env::var(name).ok())
@@ -77,37 +89,72 @@ impl SpikeConfig {
         if !(1024..=65534).contains(&first_port) {
             return Err("RTC port range must contain two non-privileged ports");
         }
-        let peers = lookup("DASS_RTC_ALLOWED_PEERS")
-            .ok_or("RTC spike requires exact allowed peer IP:port pairs")?;
-        if peers.len() > 1024 {
-            return Err("RTC peer allowlist too large");
-        }
+        let auto_lan_peers = match lookup("DASS_RTC_AUTO_LAN_PEERS").as_deref() {
+            None | Some("false") => false,
+            Some("true") => true,
+            _ => return Err("invalid automatic RTC LAN peer admission setting"),
+        };
         let mut allowed_peers = HashSet::new();
-        for entry in peers.split(',') {
-            let address: SocketAddr = entry.parse().map_err(|_| "invalid RTC peer address")?;
-            let SocketAddr::V4(address_v4) = address else {
-                return Err("RTC spike supports IPv4 only");
-            };
-            if !safe_ip(*address_v4.ip()) || address.port() < 1024 {
-                return Err("unsafe RTC peer destination");
+        if let Some(peers) = lookup("DASS_RTC_ALLOWED_PEERS") {
+            if peers.len() > 1024 {
+                return Err("RTC peer allowlist too large");
             }
-            if !allowed_peers.insert(address) || allowed_peers.len() > MAX_CANDIDATES {
-                return Err("duplicate or excessive RTC peers");
+            if !peers.is_empty() {
+                for entry in peers.split(',') {
+                    let address: SocketAddr =
+                        entry.parse().map_err(|_| "invalid RTC peer address")?;
+                    let SocketAddr::V4(address_v4) = address else {
+                        return Err("RTC spike supports IPv4 only");
+                    };
+                    if !safe_ip(*address_v4.ip()) || address.port() < 1024 {
+                        return Err("unsafe RTC peer destination");
+                    }
+                    if !allowed_peers.insert(address) || allowed_peers.len() > MAX_CANDIDATES {
+                        return Err("duplicate or excessive RTC peers");
+                    }
+                }
             }
+        }
+        let mut trusted_client_ips = HashSet::new();
+        if let Some(clients) = lookup("DASS_RTC_TRUSTED_CLIENT_IPS") {
+            if clients.len() > MAX_TRUSTED_CLIENT_IPS_CONFIG_BYTES {
+                return Err("RTC trusted client IPv4 list too large");
+            }
+            if !clients.is_empty() {
+                for entry in clients.split(',') {
+                    let ip: Ipv4Addr = entry
+                        .parse()
+                        .map_err(|_| "invalid trusted RTC client IPv4 address")?;
+                    if !safe_ip(ip) {
+                        return Err("unsafe trusted RTC client address");
+                    }
+                    if !trusted_client_ips.insert(ip)
+                        || trusted_client_ips.len() > MAX_TRUSTED_CLIENT_IPS
+                    {
+                        return Err("duplicate or excessive trusted RTC client addresses");
+                    }
+                }
+            }
+        }
+        if allowed_peers.is_empty() && trusted_client_ips.is_empty() && !auto_lan_peers {
+            return Err("RTC spike requires static peers or automatic LAN admission");
         }
         Ok(Some(Self {
             bind_ip,
             advertised_ip,
             first_port,
             allowed_peers,
+            trusted_client_ips,
+            auto_lan_peers,
             admission: Arc::new(Semaphore::new(MAX_PEERS)),
             hub: Arc::new(SpikeHub::default()),
         }))
     }
 }
 
-// Explicit LAN/loopback destinations are permitted only by the exact allowlist.
-// No link-local/metadata, multicast, broadcast, reserved, or unspecified targets.
+// Static-mode destinations are explicit allowlisted endpoints or trusted-client
+// IPv4 addresses. Auto mode has separate session-local observed-peer checks.
+// No link-local, metadata, multicast, broadcast, reserved, or unspecified targets.
 fn safe_ip(ip: Ipv4Addr) -> bool {
     let [a, b, c, d] = ip.octets();
     a != 0
@@ -122,6 +169,21 @@ fn safe_ip(ip: Ipv4Addr) -> bool {
         && !ip.is_broadcast()
 }
 
+/// Automatic peer admission is intentionally limited to private IPv4 LANs and
+/// loopback. Public, link-local, IPv6 and forwarded/claimed addresses do not
+/// qualify.
+pub(crate) fn auto_lan_ip(ip: Ipv4Addr) -> bool {
+    safe_ip(ip) && (ip.is_private() || ip.is_loopback())
+}
+
+fn candidate_component_one(text: &str) -> bool {
+    let mut fields = text.split_ascii_whitespace();
+    fields
+        .next()
+        .is_some_and(|foundation| foundation.starts_with("candidate:"))
+        && fields.next() == Some("1")
+}
+
 /// Fixed failures only: no SDP, remote addresses, or crypto errors in logs.
 #[derive(Debug)]
 pub struct SpikeFailure;
@@ -131,6 +193,10 @@ pub struct SpikePeer {
     socket: UdpSocket,
     advertised: SocketAddr,
     allowed_peers: HashSet<SocketAddr>,
+    trusted_client_ips: HashSet<Ipv4Addr>,
+    auto_lan_peers: bool,
+    observed_peer_ip: Option<Ipv4Addr>,
+    session_peers: HashSet<SocketAddr>,
     _admission: OwnedSemaphorePermit,
     next_timeout: Instant,
     started: Instant,
@@ -155,6 +221,16 @@ enum PeerRoute {
 
 impl SpikePeer {
     pub async fn bind(config: &SpikeConfig) -> Result<Self, SpikeFailure> {
+        Self::bind_for_session(config, None).await
+    }
+
+    pub async fn bind_for_session(
+        config: &SpikeConfig,
+        observed_peer_ip: Option<Ipv4Addr>,
+    ) -> Result<Self, SpikeFailure> {
+        if config.auto_lan_peers && !observed_peer_ip.is_some_and(auto_lan_ip) {
+            return Err(SpikeFailure);
+        }
         let admission = config
             .admission
             .clone()
@@ -193,6 +269,10 @@ impl SpikePeer {
             socket,
             advertised,
             allowed_peers: config.allowed_peers.clone(),
+            trusted_client_ips: config.trusted_client_ips.clone(),
+            auto_lan_peers: config.auto_lan_peers,
+            observed_peer_ip,
+            session_peers: HashSet::with_capacity(MAX_CANDIDATES),
             _admission: admission,
             next_timeout: now,
             started: now,
@@ -227,11 +307,20 @@ impl SpikePeer {
         room_id: &str,
         publisher_id: &str,
     ) -> Result<Self, SpikeFailure> {
+        Self::publisher_for_session(config, room_id, publisher_id, None).await
+    }
+
+    pub async fn publisher_for_session(
+        config: &SpikeConfig,
+        room_id: &str,
+        publisher_id: &str,
+        observed_peer_ip: Option<Ipv4Addr>,
+    ) -> Result<Self, SpikeFailure> {
         let route = config
             .hub
             .publish(room_id, publisher_id)
             .map_err(|_| SpikeFailure)?;
-        let mut peer = Self::bind(config).await?;
+        let mut peer = Self::bind_for_session(config, observed_peer_ip).await?;
         peer.route = PeerRoute::Publisher(route);
         Ok(peer)
     }
@@ -242,11 +331,21 @@ impl SpikePeer {
         publisher_id: &str,
         subscriber_id: &str,
     ) -> Result<Self, SpikeFailure> {
+        Self::subscriber_for_session(config, room_id, publisher_id, subscriber_id, None).await
+    }
+
+    pub async fn subscriber_for_session(
+        config: &SpikeConfig,
+        room_id: &str,
+        publisher_id: &str,
+        subscriber_id: &str,
+        observed_peer_ip: Option<Ipv4Addr>,
+    ) -> Result<Self, SpikeFailure> {
         let route = config
             .hub
             .subscribe(room_id, publisher_id, subscriber_id)
             .map_err(|_| SpikeFailure)?;
-        let mut peer = Self::bind(config).await?;
+        let mut peer = Self::bind_for_session(config, observed_peer_ip).await?;
         peer.route = PeerRoute::Subscriber(route);
         Ok(peer)
     }
@@ -257,21 +356,54 @@ impl SpikePeer {
 
     fn candidate(&self, text: &str) -> Result<Candidate, SpikeFailure> {
         let candidate = Candidate::from_sdp_string(text).map_err(|_| SpikeFailure)?;
-        if candidate.proto() != Protocol::Udp || !self.allowed_peers.contains(&candidate.addr()) {
+        if candidate.proto() != Protocol::Udp
+            || (self.auto_lan_peers && !candidate_component_one(text))
+            || !self.candidate_endpoint_allowed(candidate.addr())
+        {
             return Err(SpikeFailure);
         }
         Ok(candidate)
     }
 
+    fn candidate_endpoint_allowed(&self, endpoint: SocketAddr) -> bool {
+        if self.auto_lan_peers {
+            let (SocketAddr::V4(endpoint), Some(observed_peer_ip)) =
+                (endpoint, self.observed_peer_ip)
+            else {
+                return false;
+            };
+            endpoint.port() >= 1024
+                && *endpoint.ip() == observed_peer_ip
+                && auto_lan_ip(observed_peer_ip)
+        } else {
+            self.peer_endpoint_allowed(endpoint)
+        }
+    }
+
+    fn peer_endpoint_allowed(&self, endpoint: SocketAddr) -> bool {
+        if self.auto_lan_peers {
+            return self.session_peers.contains(&endpoint);
+        }
+        if self.allowed_peers.contains(&endpoint) {
+            return true;
+        }
+        let SocketAddr::V4(endpoint) = endpoint else {
+            return false;
+        };
+        endpoint.port() >= 1024
+            && safe_ip(*endpoint.ip())
+            && self.trusted_client_ips.contains(endpoint.ip())
+    }
+
     /// Offers must be one-way audio/video (send-only publisher, recv-only viewer).
     /// Data channels, simulcast and renegotiation are deliberately unsupported.
-    fn validate_offer(&self, sdp: &str) -> Result<usize, SpikeFailure> {
+    fn validate_offer(&self, sdp: &str) -> Result<Vec<Candidate>, SpikeFailure> {
         if sdp.len() > 12_288 || sdp.lines().count() > 256 {
             return Err(SpikeFailure);
         }
         let mut media_count = 0;
         let mut send_only = false;
-        let mut candidates = 0;
+        let mut candidates = Vec::with_capacity(MAX_CANDIDATES);
         let mut ssrcs = 0;
         let expected_direction = if self.is_subscriber() {
             "a=recvonly"
@@ -309,8 +441,10 @@ impl SpikePeer {
                 return Err(SpikeFailure);
             }
             if let Some(text) = line.strip_prefix("a=candidate:") {
-                self.candidate(&format!("candidate:{text}"))?;
-                candidates += 1;
+                candidates.push(self.candidate(&format!("candidate:{text}"))?);
+                if candidates.len() > MAX_CANDIDATES {
+                    return Err(SpikeFailure);
+                }
             }
             if line.starts_with("a=ssrc:") {
                 ssrcs += 1;
@@ -318,7 +452,6 @@ impl SpikePeer {
         }
         if !(1..=2).contains(&media_count)
             || !send_only
-            || candidates > MAX_CANDIDATES
             || ssrcs > 16
             || audio_count > 1
             || video_count > 1
@@ -332,15 +465,21 @@ impl SpikePeer {
         if self.offered {
             return Err(SpikeFailure);
         }
-        let count = self.validate_offer(sdp)?;
+        let candidates = self.validate_offer(sdp)?;
         let offer = SdpOffer::from_sdp_string(sdp).map_err(|_| SpikeFailure)?;
+        // Candidate validation is all-or-nothing: only after the complete SDP
+        // has passed checks do its exact endpoints become usable by str0m.
+        if self.auto_lan_peers {
+            self.session_peers
+                .extend(candidates.iter().map(Candidate::addr));
+        }
         let answer = self
             .rtc
             .sdp_api()
             .accept_offer(offer)
             .map_err(|_| SpikeFailure)?;
         self.offered = true;
-        self.candidates = count;
+        self.candidates = candidates.len();
         let answer = answer.to_sdp_string();
         self.drain().await?;
         if answer.len() > 12_288 {
@@ -354,6 +493,9 @@ impl SpikePeer {
             return Err(SpikeFailure);
         }
         let candidate = self.candidate(text)?;
+        if self.auto_lan_peers {
+            self.session_peers.insert(candidate.addr());
+        }
         self.rtc.add_remote_candidate(candidate);
         self.candidates += 1;
         self.drain().await
@@ -469,7 +611,7 @@ impl SpikePeer {
         }
         if !self.offered
             || bytes.len() > MAX_DATAGRAM_BYTES
-            || !self.allowed_peers.contains(&source)
+            || !self.peer_endpoint_allowed(source)
         {
             return Ok(());
         }
@@ -505,7 +647,7 @@ impl SpikePeer {
                     break;
                 }
                 Output::Transmit(transmit) => {
-                    if !self.allowed_peers.contains(&transmit.destination)
+                    if !self.peer_endpoint_allowed(transmit.destination)
                         || transmit.contents.len() > MAX_DATAGRAM_BYTES
                         || datagrams.len() >= MAX_PENDING_DATAGRAMS
                     {
@@ -771,28 +913,49 @@ mod tests {
     async fn two_dtls_peers_forward_opus_and_vp8_payloads_without_transcoding() {
         let publisher_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let viewer_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let mut config = config(
-            true,
-            &format!(
-                "{},{}",
-                publisher_socket.local_addr().unwrap(),
-                viewer_socket.local_addr().unwrap()
-            ),
-        )
-        .unwrap()
-        .unwrap();
+        let mut config = config_with_auto(true, None, None, true)
+            .unwrap()
+            .unwrap();
         let probe = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         config.first_port = probe.local_addr().unwrap().port().min(65534);
         drop(probe);
-        let mut publisher_peer = SpikePeer::publisher(&config, "room", "publisher")
-            .await
-            .unwrap();
-        let mut viewer_peer = SpikePeer::subscriber(&config, "room", "publisher", "viewer")
-            .await
-            .unwrap();
+        let mut publisher_peer = SpikePeer::publisher_for_session(
+            &config,
+            "room",
+            "publisher",
+            Some(Ipv4Addr::LOCALHOST),
+        )
+        .await
+        .unwrap();
+        let mut viewer_peer = SpikePeer::subscriber_for_session(
+            &config,
+            "room",
+            "publisher",
+            "viewer",
+            Some(Ipv4Addr::LOCALHOST),
+        )
+        .await
+        .unwrap();
         let mut publisher =
             TestClient::negotiate(publisher_socket, &mut publisher_peer, false).await;
         let mut viewer = TestClient::negotiate(viewer_socket, &mut viewer_peer, true).await;
+        assert!(publisher_peer
+            .session_peers
+            .contains(&publisher.socket.local_addr().unwrap()));
+        assert!(viewer_peer
+            .session_peers
+            .contains(&viewer.socket.local_addr().unwrap()));
+        let trickle_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let trickle_address = trickle_socket.local_addr().unwrap();
+        publisher_peer
+            .ice(&format!(
+                "candidate:2 1 udp 2130706431 {} {} typ host",
+                trickle_address.ip(),
+                trickle_address.port()
+            ))
+            .await
+            .unwrap();
+        assert!(publisher_peer.session_peers.contains(&trickle_address));
         let (stop, receiver) = tokio::sync::watch::channel(false);
         let publisher_owner = tokio::spawn(run_test_peer(publisher_peer, receiver.clone()));
         let viewer_owner = tokio::spawn(run_test_peer(viewer_peer, receiver));
@@ -838,12 +1001,31 @@ mod tests {
     }
 
     fn config(tls: bool, peers: &str) -> Result<Option<SpikeConfig>, &'static str> {
+        config_with(tls, Some(peers), None)
+    }
+
+    fn config_with(
+        tls: bool,
+        peers: Option<&str>,
+        trusted_client_ips: Option<&str>,
+    ) -> Result<Option<SpikeConfig>, &'static str> {
+        config_with_auto(tls, peers, trusted_client_ips, false)
+    }
+
+    fn config_with_auto(
+        tls: bool,
+        peers: Option<&str>,
+        trusted_client_ips: Option<&str>,
+        auto_lan_peers: bool,
+    ) -> Result<Option<SpikeConfig>, &'static str> {
         SpikeConfig::from_lookup(tls, |name| match name {
             "DASS_RTC_SPIKE" => Some("true".into()),
             "DASS_RTC_BIND_IP" => Some("127.0.0.1".into()),
             "DASS_RTC_ADVERTISED_IP" => Some("127.0.0.1".into()),
             "DASS_RTC_FIRST_PORT" => Some("45000".into()),
-            "DASS_RTC_ALLOWED_PEERS" => Some(peers.into()),
+            "DASS_RTC_ALLOWED_PEERS" => peers.map(Into::into),
+            "DASS_RTC_TRUSTED_CLIENT_IPS" => trusted_client_ips.map(Into::into),
+            "DASS_RTC_AUTO_LAN_PEERS" => Some(auto_lan_peers.to_string()),
             _ => None,
         })
     }
@@ -867,6 +1049,110 @@ mod tests {
             "127.0.0.1:50000,127.0.0.1:50000",
         ] {
             assert!(config(true, peers).is_err());
+        }
+    }
+
+    #[test]
+    fn trusted_client_ip_configuration_is_explicit_safe_and_bounded() {
+        let trusted_only = config_with(true, None, Some("192.168.1.2,10.0.0.3"))
+            .unwrap()
+            .unwrap();
+        assert!(trusted_only.allowed_peers.is_empty());
+        assert_eq!(trusted_only.trusted_client_ips.len(), 2);
+
+        let both_modes = config_with(true, Some("127.0.0.1:50000"), Some("192.168.1.2"))
+            .unwrap()
+            .unwrap();
+        assert!(
+            both_modes
+                .allowed_peers
+                .contains(&"127.0.0.1:50000".parse().unwrap())
+        );
+        assert!(
+            both_modes
+                .trusted_client_ips
+                .contains(&Ipv4Addr::new(192, 168, 1, 2))
+        );
+
+        assert!(config_with(true, None, None).is_err());
+        for clients in [
+            "0.0.0.0",
+            "169.254.1.2",
+            "192.168.1.255",
+            "192.0.2.1",
+            "224.0.0.1",
+            "240.0.0.1",
+            "255.255.255.255",
+            "192.168.1.2/32",
+            "[::1]",
+            "client.invalid",
+            "192.168.1.2,192.168.1.2",
+            "192.168.1.2,",
+        ] {
+            assert!(
+                config_with(true, Some("127.0.0.1:50000"), Some(clients)).is_err(),
+                "accepted trusted client list {clients:?}"
+            );
+        }
+
+        let too_many = (1..=MAX_TRUSTED_CLIENT_IPS + 1)
+            .map(|last| format!("10.0.0.{last}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        assert!(config_with(true, None, Some(&too_many)).is_err());
+        let at_limit = (1..=MAX_TRUSTED_CLIENT_IPS)
+            .map(|last| format!("10.0.0.{last}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        assert_eq!(
+            config_with(true, None, Some(&at_limit))
+                .unwrap()
+                .unwrap()
+                .trusted_client_ips
+                .len(),
+            MAX_TRUSTED_CLIENT_IPS
+        );
+        assert!(
+            config_with(
+                true,
+                Some("127.0.0.1:50000"),
+                Some(&"1".repeat(MAX_TRUSTED_CLIENT_IPS_CONFIG_BYTES + 1))
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn automatic_lan_admission_is_explicit_and_does_not_require_static_lists() {
+        let automatic = config_with_auto(true, None, None, true).unwrap().unwrap();
+        assert!(automatic.auto_lan_peers);
+        assert!(automatic.allowed_peers.is_empty());
+        assert!(automatic.trusted_client_ips.is_empty());
+
+        assert!(config_with_auto(true, None, None, false).is_err());
+        assert!(SpikeConfig::from_lookup(true, |name| match name {
+            "DASS_RTC_SPIKE" => Some("true".into()),
+            "DASS_RTC_BIND_IP" | "DASS_RTC_ADVERTISED_IP" => Some("127.0.0.1".into()),
+            "DASS_RTC_FIRST_PORT" => Some("45000".into()),
+            "DASS_RTC_AUTO_LAN_PEERS" => Some("yes".into()),
+            _ => None,
+        })
+        .is_err());
+
+        for ip in [
+            Ipv4Addr::new(10, 0, 0, 4),
+            Ipv4Addr::new(172, 16, 0, 4),
+            Ipv4Addr::new(192, 168, 0, 4),
+            Ipv4Addr::LOCALHOST,
+        ] {
+            assert!(auto_lan_ip(ip));
+        }
+        for ip in [
+            Ipv4Addr::new(8, 8, 8, 8),
+            Ipv4Addr::new(169, 254, 1, 4),
+            Ipv4Addr::new(100, 64, 0, 1),
+        ] {
+            assert!(!auto_lan_ip(ip));
         }
     }
 
@@ -904,6 +1190,88 @@ mod tests {
         assert_eq!(config.admission.available_permits(), 1);
         drop(peer);
         assert_eq!(config.admission.available_permits(), 2);
+    }
+
+    #[tokio::test]
+    async fn trusted_client_ip_accepts_dynamic_nonprivileged_ports_only_for_configured_hosts() {
+        let mut config = config_with(true, None, Some("127.0.0.1"))
+            .unwrap()
+            .unwrap();
+        let probe = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        config.first_port = probe.local_addr().unwrap().port().min(65534);
+        drop(probe);
+        let peer = SpikePeer::bind(&config).await.unwrap();
+
+        for port in [1024, 49152, 65535] {
+            assert!(
+                peer.candidate(&format!("candidate:1 1 udp 2130706431 127.0.0.1 {port} typ host"))
+                    .is_ok(),
+                "trusted address should accept non-privileged port {port}"
+            );
+        }
+        for candidate in [
+            "candidate:1 1 udp 2130706431 127.0.0.1 1023 typ host",
+            "candidate:1 1 udp 2130706431 127.0.0.2 50000 typ host",
+            "candidate:1 1 udp 2130706431 169.254.1.2 50000 typ host",
+            "candidate:1 1 udp 2130706431 224.0.0.1 50000 typ host",
+        ] {
+            assert!(peer.candidate(candidate).is_err(), "accepted {candidate}");
+        }
+    }
+
+    #[tokio::test]
+    async fn automatic_admission_is_bound_to_observed_lan_ip_and_validated_offer_candidates() {
+        let observed_ip = Ipv4Addr::new(192, 168, 1, 8);
+        let config = config_with_auto(
+            true,
+            Some("127.0.0.1:50000"),
+            Some("192.168.1.9"),
+            true,
+        )
+        .unwrap()
+        .unwrap();
+        let peer = SpikePeer::bind_for_session(&config, Some(observed_ip))
+            .await
+            .unwrap();
+
+        assert!(peer
+            .candidate("candidate:1 1 udp 2130706431 192.168.1.8 50000 typ host")
+            .is_ok());
+        for candidate in [
+            // Static exact/trusted configuration cannot override observed-peer mismatch.
+            "candidate:1 1 udp 2130706431 127.0.0.1 50000 typ host",
+            "candidate:1 1 udp 2130706431 192.168.1.9 50000 typ host",
+            "candidate:1 1 udp 2130706431 8.8.8.8 50000 typ host",
+            "candidate:1 1 udp 2130706431 192.168.1.8 1023 typ host",
+            "candidate:1 2 udp 2130706431 192.168.1.8 50000 typ host",
+            "candidate:1 1 tcp 2130706431 192.168.1.8 50000 typ host tcptype passive",
+        ] {
+            assert!(peer.candidate(candidate).is_err(), "accepted {candidate}");
+        }
+
+        let valid = "m=video 9 UDP/TLS/RTP/SAVPF 96\r\na=sendonly\r\na=candidate:1 1 udp 2130706431 192.168.1.8 50000 typ host\r\n";
+        let candidates = peer.validate_offer(valid).unwrap();
+        assert_eq!(candidates.len(), 1);
+        assert!(peer.session_peers.is_empty());
+
+        let mismatched = format!(
+            "{valid}a=candidate:2 1 udp 2130706431 192.168.1.9 50001 typ host\r\n"
+        );
+        assert!(peer.validate_offer(&mismatched).is_err());
+        assert!(peer.session_peers.is_empty());
+
+        let too_many = format!(
+            "m=video 9 UDP/TLS/RTP/SAVPF 96\r\na=sendonly\r\n{}",
+            "a=candidate:1 1 udp 2130706431 192.168.1.8 50000 typ host\r\n"
+                .repeat(MAX_CANDIDATES + 1)
+        );
+        assert!(peer.validate_offer(&too_many).is_err());
+        assert!(peer.session_peers.is_empty());
+
+        assert!(SpikePeer::bind_for_session(&config, None).await.is_err());
+        assert!(SpikePeer::bind_for_session(&config, Some(Ipv4Addr::new(8, 8, 8, 8)))
+            .await
+            .is_err());
     }
 
     #[tokio::test]

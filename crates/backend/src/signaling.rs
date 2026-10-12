@@ -5,7 +5,8 @@ use crate::rtc::{SpikeConfig, SpikePeer};
 use axum::{
     Router,
     extract::{
-        OriginalUri, State,
+        Extension, OriginalUri, State,
+        connect_info::ConnectInfo,
         ws::{
             CloseFrame, Message, WebSocket, WebSocketUpgrade, rejection::WebSocketUpgradeRejection,
         },
@@ -18,12 +19,13 @@ use dass_protocol::{
     PROTOCOL_VERSION,
     signaling::{
         ClientOperation, CloseReason, ErrorCode, LOGIN_DEADLINE_MS, MAX_DIRECTORY_SHARES,
-        MAX_MESSAGE_BYTES, MAX_ROOM_MEMBERS, MAX_SESSIONS, SETUP_DEADLINE_MS, ServerMessage,
-        ServerOperation, parse_client_message,
+        MAX_MESSAGE_BYTES, MAX_ROOM_MEMBERS, MAX_SESSIONS, SETUP_DEADLINE_MS, PublisherMetadata,
+        ServerMessage, ServerOperation, parse_client_message,
     },
 };
 use std::{
     collections::{HashMap, HashSet},
+    net::{IpAddr, Ipv4Addr, SocketAddr},
     sync::{Arc, Mutex},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -161,6 +163,7 @@ struct JoinedSession {
     session_id: String,
     room: RoomLease,
     setup_deadline: Instant,
+    observed_peer_ip: Option<Ipv4Addr>,
     receive_peer: Option<SpikePeer>,
     publisher: Option<PublisherLease>,
 }
@@ -231,20 +234,34 @@ fn directory(
     let Ok(publishers) = state.publishers.lock() else {
         return rejected(ErrorCode::Overloaded);
     };
-    let mut publisher_ids: Vec<String> = publishers
+    let mut publisher_metadata: Vec<PublisherMetadata> = publishers
         .iter()
         .filter(|(_, publisher)| {
             publisher.room_id == room_id
                 && store.authorize(&publisher.invite_id, &room_id, Permission::Access, now)
                 && store.authorize(&publisher.invite_id, &room_id, Permission::Publish, now)
         })
-        .map(|(id, _)| id.clone())
+        .map(|(publisher_id, publisher)| {
+            let display_name = store
+                .current(&publisher.invite_id, now)
+                .and_then(|invite| invite.display_name.clone())
+                .unwrap_or_else(|| publisher.invite_id.clone());
+            PublisherMetadata {
+                publisher_id: publisher_id.clone(),
+                display_name,
+            }
+        })
         .take(MAX_DIRECTORY_SHARES)
         .collect();
-    publisher_ids.sort_unstable();
+    publisher_metadata.sort_unstable_by(|left, right| left.publisher_id.cmp(&right.publisher_id));
+    let publisher_ids = publisher_metadata
+        .iter()
+        .map(|publisher| publisher.publisher_id.clone())
+        .collect();
     ServerOperation::Directory {
         room_id,
         publisher_ids,
+        publishers: publisher_metadata,
     }
 }
 
@@ -267,6 +284,7 @@ async fn upgrade(
     State(state): State<SignalingState>,
     headers: HeaderMap,
     OriginalUri(uri): OriginalUri,
+    connect_info: Option<Extension<ConnectInfo<SocketAddr>>>,
     upgrade: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
 ) -> Response {
     if !exact_origin(&headers) {
@@ -285,6 +303,22 @@ async fn upgrade(
     if upgrade.selected_protocol().is_none() {
         return StatusCode::BAD_REQUEST.into_response();
     }
+    // Only the accepted TCP socket's peer address is authoritative here. Do
+    // not consult forwarding headers or any address claimed by the client.
+    let observed_peer_ip = connect_info.and_then(|Extension(ConnectInfo(address))| {
+        match address.ip() {
+            IpAddr::V4(ip) => Some(ip),
+            IpAddr::V6(_) => None,
+        }
+    });
+    if state
+        .rtc_spike
+        .as_ref()
+        .is_some_and(SpikeConfig::auto_lan_peers_enabled)
+        && !observed_peer_ip.is_some_and(crate::rtc::auto_lan_ip)
+    {
+        return StatusCode::FORBIDDEN.into_response();
+    }
     let Ok(connection) = state.connections.clone().try_acquire_owned() else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
@@ -298,7 +332,15 @@ async fn upgrade(
         .max_write_buffer_size(maximum * 2)
         .max_message_size(maximum)
         .max_frame_size(maximum)
-        .on_upgrade(move |socket| run(socket, state, connection, unauthenticated))
+        .on_upgrade(move |socket| {
+            run(
+                socket,
+                state,
+                connection,
+                unauthenticated,
+                observed_peer_ip,
+            )
+        })
 }
 
 pub fn now_seconds() -> Result<u32, &'static str> {
@@ -366,8 +408,17 @@ async fn login(
     };
     let message = parse_client_message(text.as_bytes()).map_err(|_| ErrorCode::InvalidMessage)?;
     *failure_request_id = message.request_id.clone();
-    let ClientOperation::Login { credential } = &message.operation else {
-        return Err(ErrorCode::Unauthorized);
+    enum LoginInput {
+        Credential(String),
+        Account { username: String, password: String },
+    }
+    let login_input = match &message.operation {
+        ClientOperation::Login { credential } => LoginInput::Credential(credential.clone()),
+        ClientOperation::AccountLogin { username, password } => LoginInput::Account {
+            username: username.clone(),
+            password: password.clone(),
+        },
+        _ => return Err(ErrorCode::Unauthorized),
     };
     if !state
         .login_rate
@@ -384,12 +435,16 @@ async fn login(
         .map_err(|_| ErrorCode::Overloaded)?;
     let invites = state.invites.borrow_and_update().clone();
     let verification_invites = invites.clone();
-    let credential = credential.clone();
     let now = now_seconds().map_err(|_| ErrorCode::Unauthorized)?;
     // A cancelled login leaves the permit inside the non-cancellable bounded worker.
     let invite_id = tokio::task::spawn_blocking(move || {
         let _permit = permit;
-        verification_invites.verify(&credential, now)
+        match login_input {
+            LoginInput::Credential(credential) => verification_invites.verify(&credential, now),
+            LoginInput::Account { username, password } => {
+                verification_invites.verify_account(&username, &password, now)
+            }
+        }
     })
     .await
     .map_err(|_| ErrorCode::Unauthorized)?
@@ -425,6 +480,7 @@ async fn run(
     mut state: SignalingState,
     _connection: OwnedSemaphorePermit,
     unauthenticated: OwnedSemaphorePermit,
+    observed_peer_ip: Option<Ipv4Addr>,
 ) {
     let mut failure_request_id = "login_rejected".to_owned();
     let result = tokio::time::timeout(
@@ -527,7 +583,15 @@ async fn run(
                     &message.operation, &mut session).await;
                 let response = match media_response {
                     Ok(Some(response)) => response,
-                    Ok(None) => operate(&state, &store, &identity.invite_id, now, message.operation, &mut session, &mut last_left),
+                    Ok(None) => operate_for_peer(
+                        &state,
+                        &store,
+                        &identity.invite_id,
+                        now,
+                        message.operation,
+                        (observed_peer_ip, &mut session),
+                        &mut last_left,
+                    ),
                     Err(()) => {
                         close(&mut socket, session.as_ref(), CloseReason::TransportFailed).await;
                         break;
@@ -605,7 +669,14 @@ async fn media_operation(
             if joined.receive_peer.is_some() {
                 return Ok(Some(rejected(ErrorCode::InvalidState)));
             }
-            match SpikePeer::publisher(config, &joined.room.room_id, session_id).await {
+            match SpikePeer::publisher_for_session(
+                config,
+                &joined.room.room_id,
+                session_id,
+                joined.observed_peer_ip,
+            )
+            .await
+            {
                 Ok(peer) => joined.receive_peer = Some(peer),
                 Err(_) => return Ok(Some(rejected(ErrorCode::Overloaded))),
             }
@@ -617,8 +688,14 @@ async fn media_operation(
             if joined.receive_peer.is_some() {
                 return Ok(Some(rejected(ErrorCode::InvalidState)));
             }
-            match SpikePeer::subscriber(config, &joined.room.room_id, publisher_id, session_id)
-                .await
+            match SpikePeer::subscriber_for_session(
+                config,
+                &joined.room.room_id,
+                publisher_id,
+                session_id,
+                joined.observed_peer_ip,
+            )
+            .await
             {
                 Ok(peer) => joined.receive_peer = Some(peer),
                 // Deliberately do not disclose whether a publisher exists in another room.
@@ -656,6 +733,7 @@ fn rejected(code: ErrorCode) -> ServerOperation {
     ServerOperation::Rejected { code }
 }
 
+#[cfg(test)]
 fn operate(
     state: &SignalingState,
     store: &InviteStore,
@@ -665,8 +743,22 @@ fn operate(
     session: &mut Option<JoinedSession>,
     last_left: &mut Option<String>,
 ) -> ServerOperation {
+    operate_for_peer(state, store, invite_id, now, operation, (None, session), last_left)
+}
+
+fn operate_for_peer(
+    state: &SignalingState,
+    store: &InviteStore,
+    invite_id: &str,
+    now: u32,
+    operation: ClientOperation,
+    (observed_peer_ip, session): (Option<Ipv4Addr>, &mut Option<JoinedSession>),
+    last_left: &mut Option<String>,
+) -> ServerOperation {
     match operation {
-        ClientOperation::Login { .. } => rejected(ErrorCode::InvalidState),
+        ClientOperation::Login { .. } | ClientOperation::AccountLogin { .. } => {
+            rejected(ErrorCode::InvalidState)
+        }
         ClientOperation::Directory { room_id } => directory(state, store, invite_id, room_id, now),
         ClientOperation::Join {
             room_id,
@@ -692,6 +784,7 @@ fn operate(
                 session_id: session_id.clone(),
                 room,
                 setup_deadline: Instant::now() + Duration::from_millis(SETUP_DEADLINE_MS as u64),
+                observed_peer_ip,
                 receive_peer: None,
                 publisher: None,
             });
@@ -749,19 +842,21 @@ fn operate(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::auth::{InviteFile, RoomGrant, create_invite};
+    use crate::auth::{InviteFile, RoomGrant, create_invite, create_invite_with_display_name};
 
     #[tokio::test]
     async fn directory_requires_subscribe_scope_filters_expiry_and_is_drop_owned() {
         let mut invites = Vec::new();
         for (id, room, publish, subscribe, expires) in [
             ("publisher", "room", true, false, 100),
+            ("unnamed_publisher", "room", true, false, 100),
             ("viewer", "room", false, true, 200),
             ("outsider", "other", false, true, 200),
         ] {
             invites.push(
-                create_invite(
+                create_invite_with_display_name(
                     id.into(),
+                    (id == "publisher").then(|| "Studio PC".into()),
                     vec![RoomGrant {
                         room_id: room.into(),
                         access: true,
@@ -807,8 +902,30 @@ mod tests {
         }
         assert!(matches!(
             directory(&state, &store, "viewer", "room".into(), 99),
-            ServerOperation::Directory { publisher_ids, .. } if publisher_ids == vec!["source"]
+            ServerOperation::Directory { publisher_ids, publishers, .. }
+                if publisher_ids == vec!["source"]
+                    && publishers.len() == 1
+                    && publishers[0].publisher_id == "source"
+                    && publishers[0].display_name == "Studio PC"
         ));
+        state.publishers.lock().unwrap().insert(
+            "source_unnamed".into(),
+            PublisherEntry {
+                room_id: "room".into(),
+                invite_id: "unnamed_publisher".into(),
+            },
+        );
+        let ServerOperation::Directory {
+            publisher_ids,
+            publishers,
+            ..
+        } = directory(&state, &store, "viewer", "room".into(), 99)
+        else {
+            panic!("authorized directory");
+        };
+        assert_eq!(publisher_ids, vec!["source", "source_unnamed"]);
+        assert_eq!(publishers[1].display_name, "unnamed_publisher");
+        state.publishers.lock().unwrap().remove("source_unnamed");
         assert!(matches!(
             directory(&state, &store, "viewer", "room".into(), 100),
             ServerOperation::Directory { publisher_ids, .. } if publisher_ids.is_empty()
@@ -1367,7 +1484,7 @@ mod network_tests {
     use super::*;
     use crate::{
         app_with_signaling,
-        auth::{InviteFile, RoomGrant, create_invite},
+        auth::{InviteFile, RoomGrant, create_invite_with_display_name},
         config::{Config, TlsFiles},
         listener::{BoundedListener, tls_acceptor_from_der},
     };
@@ -1405,8 +1522,9 @@ mod network_tests {
     }
 
     async fn start_with_spike(expires: u32, spike: Option<SpikeConfig>) -> Server {
-        let (invite, credential) = create_invite(
+        let (invite, credential) = create_invite_with_display_name(
             "network_invite".into(),
+            Some("DASS Publisher".into()),
             vec![RoomGrant {
                 room_id: "room_1".into(),
                 access: true,
@@ -1416,8 +1534,9 @@ mod network_tests {
             expires,
         )
         .unwrap();
-        let (viewer_invite, viewer_credential) = create_invite(
+        let (viewer_invite, viewer_credential) = create_invite_with_display_name(
             "directory_viewer".into(),
+            Some("DASS Viewer".into()),
             vec![RoomGrant {
                 room_id: "room_1".into(),
                 access: true,
@@ -1468,10 +1587,14 @@ mod network_tests {
                 private_key: "unused".into(),
             }),
             invite_file: Some("unused".into()),
+            users_json: None,
         };
         let router = app_with_signaling(config, Some(state.clone()));
         let task = tokio::spawn(async move {
-            axum::serve(BoundedListener::new(tcp, Some(tls)), router)
+            axum::serve(
+                BoundedListener::new(tcp, Some(tls)),
+                router.into_make_service_with_connect_info::<SocketAddr>(),
+            )
                 .await
                 .unwrap();
         });
@@ -1509,6 +1632,11 @@ mod network_tests {
         request
             .headers_mut()
             .insert(header::ORIGIN, origin.parse().unwrap());
+        // Deliberately spoofed: auto admission must use the accepted TCP peer,
+        // never forwarding headers supplied by the signaling client.
+        request
+            .headers_mut()
+            .insert("x-forwarded-for", "192.168.1.77".parse().unwrap());
         request
             .headers_mut()
             .insert(header::SEC_WEBSOCKET_PROTOCOL, "dass.v1".parse().unwrap());
@@ -1576,7 +1704,7 @@ mod network_tests {
             "DASS_RTC_SPIKE" => Some("true".into()),
             "DASS_RTC_BIND_IP" | "DASS_RTC_ADVERTISED_IP" => Some("127.0.0.1".into()),
             "DASS_RTC_FIRST_PORT" => Some(first_port.to_string()),
-            "DASS_RTC_ALLOWED_PEERS" => Some(publisher_address.to_string()),
+            "DASS_RTC_AUTO_LAN_PEERS" => Some("true".into()),
             _ => None,
         })
         .unwrap();
@@ -1628,6 +1756,7 @@ mod network_tests {
         )
         .await;
         assert_eq!(result["operation"]["publisher_ids"], serde_json::json!([]));
+        assert_eq!(result["operation"]["publishers"], serde_json::json!([]));
 
         let mut publisher = Rtc::builder()
             .set_crypto_provider(Arc::new(str0m_aws_lc_rs::default_provider()))
@@ -1734,6 +1863,13 @@ mod network_tests {
             )
             .await;
             if result["operation"]["publisher_ids"] == serde_json::json!([session_id]) {
+                assert_eq!(
+                    result["operation"]["publishers"],
+                    serde_json::json!([{
+                        "publisher_id": session_id,
+                        "display_name": "DASS Publisher"
+                    }])
+                );
                 discovered = true;
                 break;
             }

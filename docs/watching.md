@@ -7,6 +7,14 @@ this does not complete the transport gate. The earlier user-confirmed video stre
 used manual publisher-ID entry, not this directory. E2EE is unavailable;
 readiness remains 503.
 
+For the current normal workflow, see [session-workflow.md](session-workflow.md):
+sign in once (optionally remember securely), Share starts publishing, and **Find
+DASS streams** prepares and binds the viewer without repeated credential input.
+The [LAN account policy](lan-accounts.md) admits its candidate ports automatically
+when they match the server-observed WSS IP. The supervised manual
+procedure below records the previous exact-port flow, which remains available
+under advanced controls.
+
 ## Recorded runtime evidence
 
 On October 11, 2026, after the directory/viewer implementation, the user reported:
@@ -30,7 +38,12 @@ After WSS `login`, clients may request:
 ```
 
 The operation lives inside the usual versioned request envelope. Its correlated
-response has `type: "directory"`, `room_id` and `publisher_ids`. Both room access
+response has `type: "directory"`, `room_id`, `publisher_ids`, and a matching ordered
+`publishers` array of `{ publisher_id, display_name }` records. Names come from
+the authenticated publisher invite's optional admin-configured `display_name`,
+falling back to its invite ID. They are DASS labels, not verified Discord account
+identities. Rebuild backend and clients together; older strict directory parsers
+do not accept the added metadata. Both room access
 and subscribe permission are required on each request; unauthorized requests are
 rejected, not answered with another room's entries. Publisher access/publish grants
 and credential expiry are checked when producing a snapshot.
@@ -50,7 +63,7 @@ every five seconds while bound and not watching. Removed entries may remain in
 the UI until the next poll; subscription always reauthorizes and checks the live
 publisher in the same room. No Discord stream stores or gateway events are used.
 
-## Supervised LAN procedure
+## Historical supervised LAN procedure (exact-port policy)
 
 Use the TLS, separate scoped credentials, custom builds and firewall prerequisites
 in [direct-lan-test.md](direct-lan-test.md). Build commands below run from the

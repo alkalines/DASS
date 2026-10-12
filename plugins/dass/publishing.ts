@@ -1,0 +1,132 @@
+/*
+ * Vencord, a Discord client mod
+ * Copyright (c) 2026 Vendicated and contributors
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ */
+
+import { createEquibopCapture, type EquibopCaptureBridge } from "./capture";
+import { type CaptureLease } from "./routing";
+import { type DassSession } from "./session";
+import { preparationFailureMessage, SpikePeer } from "../../clients/spike/peer";
+import { SpikeSignaling, SpikeSignalingError } from "../../clients/spike/signaling";
+
+export interface PublishStatus {
+    phase: "idle" | "authenticating" | "capturing" | "preparing" | "prepared" | "activating" | "publishing" | "failed";
+    message: string;
+    candidates: readonly string[];
+}
+
+/** Owns publishing independently of settings/modal mounting and Discord's native stream. */
+export class PublishController {
+    private active = false;
+    private operation?: { abort: AbortController; contextId: string; peer?: SpikePeer; signaling?: SpikeSignaling; capture?: CaptureLease; };
+    private contextCheck?: ReturnType<typeof setInterval>;
+    private listeners = new Set<() => void>();
+    private status: PublishStatus = { phase: "idle", message: "No DASS share is running.", candidates: [] };
+
+    constructor(private readonly session: DassSession, private readonly currentContext: () => string | undefined,
+        private readonly dependencies = { connect: SpikeSignaling.connect, prepare: SpikePeer.prepare }) {}
+
+    getSnapshot = () => this.status;
+    subscribe = (listener: () => void) => {
+        this.listeners.add(listener);
+        return () => { this.listeners.delete(listener); };
+    };
+    private update(status: PublishStatus) {
+        this.status = status;
+        for (const listener of this.listeners) listener();
+    }
+    start() {
+        this.active = true;
+        clearInterval(this.contextCheck);
+        this.contextCheck = setInterval(() => {
+            if (this.operation && this.currentContext() !== this.operation.contextId) this.reset();
+        }, 250);
+    }
+    reset(message = "DASS sharing stopped. Capture and connection resources were released.") {
+        const { operation } = this;
+        this.operation = undefined;
+        operation?.abort.abort();
+        operation?.peer?.close();
+        operation?.signaling?.close();
+        operation?.capture?.release();
+        this.update({ phase: "idle", message, candidates: [] });
+    }
+    stop() {
+        this.active = false;
+        clearInterval(this.contextCheck);
+        this.contextCheck = undefined;
+        this.reset();
+    }
+    private current(operation: NonNullable<PublishController["operation"]>) {
+        return this.active && this.operation === operation && !operation.abort.signal.aborted && this.currentContext() === operation.contextId;
+    }
+
+    async publish(backendUrl: string, bridge?: EquibopCaptureBridge, prepareOnly = false) {
+        if (!this.active || this.operation) return;
+        const contextId = this.currentContext();
+        if (!contextId) return;
+        let access: ReturnType<DassSession["getAccess"]>;
+        try { access = this.session.getAccess(); }
+        catch { this.update({ phase: "failed", message: "Set up your DASS session first. No Discord fallback.", candidates: [] }); return; }
+        const operation: NonNullable<PublishController["operation"]> = { abort: new AbortController(), contextId };
+        this.operation = operation;
+        this.update({ phase: "authenticating", message: "Authenticating DASS before opening capture…", candidates: [] });
+        try {
+            // Prepare-only retains the old exact-endpoint workflow: no WSS until the server has been recreated.
+            if (!prepareOnly) {
+                operation.signaling = await this.dependencies.connect({ experimental: true, backendUrl, ...access, signal: operation.abort.signal });
+                if (!this.current(operation)) { operation.signaling.close(); return; }
+                operation.signaling.closed.addEventListener("abort", () => {
+                    if (this.current(operation)) {
+                        const { reason } = operation.signaling!.closed;
+                        if (reason instanceof SpikeSignalingError && /unauthorized|expired|revoked/.test(reason.code)) this.session.clear();
+                        this.fail(operation, "DASS connection closed. Set up again if access was denied. No Discord fallback.");
+                    }
+                }, { once: true });
+                if (operation.signaling.closed.aborted) throw operation.signaling.closed.reason;
+            }
+            this.update({ phase: "capturing", message: "Choose a source in the Equibop picker. Share audio is optional and explicit.", candidates: [] });
+            const capture = await createEquibopCapture(bridge)(operation.abort.signal);
+            if (!this.current(operation)) { capture.release(); return; }
+            operation.capture = capture;
+            this.update({ phase: "preparing", message: "Preparing Chromium's DASS connection…", candidates: [] });
+            operation.peer = await this.dependencies.prepare({ experimental: true, signal: operation.abort.signal, capture });
+            if (!this.current(operation)) { operation.peer.close(); return; }
+            operation.peer.closed.addEventListener("abort", () => {
+                if (this.current(operation)) this.fail(operation, operation.peer!.closeMessage);
+            }, { once: true });
+            if (operation.peer.closed.aborted) throw new Error("Peer closed.");
+            this.update({ phase: "prepared", message: "Capture is local. Allowlist these UDP endpoints, then start within 180 seconds.",
+                candidates: operation.peer.candidates.map(candidate => { const fields = candidate.split(/\s+/); return `${fields[4]}:${fields[5]}`; }) });
+            if (!prepareOnly) await this.activate(backendUrl);
+        } catch (error) {
+            if (this.current(operation)) {
+                if (error instanceof SpikeSignalingError && /unauthorized|expired|revoked/.test(error.code)) this.session.clear();
+                this.fail(operation, operation.signaling ? preparationFailureMessage(error) : "DASS authentication or capture failed. Check session access and the host bridge. No Discord fallback.");
+            }
+        }
+    }
+
+    async activate(backendUrl: string) {
+        const { operation } = this;
+        if (!operation?.peer || !this.current(operation) || this.status.phase !== "prepared") return;
+        this.update({ ...this.status, phase: "activating", message: "Starting DASS media. No native Discord share or preview is created." });
+        try {
+            const access = this.session.getAccess();
+            if (!operation.signaling) operation.signaling = await this.dependencies.connect({ experimental: true, backendUrl, ...access, signal: operation.abort.signal });
+            if (!this.current(operation)) { operation.signaling.close(); return; }
+            await operation.peer.activate({ backendUrl, ...access, signaling: operation.signaling });
+            if (this.current(operation)) this.update({ ...this.status, phase: "publishing", message: "DASS negotiation complete. The stream appears in the directory once media connects. Close this panel to keep sharing, or Stop sharing to end capture." });
+        } catch {
+            if (this.current(operation)) this.fail(operation, operation.peer.closeMessage || "DASS activation failed. Check authorization and the server's UDP policy. No Discord fallback.");
+        }
+    }
+
+    private fail(operation: NonNullable<PublishController["operation"]>, message: string) {
+        if (this.operation !== operation) return;
+        if (/unauthorized|expired|revoked/.test(message)) this.session.clear();
+        this.reset();
+        this.update({ phase: "failed", message, candidates: [] });
+    }
+}

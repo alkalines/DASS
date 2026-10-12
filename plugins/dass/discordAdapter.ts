@@ -28,12 +28,15 @@ export const DISCORD_SHARE_PATCHES = [{
 
 export const TRANSPORT_UNAVAILABLE_MESSAGE = "DASS transport unavailable.";
 
-export function createShareSelection(signal: AbortSignal, isContextCurrent: () => boolean, nativeStart: () => void) {
+export function createShareSelection(signal: AbortSignal, isContextCurrent: () => boolean, nativeStart: () => void, dassStart?: () => void) {
     let consumed = false;
     return (transport: "dass" | "discord" | "cancel") => {
         if (consumed || signal.aborted || !isContextCurrent()) return;
         consumed = true;
-        if (transport === "dass") return TRANSPORT_UNAVAILABLE_MESSAGE;
+        if (transport === "dass") {
+            if (dassStart) dassStart();
+            else return TRANSPORT_UNAVAILABLE_MESSAGE;
+        }
         if (transport === "discord") nativeStart();
     };
 }

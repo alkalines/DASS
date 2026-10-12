@@ -5,17 +5,26 @@ Early-stage project for an Equicord plugin and self-hosted Rust screensharing ba
 - [Research and implementation plan](docs/research/PLAN.md)
 - [Contributor and agent instructions](AGENTS.md)
 - [Docker-only backend development](docs/backend.md)
-- [Build and install the plugin scaffold in Equicord or Equibop](docs/plugin.md)
+- [Build and install the plugin in Equicord or Equibop](docs/plugin.md)
+- [Session setup and Share-button DASS workflow](docs/session-workflow.md)
+- [LAN accounts and automatic client UDP admission](docs/lan-accounts.md)
 - [Experimental authenticated directory and DASS viewer](docs/watching.md)
 
 The proposed architecture uses Equibop's existing capture pipeline and a Rust
 WebRTC selective forwarding backend, without additional client helper executables.
-Both broadcasters and viewers need DASS. An opt-in, invite-authenticated
+Both broadcasters and viewers need DASS. An opt-in, invite/account-authenticated
 one-publisher/one-viewer Rust transport has user-reported LAN video evidence.
 The authenticated directory and DASS-owned viewer now have user-reported discovery
 and audio playback evidence. Audio consent and backend checks are also
 user-confirmed; broader runtime acceptance remains pending. This is not a production SFU;
 E2EE is unavailable and readiness remains 503. Native Discord watching is separate.
+Supported build-634304 Share buttons now connect to the DASS publisher by default,
+with reusable in-memory session access. This new wiring still needs live-client
+acceptance; it does not intercept every Discord share entry point.
+Separate DASS accounts can optionally be remembered with OS-backed encryption
+and authenticate on plugin load. LAN media endpoints are then admitted per RTC
+session using the observed WSS peer IP, without manual client-port updates.
+These new account/admission paths still require live-client/backend acceptance.
 
 The backend is built, tested and run using Docker, with no host Rust installation.
 Follow the backend guide to generate `Cargo.lock`, run checks and start the container.

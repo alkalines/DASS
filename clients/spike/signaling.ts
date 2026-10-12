@@ -15,6 +15,12 @@ export interface BrowserSocket extends EventTarget {
     close(code?: number, reason?: string): void;
 }
 
+export interface DassAuthentication {
+    credential?: string;
+    username?: string;
+    password?: string;
+}
+
 export function signalingUrl(baseUrl: string): string {
     let url: URL;
     try { url = new URL(baseUrl); } catch { throw new Error("Invalid DASS backend URL."); }
@@ -58,24 +64,27 @@ export class SpikeSignaling {
         signal.addEventListener("abort", this.onFailure, { once: true });
     }
 
-    static async connect(options: {
+    static async connect(options: DassAuthentication & {
         experimental: true;
         backendUrl: string;
-        credential: string;
         signal: AbortSignal;
         createSocket?: (url: string, protocol: string) => BrowserSocket;
     }): Promise<SpikeSignaling> {
         if (options.experimental !== true || options.signal.aborted) throw new Error("DASS connection was cancelled or not explicitly enabled.");
         const url = signalingUrl(options.backendUrl);
         // Validate before opening a socket. Never put credentials in URL/protocol.
-        parseClientMessage(JSON.stringify({ protocol_version: PROTOCOL_VERSION, request_id: "login_validation", operation: { type: "login", credential: options.credential } }));
+        const accountLogin = options.username !== undefined || options.password !== undefined;
+        if (accountLogin && options.credential) throw new Error("Select one DASS authentication method.");
+        const login = accountLogin ? { type: "account_login" as const, username: options.username, password: options.password }
+            : { type: "login" as const, credential: options.credential };
+        const validatedLogin = parseClientMessage(JSON.stringify({ protocol_version: PROTOCOL_VERSION, request_id: "login_validation", operation: login }));
         const createSocket = options.createSocket ?? ((endpoint, protocol) => new WebSocket(endpoint, protocol));
         let socket: BrowserSocket;
         try { socket = createSocket(url, "dass.v1"); } catch { throw new Error("DASS socket could not be opened."); }
         const connection = new SpikeSignaling(socket, options.signal);
         try {
             await connection.waitForOpen();
-            const authenticated = await connection.request({ type: "login", credential: options.credential }, "authenticated");
+            const authenticated = await connection.request(validatedLogin.operation, "authenticated");
             if (authenticated.type !== "authenticated") throw new Error("DASS authentication failed.");
             const expiryMs = authenticated.expires_at_unix_seconds * 1000 - Date.now();
             if (expiryMs <= 0) throw new Error("DASS credential has expired.");

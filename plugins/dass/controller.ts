@@ -51,7 +51,7 @@ export class DiscoveryController {
 
     reset() {
         this.cancelPending();
-        if (this.active) this.update({ phase: "idle", message: "Discovery not checked. DASS sharing is not implemented." });
+        if (this.active) this.update({ phase: "idle", message: "Backend capabilities not checked. Experimental media uses separate authenticated session setup." });
     }
 
     stop() {
@@ -81,7 +81,7 @@ export class DiscoveryController {
             }
             this.update({
                 phase: "scaffold",
-                message: "Backend scaffold reached. Authentication, signaling, media and E2EE are unavailable. Sharing is disabled."
+                message: "Backend scaffold reached. This check does not enable experimental media. Use session setup; production readiness and E2EE remain unavailable."
             });
         } catch {
             // Never surface raw exceptions: they may contain URLs or response data.
@@ -89,8 +89,8 @@ export class DiscoveryController {
                 this.update({
                     phase: "failed",
                     message: timedOut
-                        ? "Backend discovery timed out. Sharing is disabled."
-                        : "Discovery failed: check the URL, HTTPS/local-development setting, browser policy and backend protocol. Sharing is disabled."
+                        ? "Backend discovery timed out. This check does not enable experimental media."
+                        : "Discovery failed: check the URL, HTTPS/local-development setting, browser policy and backend protocol. This check does not enable experimental media."
                 });
             }
         } finally {

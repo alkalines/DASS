@@ -146,11 +146,61 @@ browser security. Set the DASS backend URL on both to
 
 ## 4. Media activation remains the next supervised step
 
-Only after both HTTPS checks succeed: prepare new peers, supply fresh exact UDP
-endpoints, and append `compose.lan-spike.example.yaml` to the same Compose stack.
-It publishes UDP 50000–50001 on the backend LAN IP and requires
-`DASS_TEST_ALLOWED_PEERS`. Scope firewall access to the clients; do not forward
-ports on the router. Old gathered ports are not reusable after peers stop.
+Only after both HTTPS checks succeed, append `compose.lan-spike.example.yaml` to
+the same Compose stack. It publishes UDP 50000–50001 on the backend LAN IP. Scope
+firewall access to the clients; do not forward ports on the router.
+
+### Default: exact client endpoints
+
+The default policy remains an exact IPv4-and-UDP-port allowlist. Set
+`DASS_TEST_ALLOWED_PEERS` to the fresh endpoints shown by both prepared clients
+before starting the backend. A changed client port requires updating the list and
+recreating the backend before preparing/authenticating peers, as before. Do not
+reuse old gathered ports after peers stop.
+
+### Automatic account-based LAN admission (preferred new workflow)
+
+The newer [LAN account setup](lan-accounts.md) uses username/password accounts
+with hashed server records and `DASS_RTC_AUTO_LAN_PEERS=true`. It needs neither
+client IP lists nor fresh per-stream UDP ports: authenticated candidates must
+match the observed WSS LAN peer IP and are admitted only for that RTC session.
+Its account overlay replaces the invite-based overlays in this older procedure.
+The static trusted-IP and exact-port paths below remain explicit alternatives.
+
+### Optional: trusted client IPv4 addresses
+
+To avoid a backend restart for every new Chromium UDP port, explicitly set
+`DASS_TEST_TRUSTED_CLIENT_IPS` to the clients' literal IPv4 addresses as seen by
+the backend; Compose passes it to the backend as
+`DASS_RTC_TRUSTED_CLIENT_IPS`. For example, in the publisher's root Docker shell,
+replace the example with the actual client addresses and keep the variable set
+for both Compose commands:
+
+```sh
+export DASS_TEST_TRUSTED_CLIENT_IPS='X.X.X.2'
+docker compose -f compose.yaml -f compose.direct-lan.example.yaml \
+    -f compose.lan-spike.example.yaml config --quiet
+docker compose -f compose.yaml -f compose.direct-lan.example.yaml \
+    -f compose.lan-spike.example.yaml up -d --build backend
+```
+
+This is an explicit server-side trust setting: at most 16 comma-separated IPv4
+hosts, with no CIDR, wildcard, hostname or IPv6 forms. The backend still rejects
+unsafe addresses (including unspecified, multicast, link-local, broadcast,
+documentation, benchmarking, shared-CGNAT, metadata and selected reserved
+destinations) and candidate ports below 1024. It checks the actual UDP source
+address as well as candidates and every outbound destination; client-supplied IP
+claims cannot add trusted addresses. Exact endpoints remain
+accepted if `DASS_TEST_ALLOWED_PEERS` is also set. With neither setting populated,
+startup fails closed; with this option enabled, the exact list may be empty.
+
+Prepare each client normally after this one-time backend configuration. Its
+changing non-privileged UDP candidate port no longer requires editing the exact
+endpoint list or recreating the backend, provided its actual IPv4 address remains
+the same and network/firewall policy permits the UDP path. Changing the trusted
+address list does require recreating the backend. This is not a public deployment,
+does not bypass firewalls, NAT or OS capture permissions, and does not guarantee
+that a direct media path will work.
 
 Use room `lan_test`, with each client receiving only its assigned credential
 privately from `.secrets/lan-test/*-credential.txt`. Do not paste those files into
@@ -160,8 +210,10 @@ the typed credential, so it may be entered before or after preparation.
 The panel lists missing activation prerequisites beside the disabled button:
 prepared peer, room, credential and (for the viewer) publisher session ID.
 
-The exact-endpoint backend recreation must fit the 180-second peer preparation
-deadline. Do not activate authenticated sessions before that recreation. The
+In exact-endpoint mode, the backend recreation must fit the 180-second peer
+preparation deadline. Do not activate authenticated sessions before that
+recreation. In trusted-IP mode, configure/recreate once before preparing peers;
+routine per-share port changes do not require a restart. The
 viewer needs the publisher's returned DASS session ID, not its credential.
 Use the Copy session ID button or selectable read-only field, not OCR. Keep the
 publisher's settings panel open: closing/unmounting it stops the test. A publisher

@@ -93,6 +93,12 @@ before any native stream or preview side effect, not after a Flux event.
 
 ## Implemented share-button interception
 
+**Current behavior:** these same two build-scoped interception points now open
+DASS directly by default and run its session-owned publisher. The explicit
+transport chooser remains an option; its DASS action no longer reports transport
+unavailable. See [session-workflow.md](session-workflow.md). New publisher wiring
+still needs GUI acceptance; the source trace and chooser evidence below are historical.
+
 `plugins/dass/discordAdapter.ts` now declares a build-634304-only patch anchored
 on the observed `renderNUXHighlight`, `buttonRef` and start/stop `onClick`
 structure, using identifier placeholders. It changes only the supplied center-tray
@@ -130,7 +136,7 @@ button-source excerpt and simulated native callbacks; they do not establish
 runtime interception or media isolation. The existing build adapter's Bun-version
 guard was already commented out; this work does not change it or upstream pins.
 
-## Runtime acceptance procedure
+## Historical chooser acceptance procedure
 
 The first user runtime attempt went directly to the OS picker with no DASS
 chooser. Acceptance has **not passed**. Bundle selection/plugin state, build

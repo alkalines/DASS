@@ -1,14 +1,39 @@
-use std::{net::SocketAddr, path::PathBuf, time::Duration};
+use std::{
+    fmt,
+    net::SocketAddr,
+    path::PathBuf,
+    time::Duration,
+};
 
 use dass_protocol::ControlLimits;
 
-#[derive(Clone, Debug)]
+use crate::auth::{InviteStore, MAX_USERS_FILE_BYTES};
+
+#[derive(Clone)]
 pub struct Config {
     pub listen_addr: SocketAddr,
     pub limits: ControlLimits,
     pub request_timeout: Duration,
     pub tls: Option<TlsFiles>,
     pub invite_file: Option<PathBuf>,
+    pub users_json: Option<String>,
+}
+
+impl fmt::Debug for Config {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Config")
+            .field("listen_addr", &self.listen_addr)
+            .field("limits", &self.limits)
+            .field("request_timeout", &self.request_timeout)
+            .field("tls", &self.tls)
+            .field("invite_file", &self.invite_file)
+            .field(
+                "users_json",
+                &self.users_json.as_ref().map(|_| "[REDACTED]"),
+            )
+            .finish()
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -19,6 +44,9 @@ pub struct TlsFiles {
 
 impl Config {
     pub fn from_env() -> Result<Self, &'static str> {
+        if std::env::var_os("DASS_USERS").is_some() && std::env::var("DASS_USERS").is_err() {
+            return Err("DASS_USERS must be UTF-8 JSON");
+        }
         Self::from_lookup(|name| std::env::var(name).ok())
     }
 
@@ -63,12 +91,26 @@ impl Config {
         {
             return Err("empty invite file path");
         }
-        if !insecure && invite_file.is_none() {
-            return Err("TLS mode requires an invite file");
+        let users_json = lookup("DASS_USERS");
+        if users_json
+            .as_ref()
+            .is_some_and(|users| users.is_empty() || users.len() > MAX_USERS_FILE_BYTES)
+        {
+            return Err("DASS_USERS is empty or exceeds its size limit");
+        }
+        if let Some(users) = users_json.as_ref() {
+            InviteStore::from_users_bytes(users.as_bytes())
+                .map_err(|_| "invalid DASS_USERS configuration")?;
+        }
+        if invite_file.is_some() && users_json.is_some() {
+            return Err("configure only one of DASS_INVITE_FILE or DASS_USERS");
+        }
+        if !insecure && invite_file.is_none() && users_json.is_none() {
+            return Err("TLS mode requires DASS_INVITE_FILE or DASS_USERS");
         }
         let mut max_control_message_bytes =
             bounded_integer(lookup("DASS_MAX_CONTROL_MESSAGE_BYTES"), 16_384, 65_536)?;
-        if invite_file.is_some() {
+        if invite_file.is_some() || users_json.is_some() {
             if max_control_message_bytes < 1024 {
                 return Err("authenticated control messages require at least 1024 bytes");
             }
@@ -89,6 +131,7 @@ impl Config {
             request_timeout: Duration::from_secs(5),
             tls,
             invite_file,
+            users_json,
         })
     }
 }
@@ -175,6 +218,14 @@ mod tests {
             ("DASS_INVITE_FILE", "/run/secrets/invites.json"),
         ];
         assert!(config_with(&entries).unwrap().tls.is_some());
+        assert!(config_with(&[
+            ("DASS_TLS_CERT_FILE", "/run/secrets/cert.pem"),
+            ("DASS_TLS_KEY_FILE", "/run/secrets/key.pem"),
+            ("DASS_USERS", r#"{"version":1,"users":[]}"#),
+        ])
+        .unwrap()
+        .users_json
+        .is_some());
         assert!(config_with(&entries[..1]).is_err());
         assert!(config_with(&entries[..2]).is_err());
         assert!(
@@ -192,5 +243,39 @@ mod tests {
             ])
             .is_err()
         );
+    }
+
+    #[test]
+    fn user_env_is_validated_bounded_and_exclusive_with_invite_file() {
+        let valid_users = r#"{"version":1,"users":[]}"#;
+        assert!(config_with(&[
+            ("DASS_INSECURE_LOCAL_DEV", "true"),
+            ("DASS_USERS", valid_users),
+        ])
+        .unwrap()
+        .users_json
+        .is_some());
+        for users in ["", "not-json", r#"{"version":2,"users":[]}"#] {
+            assert!(config_with(&[("DASS_INSECURE_LOCAL_DEV", "true"), ("DASS_USERS", users)])
+                .is_err());
+        }
+        assert!(config_with(&[
+            ("DASS_INSECURE_LOCAL_DEV", "true"),
+            ("DASS_INVITE_FILE", "/run/secrets/invites.json"),
+            ("DASS_USERS", valid_users),
+        ])
+        .is_err());
+        assert!(config_with(&[
+            ("DASS_INSECURE_LOCAL_DEV", "true"),
+            ("DASS_USERS", &"x".repeat(MAX_USERS_FILE_BYTES + 1)),
+        ])
+        .is_err());
+
+        let secret_bearing_config = config_with(&[
+            ("DASS_INSECURE_LOCAL_DEV", "true"),
+            ("DASS_USERS", valid_users),
+        ])
+        .unwrap();
+        assert!(!format!("{secret_bearing_config:?}").contains(valid_users));
     }
 }

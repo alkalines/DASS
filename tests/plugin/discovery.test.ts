@@ -114,7 +114,7 @@ describe("lifecycle", () => {
         controller.start();
         await controller.check(configuration);
         expect(controller.getSnapshot().phase).toBe("scaffold");
-        expect(controller.getSnapshot().message).toContain("Sharing is disabled");
+        expect(controller.getSnapshot().message).toContain("does not enable experimental media");
     });
     test("rejects insecure server mode unless explicitly allowed", async () => {
         const controller = new DiscoveryController(mockFetch(async () => Response.json(scaffold)));

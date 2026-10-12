@@ -4,9 +4,12 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
+import { MAX_PUBLISHER_DISPLAY_NAME_BYTES } from "../../crates/protocol/generated/signaling";
+
 export interface DassShare {
     roomId: string;
     shareId: string;
+    displayName?: string;
 }
 
 export interface CaptureLease {
@@ -205,7 +208,9 @@ export class ScreenshareRouting {
         this.directory = operation;
         try {
             const shares = await this.transport.listShares(roomId, operation.abort.signal);
-            if (operation.abort.signal.aborted || shares.length > MAX_ROOM_SHARES || shares.some(share => share.roomId !== roomId || !share.shareId)) {
+            if (operation.abort.signal.aborted || shares.length > MAX_ROOM_SHARES || shares.some(share => share.roomId !== roomId || !share.shareId
+                || (share.displayName !== undefined && (!share.displayName.trim()
+                    || new TextEncoder().encode(share.displayName).byteLength > MAX_PUBLISHER_DISPLAY_NAME_BYTES)))) {
                 throw new Error("The stream directory is unavailable.");
             }
             return { ok: true, value: shares };

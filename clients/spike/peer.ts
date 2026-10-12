@@ -5,7 +5,7 @@
  */
 
 import type { CaptureLease } from "../../plugins/dass/routing";
-import { SpikeSignaling, SpikeSignalingError } from "./signaling";
+import { type DassAuthentication, SpikeSignaling, SpikeSignalingError } from "./signaling";
 
 export const PREPARATION_TIMEOUT_MS = 180_000;
 
@@ -181,7 +181,7 @@ export class SpikePeer {
         });
     }
 
-    async activate(options: { backendUrl: string; credential: string; roomId: string; publisherId?: string; signaling?: SpikeSignaling; }): Promise<string> {
+    async activate(options: DassAuthentication & { backendUrl: string; roomId: string; publisherId?: string; signaling?: SpikeSignaling; }): Promise<string> {
         this.checkActive();
         if (this.activated || !this.offer || (Boolean(this.capture) === Boolean(options.publisherId))) {
             throw new Error("Select the matching DASS publisher or viewer role once.");
@@ -191,7 +191,7 @@ export class SpikePeer {
         this.timer = setTimeout(() => this.closeWithDiagnostic(`Activation failed [${this.activationStage}:timeout]. Check UDP reachability if the answer was applied.`), 15_000);
         try {
             this.signaling = options.signaling ?? await SpikeSignaling.connect({ experimental: true, backendUrl: options.backendUrl,
-                credential: options.credential, signal: this.closed });
+                credential: options.credential, username: options.username, password: options.password, signal: this.closed });
             this.checkActive();
             this.signaling.closed.addEventListener("abort", this.onSignalingClosed, { once: true });
             if (this.signaling.closed.aborted) throw new Error("DASS signaling closed.");

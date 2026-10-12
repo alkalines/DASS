@@ -1,0 +1,33 @@
+# Explicit direct-LAN account experiment only, not a production deployment.
+# Use with compose.yaml, not the invite-based LAN/signaling overlays.
+services:
+  backend:
+    environment:
+      DASS_INSECURE_LOCAL_DEV: "false"
+      DASS_TLS_CERT_FILE: /run/dass/cert.pem
+      DASS_TLS_KEY_FILE: /run/dass/key.pem
+      DASS_USERS: "${DASS_USERS:?Set the bounded hashed account JSON from a private file}"
+      DASS_RTC_SPIKE: "true"
+      DASS_RTC_BIND_IP: "0.0.0.0"
+      DASS_RTC_ADVERTISED_IP: "${DASS_LAN_SERVER_IPV4:?Set this server's private LAN IPv4}"
+      DASS_RTC_FIRST_PORT: "50000"
+      DASS_RTC_AUTO_LAN_PEERS: "true"
+      DASS_RTC_ALLOWED_PEERS: ""
+      DASS_RTC_TRUSTED_CLIENT_IPS: ""
+    ports:
+      - "${DASS_LAN_SERVER_IPV4}:8080:8080/tcp"
+      - "${DASS_LAN_SERVER_IPV4}:50000:50000/udp"
+      - "${DASS_LAN_SERVER_IPV4}:50001:50001/udp"
+    volumes:
+      - type: bind
+        source: ./.secrets/lan-test/cert.pem
+        target: /run/dass/cert.pem
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./.secrets/lan-test/key.pem
+        target: /run/dass/key.pem
+        read_only: true
+        bind:
+          create_host_path: false
