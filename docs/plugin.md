@@ -1,11 +1,36 @@
 # DASS plugin
 
+For native screenshare UI continuation and the pipeline investigation, see
+[native-screenshare-handoff.md](native-screenshare-handoff.md).
+
 Discord Alternative ScreenShare (DASS) now has a build-time Equicord userplugin
 in `plugins/dass`. It now includes an experimental authenticated directory and
 DASS-owned viewer; see [watching.md](watching.md) for the current behavior,
 supervised LAN procedure and unverified exit condition. The earlier manual
 transport has user-reported LAN video evidence, not a completed transport gate.
 The capability checker described below is still a separate scaffold-only check.
+
+Automatic authenticated call discovery is retained, but the separate DASS Streams
+button and call watch panel were removed after user feedback.
+The user reports local preview and LIVE presentation in the intended grid space.
+DASS-owned preview/watch tiles now use the existing unselected
+call grid, without a separate panel. Remote voice-row badges and full native
+player/selected-layout integration remain incomplete; remote playback/audio are
+not yet runtime-verified. Streaming state now begins after OS source selection
+and quality/audio consent complete, rather than during authentication or the
+open picker. Remote Watch Stream requests audible playback, with a Play fallback
+only when autoplay is blocked; local preview stays muted. These latest changes
+still need runtime acceptance. The full-call center Stop control is user-reported working; the new sidebar pressed/icon/Stop
+state patch is built but not runtime-verified. See [discord-hooks.md](discord-hooks.md) for
+the required native UI, runtime acceptance checklist and read-only DevTools probe
+needed to trace those remaining private hooks. No backend changes are required
+by this client integration; latest publisher/viewer runtime acceptance is still
+outstanding.
+
+The latest tile revision reuses Discord's actual frame and LIVE badge rather
+than the generic Card. Its DASS video and watch content remain independent of
+Discord's media engine. Native selection, filmstrip, popout and zoom are still
+unimplemented, and the frame revision needs runtime acceptance.
 
 ## Sharing diagnostics
 

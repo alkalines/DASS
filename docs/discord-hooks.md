@@ -1,19 +1,269 @@
 # Discord hook investigation
 
+For the current continuation map, native DOM comparison, the newly requested
+stream card above Voice Connected and pipeline-first investigation plan, start
+with [native-screenshare-handoff.md](native-screenshare-handoff.md). The historical
+sections below retain earlier milestones and are not all current behavior.
+
 ## Current UI revision
 
 The separate user-area DASS button and share modal were removed. Settings own
 encrypted account configuration and an initially collapsed Advanced panel. The
 existing center Share component is wrapped on build 634304 to reflect capture
 through its native `streamActive` prop; clicking either supported start callback
-again stops DASS. This source-based wrapper still requires live verification.
+again stops DASS. The user reports the full-call center Stop control works, but
+the sidebar control did not reflect DASS publishing state. The new sidebar-state
+patch described below is built but still needs runtime verification.
 Disabling DASS transport in settings explicitly selects native Discord sharing.
 
-The recorded source below is insufficient for native stream tile/watch/player
-integration. Those hooks remain unimplemented; no synthetic Discord stream
-records are inserted. The temporary viewer is available only in Advanced.
+The local publisher now has a build-634304 native voice-row LIVE badge patch,
+not yet runtime-verified. DASS-owned tiles now enter the existing unselected call
+grid, with local preview and authenticated Watch Stream playback. Full native
+player integration remains incomplete; no synthetic Discord stream records are inserted.
+The rejected DASS Streams button and separate call watch
+panel have been removed. The target is the existing LIVE badge beside a
+participant, existing stream tile (including loading state), existing Watch
+action and existing sharing/Stop controls in both full-call and sidebar views.
+There must not be a separate normal-workflow DASS button or panel.
 Media context comes from the current call's channel ID, checked against backend
 grants; the client has no room selection field.
+
+## Call discovery and watching integration
+
+After successful DASS login, `callDiscovery.ts` binds a directory-only
+`WatchController` to the current call through independently authenticated WSS.
+The backend must authorize that room; a Discord channel ID alone grants nothing.
+Discovery polls every five seconds using the existing bounded directory protocol.
+It does not prepare ICE, create a decoder, request capture or start a native
+Discord subscription. Its connection is separate from publisher and viewer
+connections. Current client admission allows one connection per account, so idle
+directory polling relinquishes its connection before publishing or watching.
+This background discovery now supplies DASS-owned tiles in the ordinary grid.
+The Advanced test viewer remains
+available for transport testing, not as the intended normal watch workflow.
+
+Directory authorization requires subscribe permission. A directory denial clears
+its shares and connection but does not erase the account or stop its independent
+publisher: a publish-only account may legitimately lack directory access.
+
+This does **not** fabricate a native stream participant, identify a Discord user from a DASS
+display name, or reuse Discord's stream media engine. The directory may include
+the local publisher. Simultaneous publish/watch remains experimental and is not
+runtime-verified. The backend's current one-publisher/one-viewer transport limits
+still apply. Native hook behavior and absence of Discord network leakage require
+real-client acceptance; unit/build checks are insufficient.
+
+The supplied sidebar render excerpt now supports a build-634304 atomic patch:
+the existing component subscribes to the DASS publisher through a React hook,
+scoped to its current call. Authentication and the pending OS/quality/audio
+pickers do not set streaming presentation. Only after the installed capture
+function returns an owned lease does the existing button use pressed/selected
+styling, its native disable/stop icon animation and Stop Streaming tooltip/text.
+Clicking stops DASS directly, even if an activity would otherwise open its native
+manage-streams popout or permissions changed. This does not invent a current-user
+stream object. When DASS is inactive, native callback, tooltip, popout, permission
+and stop behavior remain unchanged. The replacements are grouped so an unmatched
+replacement rolls back the whole sidebar patch. Real matching and UI behavior
+still require client acceptance after a full restart.
+
+Display names from the DASS directory must not be guessed to be Discord user
+identities; remote participant badges also need an explicit, trustworthy identity
+binding.
+
+## Read-only probe for the remaining native UI hooks
+
+### Local native LIVE badge
+
+The complete `936520` excerpt identifies a safe, presentation-only boundary.
+Its status-icon component looks up Discord previews using the original native
+`isStreaming` prop. Changing that prop is unsafe: `340851` also uses it to enable
+native double-click watch and hover actions. DASS leaves that prop, the preview
+lookup and native watch handlers unchanged.
+
+Instead, a grouped patch injects a publisher-state hook before the icon
+component's existing preview/config hooks and collapsed/disabled early return.
+It changes only the condition that pushes the existing small LIVE badge into
+the native icon list. DASS's contribution requires the local Discord user, the
+current call, an active plugin and an accepted capture operation in preparing,
+prepared, activating or publishing phase. Authentication and open-picker phases
+alone do not show LIVE. Stopping, failed setup, call exit, account clear or disable
+removes the DASS contribution. Existing native LIVE/preview behavior is retained.
+
+This is a **local presentation** indicator for your own capture/negotiation,
+not proof that the backend directory has registered it or that a viewer received
+media. Remote badges still need a trustworthy DASS-to-Discord identity binding;
+no matching by display name or client-provided authorization claim is added.
+The badge does not make native hover/double-click actions DASS-aware.
+
+Client-only validation on Bun 1.4.3: `bun test ./tests/plugin` passes 183 tests;
+`bun scripts/build-plugin.mjs` passes DASS lint, full Equicord typecheck and
+desktop/Equibop bundle builds against the existing pinned Equicord revision.
+No Rust source or protocol was changed; backend checks were not run for this
+client slice. Real-client acceptance remains unverified.
+
+While already in a call, paste the contents of `scripts/discord-live-probe.js`
+into DevTools Console and send the resulting JSON string along with your Discord
+build number. No rebuild or Docker command is necessary for this probe.
+It inventories **already-loaded factory source** by stream-directory, watch and
+video-rendering anchors. It does not call factories, load chunks, inspect store
+values, dispatch actions, join calls, request capture or access credentials.
+Results contain up to 100 inventory entries, up to two sidebar callback/render
+source excerpts (8,000 characters each) and up to three stream-list source
+excerpts (12,000 characters each). These are static factory code, not runtime
+store values or event payloads. Module IDs are research references, never
+production anchors. Source excerpts allow us to inspect the sidebar's native
+button props and follow stream-list imports without triggering a native share.
+
+The user's returned source confirms `61230` is a channel popout, not the full-call
+grid: it renders the first native stream through `607407.A` and its badge through
+`402216.Ay`. The generic probe's first-three-results cap omitted the relevant
+`487048` stream-list reader and included a truncated icon-export preamble from
+the large `157667` factory. Neither is evidence of a working native tile hook.
+
+The first presentation probe returned factories `487048`, `607407`, `402216`
+and `35903`. That evidence establishes:
+
+- `487048` uses room corners, screen clipping and fitted geometry: it is a spatial
+  room screen, not evidence of the normal full-call grid. It passes streams to
+  `321486.A`, which still needs inspection.
+- `607407.A` calls `450149.A` for native Discord previews. DASS must not pass its
+  shares to that component, including while its player is merely loading.
+- `402216.Ay` is a presentational LIVE badge with no stream or network lookup.
+  Its participant-row placement remains to be traced.
+- `35903` uses `711589.K` for native watch eligibility. Its Watch handler selects
+  a voice channel before calling `401843.Nl`. DASS must intercept before that
+  handler, not just before its final native watch action.
+
+The updated `scripts/discord-stream-ui-probe.js` follows `321486` and `711589`,
+finds actual JSX callers of imported `402216.Ay` (not just re-exports), and finds
+loaded JSX renderers reading stream/participant state. It returns up to ten
+badge-placement and ten call-renderer excerpts, each at most 6,000 characters,
+plus up to 16,000 characters for each of the two referenced factories. Combined
+static source output is capped at 64,000 characters, with truncation flags and
+an explicit limit indicator. These IDs remain research references for build
+634304, never production lookup anchors. No capture, factory execution, chunk
+loading or runtime payload inspection is needed.
+
+The returned graph identifies the requested surfaces more precisely:
+
+- `588224` (`ConnectedVoiceUser`) passes native `isStreaming` to `340851.Ay`.
+  `936520` displays the small LIVE badge in the voice-user status icons. Its
+  excerpt starts midway through that icon function, so its input props and hook
+  ordering still need inspection. Changing the higher-level `isStreaming` flag
+  without tracing its preview/watch wrapper could invoke unrelated native logic.
+- `802867` logs `StreamTile` and renders the ordinary native stream tile. Its
+  media branch reads `getActiveStreamForUser` and Discord's video component from
+  its media engine. Its placeholder also renders native previews and watch
+  callbacks. DASS needs a separate guarded media branch inside that existing
+  shell; passing fake native streams into it is not a safe loading placeholder.
+- `241215` passes participant lists to `874739.A` in the call overlay. This
+  identifies a grid renderer to inspect, not evidence that changing that one
+  caller covers the normal full-call view.
+- `321486` confirms the spatial room's carousel preview and remains outside the
+  requested normal call UI integration.
+
+`scripts/discord-native-call-probe.js` now reads only the five referenced
+factories `936520`, `340851`, `874739`, `802867` and `806931`, up to 16,000
+characters each. This avoids the exhausted graph output budget and retrieves
+the missing function starts/imports without scanning or running any modules.
+The local native LIVE badge is now patched as described above. `874739` delegates
+the unselected grid to `526369.A` and the selected-participant layout to
+`699707.A`. The `526369` delegate now appends DASS render callbacks to its native
+grid list, using Discord's tile width/class and stable DASS-only keys. Native
+participant callbacks and optional activity/clip tiles remain unchanged. The root
+routes idle voice mode to this grid when DASS tiles exist, including an otherwise
+empty grid. Hooks run before conditional returns. The selected native
+video/activity layout in `699707` is unchanged: DASS tiles are not yet available
+in that selected layout or its filmstrip.
+
+DASS tiles own video elements rather than invoking `802867` or Discord's preview
+or media engine. Local preview uses the existing capture stream without new
+capture, upload or ownership of its tracks. Remote tiles display authenticated
+DASS account names, not guessed Discord identities. Watch Stream prepares a
+decoder, binds the room again and revalidates the share before subscribing.
+Pending setup retains the tile after directory polling relinquishes its connection.
+Watch Stream requests remote playback with audio; browser autoplay rejection
+shows a Play fallback. The local preview always starts muted to avoid echo.
+Audio capture still requires the publisher's explicit host-picker choice, and
+selected-but-unavailable audio fails rather than silently publishing video-only.
+Stop Watching,
+account clearing, disable and call exit close the owning viewer. At most 64
+remote tiles are presented. This is a DASS-owned branch in the existing grid,
+not Discord's native StreamTile, Watch handler or full player; native
+focus/popout/zoom controls and remote voice-row LIVE remain unresolved.
+Real-client acceptance is still required. `scripts/discord-grid-probe.js` remains
+a read-only bounded probe of the two grid delegates.
+
+User feedback confirms the tile uses the intended grid space, local preview and
+LIVE presentation, but does not behave like Discord's real player. This is not
+full native-player acceptance or audio interoperability evidence. To investigate
+the actual shell and controls rather than restyling the substitute, run
+`scripts/discord-player-shell-probe.js` in client DevTools and return its JSON.
+It reads the loaded `175203` tile wrapper, `163432` filmstrip, `51092` video
+renderer and `402216` badge factories only (24,000 characters each). It does not
+execute factories, load chunks, read runtime media or start sharing.
+
+The complete player-shell response identifies `175203` as `CallTile` and its
+`CallTileOverlay`, not a pure reusable frame. Before rendering it reads native
+voice state, mute/video toggles, identity, activities and secure-frame state.
+Its stream branch invokes `802867`, and its title/controls assume native
+participants. `163432` likewise sorts by native user identity and renders
+`175203`. Neither is yet safe to receive a fabricated DASS participant.
+
+`51092` is also not just a video element: it runs native spinner telemetry and
+a twenty-second incoming-video error timer keyed by native stream/user IDs.
+DASS must bypass those side effects as well as the Discord media-engine component.
+The real frame is imported from `272812`; the zoom provider and controls are
+`40056` and `117029`. `scripts/discord-native-frame-probe.js` reads those three
+loaded dependencies only, with the same 24,000-character per-factory bound,
+without executing modules or inspecting runtime media.
+
+The complete frame response confirms `272812` only renders a div, native border
+classes, supplied children and optional style/ref/user test attribute. DASS tiles
+now resolve that component by its two observed data-attribute source signatures,
+without relying on the module ID. It replaces the generic Equicord Card and owns
+the border styling; the plugin no longer supplies its own frame radius/padding.
+No Discord user ID is passed. The accessibility group lives inside the frame
+because this native component does not forward arbitrary props. The existing
+DASS video/audio lifecycle and loading/watch content remain inside it. Frame
+reuse is built and source-tested, not yet runtime-verified.
+
+`40056` is not purely local zoom state: zoom changes invoke debounced Discord
+analytics and parse native stream keys. `117029` obtains the native media-engine
+video component and renders it for the minimap, keyed by a native stream ID.
+Neither is enabled for DASS. Reusing the native frame and LIVE badge does not
+yet provide native selection/focus, filmstrip, popout, hover menus or zoom.
+
+The supplied `402216` function is purely presentational. DASS grid tiles now
+resolve its actual component by the verified look/color source signature and
+render it instead of a handmade LIVE label. The existing local voice-row badge
+patch is unchanged. This badge change is not full native player integration.
+
+After that inventory, inspect the relevant list renderer's imported component,
+its LIVE badge/watch callback and its video component props. We need to establish
+whether the video renderer accepts an independent MediaStream without acquiring
+a native stream connection. If it does not, only its presentational shell may be
+reusable. Do not fabricate `STREAM_CREATE`, `STREAM_UPDATE` or `STREAM_WATCH`
+events to satisfy its stores. Do not enable native sharing or copy runtime
+payloads, tokens, full SDP, HAR files or frames merely to collect these hooks.
+
+Required acceptance for the native integration (not implemented yet):
+
+1. Rebuild with `bun scripts/build-plugin.mjs` from the repository root and fully
+   restart both DASS clients using `build/Equicord/dist` in Equibop.
+2. Sign in to separate authorized DASS accounts and join the same ordinary call.
+   The directory must require no source picker and no viewer ICE preparation.
+3. Publish through a supported Share button. Both full-call and sidebar sharing
+   controls must reflect DASS state and stop it. The publisher needs the existing
+   participant LIVE badge and stream tile, not a separate DASS button.
+4. The other authorized DASS client must see the stream tile and use its existing
+   Watch action. Loading state may precede real media, but errors must remain
+   visible. Watching, publishing and ordinary voice must remain independent.
+   Repeat logout, plugin disable, call exit and cancellation during setup.
+5. Confirm no DASS-triggered native stream events or Discord thumbnail POSTs.
+   Observe event names and request method/path only, not sensitive payloads.
+6. Check wrong-room authorization, removed publishers, expired sessions and
+   directory failure. Stale shares must disappear; failure must not fall back.
 
 Discord Alternative ScreenShare (DASS) must consume explicitly selected DASS
 actions before native stream creation, capture or preview upload. Private hook

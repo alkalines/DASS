@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { SpikePeer } from "../../clients/spike/peer";
 import { SpikeSignaling, SpikeSignalingError } from "../../clients/spike/signaling";
 import { CaptureLease } from "../../plugins/dass/routing";
-import { PublishController } from "../../plugins/dass/publishing";
+import { hasAcceptedPublishCapture, PublishController } from "../../plugins/dass/publishing";
 import { DassSession } from "../../plugins/dass/session";
 import { createShareSelection } from "../../plugins/dass/discordAdapter";
 
@@ -57,12 +57,15 @@ test("session snapshots never contain credentials; setup is reused and can be fo
 test("normal sharing authenticates, uses the installed picker, then activates automatically", async () => {
     const f = fixture();
     try {
+        expect(f.controller.getPreviewStream()).toBeUndefined();
         await f.controller.publish("https://dass.example", f.bridge);
         expect(f.events).toEqual(["authenticate", "capture", "prepare", "activate"]);
         expect(f.controller.getSnapshot().phase).toBe("publishing");
+        expect(f.controller.getPreviewStream()).toBe(f.lease.stream);
         await f.controller.publish("https://dass.example", f.bridge);
         expect(f.events.length).toBe(4);
         f.exit();
+        expect(f.controller.getPreviewStream()).toBeUndefined();
         expect(f.peer.closed.aborted).toBe(true);
         expect(f.session.getSnapshot().configured).toBe(true);
     } finally { f.controller.stop(); }
@@ -126,6 +129,30 @@ test("late picker results are released after stop and cannot start media", async
         expect(f.events).toEqual(["authenticate"]);
         expect(f.controller.getSnapshot().phase).toBe("idle");
     } finally { f.controller.stop(); }
+});
+
+test("Stop Streaming state starts only after the complete picker returns capture", async () => {
+    const f = fixture();
+    let complete: ((lease: CaptureLease) => void) | undefined;
+    const phases: Array<{ phase: string; streaming: boolean; }> = [];
+    const unsubscribe = f.controller.subscribe(() => {
+        const { phase } = f.controller.getSnapshot();
+        phases.push({ phase, streaming: hasAcceptedPublishCapture(phase) });
+    });
+    try {
+        const publishing = f.controller.publish("https://dass.example", { version: 1, capture: () => new Promise(resolve => { complete = resolve; }) });
+        while (!complete) await Promise.resolve();
+        // OS source selection and then quality/audio selection are one pending
+        // host capture request; neither consent step alone is an owned lease.
+        expect(phases).toEqual([{ phase: "authenticating", streaming: false }, { phase: "capturing", streaming: false }]);
+        expect(f.controller.getPreviewStream()).toBeUndefined();
+        complete(f.lease);
+        await publishing;
+        expect(phases.slice(2)).toEqual(["preparing", "prepared", "activating", "publishing"].map(phase => ({ phase, streaming: true })));
+        f.controller.reset();
+        expect(phases.at(-1)).toEqual({ phase: "idle", streaming: false });
+        expect(hasAcceptedPublishCapture("failed")).toBe(false);
+    } finally { unsubscribe(); f.controller.stop(); }
 });
 
 test("late authentication cannot reopen the picker after disable", async () => {

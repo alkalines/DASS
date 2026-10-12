@@ -17,6 +17,11 @@ export interface PublishStatus {
     candidates: readonly string[];
 }
 
+/** The picker (including quality/audio consent) has returned an owned capture. */
+export function hasAcceptedPublishCapture(phase: PublishStatus["phase"]): boolean {
+    return ["preparing", "prepared", "activating", "publishing"].includes(phase);
+}
+
 /** Owns publishing independently of settings/modal mounting and Discord's native stream. */
 export class PublishController {
     private active = false;
@@ -29,6 +34,7 @@ export class PublishController {
         private readonly dependencies = { connect: SpikeSignaling.connect, prepare: SpikePeer.prepare }) {}
 
     getSnapshot = () => this.status;
+    getPreviewStream = () => this.operation && this.current(this.operation) ? this.operation.capture?.stream : undefined;
     subscribe = (listener: () => void) => {
         this.listeners.add(listener);
         return () => { this.listeners.delete(listener); };

@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { BrowserSocket, signalingUrl, SpikeSignaling, SpikeSignalingError } from "../../clients/spike/signaling";
+import { BrowserSocket, isAuthenticationRejected, signalingFailureMessage, signalingUrl, SpikeSignaling, SpikeSignalingError } from "../../clients/spike/signaling";
 
 class Socket extends EventTarget implements BrowserSocket {
     protocol = "dass.v1";
@@ -29,6 +29,15 @@ test("signaling origin supports separate machines without URL secrets or insecur
     for (const url of ["http://localhost:8080", "https://user:secret@example.com", "https://example.com/?credential=secret", "https://example.com/#key", "https://example.com/path"]) {
         expect(() => signalingUrl(url)).toThrow();
     }
+});
+
+test("replay reports duplicate access, not an offline backend or invalid credentials", () => {
+    const error = new SpikeSignalingError("rejected:replay");
+    expect(isAuthenticationRejected(error)).toBe(false);
+    expect(signalingFailureMessage(error)).toContain("already have an active connection");
+    expect(signalingFailureMessage(error)).toContain("rejected:replay");
+    expect(signalingFailureMessage(error)).not.toContain("Could not connect");
+    expect(signalingFailureMessage(new SpikeSignalingError("protocol"))).toContain("[protocol]");
 });
 
 test("login, validated response correlation, busy admission and abort cleanup", async () => {

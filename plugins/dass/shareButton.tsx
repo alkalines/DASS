@@ -8,7 +8,7 @@ import ErrorBoundary from "@components/ErrorBoundary";
 import { useEffect, useState } from "@webpack/common";
 import type { ComponentType } from "react";
 
-import { type PublishController } from "./publishing";
+import { hasAcceptedPublishCapture, type PublishController } from "./publishing";
 
 interface NativeShareProps {
     streamActive: boolean;
@@ -20,10 +20,18 @@ export interface ShareButtonProps extends NativeShareProps {
     dassNativeComponent: ComponentType<NativeShareProps>;
 }
 
-function ShareButton({ controller, dassNativeComponent: NativeButton, ...props }: ShareButtonProps & { controller: PublishController; }) {
+export function usePublisherStatus(controller: PublishController) {
     const [status, setStatus] = useState(controller.getSnapshot());
     useEffect(() => controller.subscribe(() => setStatus(controller.getSnapshot())), [controller]);
-    const captureActive = ["preparing", "prepared", "activating", "publishing"].includes(status.phase);
+    return status;
+}
+
+export function usePublishingState(controller: PublishController) {
+    return hasAcceptedPublishCapture(usePublisherStatus(controller).phase);
+}
+
+function ShareButton({ controller, dassNativeComponent: NativeButton, ...props }: ShareButtonProps & { controller: PublishController; }) {
+    const captureActive = usePublishingState(controller);
     return <NativeButton {...props} streamActive={captureActive || props.streamActive} />;
 }
 

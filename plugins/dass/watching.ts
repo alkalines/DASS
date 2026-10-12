@@ -193,6 +193,22 @@ export class WatchController implements ScreenshareTransport {
         return result;
     }
 
+    async watchListedShare(backendUrl: string, share: DassShare, credential: string | DassAuthentication) {
+        this.reset();
+        const { epoch } = this;
+        this.update({ ...this.status, watchingShare: { ...share } });
+        await this.prepareViewer();
+        if (!this.current(epoch) || !this.peer) return { ok: false as const, message: this.status.message };
+        await this.bind(backendUrl, share.roomId, credential);
+        if (!this.current(epoch)) return { ok: false as const, message: "DASS watching was cancelled." };
+        if (this.status.phase !== "ready") return { ok: false as const, message: this.status.message };
+        if (!this.status.shares.some(listed => listed.roomId === share.roomId && listed.shareId === share.shareId)) {
+            this.reset("failed", "This publisher is no longer in the authorized DASS directory.");
+            return { ok: false as const, message: this.status.message };
+        }
+        return this.watch(share);
+    }
+
     async listShares(roomId: string, signal: AbortSignal): Promise<readonly DassShare[]> {
         const { epoch } = this;
         if (!this.current(epoch) || roomId !== this.roomId || !this.signaling || signal.aborted) throw new Error("Unbound room.");

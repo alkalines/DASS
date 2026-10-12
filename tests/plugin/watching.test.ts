@@ -174,3 +174,51 @@ test("cancelled automatic preparation cannot bind an old credential later", asyn
     expect(f.controller.getSnapshot().shares).toEqual([]);
     f.controller.stop();
 });
+
+test("grid watch retains its pending tile while preparing and revalidates the selected publisher", async () => {
+    const f = fixture();
+    try {
+        const pending = f.controller.watchListedShare("https://dass.example", { roomId: "room", shareId: "real_source" }, "secret");
+        expect(f.controller.getSnapshot().watchingShare?.shareId).toBe("real_source");
+        expect(await pending).toEqual({ ok: true, value: f.stream });
+        expect(f.prepares()).toBe(1);
+        expect(f.activations()).toBe(1);
+        expect(f.controller.getSnapshot().watchingShare?.displayName).toBe("Workstation");
+        expect(f.socket.operations.filter(operation => operation.type === "login")).toHaveLength(1);
+    } finally { f.controller.stop(); }
+});
+
+test("grid watch cannot activate an absent publisher or an unauthorized directory", async () => {
+    const missing = fixture();
+    try {
+        expect((await missing.controller.watchListedShare("https://dass.example", { roomId: "room", shareId: "removed_source" }, "secret")).ok).toBe(false);
+        expect(missing.activations()).toBe(0);
+        expect(missing.closed.signal.aborted).toBe(true);
+        expect(missing.controller.getSnapshot().phase).toBe("failed");
+        expect(missing.controller.getSnapshot().watchingShare).toBeUndefined();
+    } finally { missing.controller.stop(); }
+    const denied = fixture();
+    denied.socket.deny = true;
+    try {
+        expect((await denied.controller.watchListedShare("https://dass.example", { roomId: "room", shareId: "real_source" }, "secret")).ok).toBe(false);
+        expect(denied.activations()).toBe(0);
+        expect(denied.closed.signal.aborted).toBe(true);
+        expect(denied.controller.getSnapshot().phase).toBe("unauthorized");
+    } finally { denied.controller.stop(); }
+});
+
+test("cancelled grid directory setup cannot restore a pending tile or activate media", async () => {
+    const f = fixture();
+    f.socket.delay = true;
+    try {
+        const pending = f.controller.watchListedShare("https://dass.example", { roomId: "room", shareId: "real_source" }, "secret");
+        while (!f.socket.directoryReply) await Promise.resolve();
+        f.controller.reset();
+        f.socket.directoryReply();
+        expect((await pending).ok).toBe(false);
+        expect(f.activations()).toBe(0);
+        expect(f.controller.getSnapshot().watchingShare).toBeUndefined();
+        expect(f.controller.getSnapshot().stream).toBeUndefined();
+        expect(f.controller.getSnapshot().phase).toBe("disconnected");
+    } finally { f.controller.stop(); }
+});

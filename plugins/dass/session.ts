@@ -26,6 +26,8 @@ export class DassSession {
     private backendUrl?: string;
     private pending?: AbortController;
     private idleConnection?: SpikeSignaling;
+    private leasedConnection?: SpikeSignaling;
+    private lastReleaseAtMs = -Infinity;
     private epoch = 0;
     private active = false;
     private phase: "idle" | "loading" | "ready" | "failed" = "idle";
@@ -86,7 +88,7 @@ export class DassSession {
         this.notify();
         try {
             if (!this.active || this.epoch !== epoch || request.signal.aborted) return;
-            const connection = await this.authenticate({ experimental: true, backendUrl: account.backendUrl,
+            const connection = await this.authenticateAfterRelease({ experimental: true, backendUrl: account.backendUrl,
                 username: account.username, password: account.password, signal: request.signal });
             if (!this.active || this.epoch !== epoch || request.signal.aborted) { connection.close(); return; }
             this.idleConnection = connection;
@@ -136,17 +138,46 @@ export class DassSession {
     /** Transfer startup authentication to the publisher/viewer rather than logging in twice. */
     async connect(options: Parameters<typeof SpikeSignaling.connect>[0]) {
         signalingUrl(options.backendUrl);
-        const connection = this.idleConnection;
+        const { epoch } = this;
+        let connection = this.idleConnection;
         if (!connection || connection.closed.aborted || new URL(options.backendUrl).origin !== this.backendUrl
             || options.username !== this.access?.username || options.password !== this.access?.password
-            || options.credential !== this.access?.credential) return this.authenticate(options);
-        if (options.signal.aborted) throw new Error("DASS connection was cancelled.");
+            || options.credential !== this.access?.credential) connection = await this.authenticateAfterRelease(options);
+        if (options.signal.aborted || this.epoch !== epoch) { connection.close(); throw new SpikeSignalingError("cancelled"); }
         this.idleConnection = undefined;
-        const abort = () => connection.close();
+        this.leasedConnection = connection;
+        const leased = connection;
+        const abort = () => leased.close();
         const cleanup = () => options.signal.removeEventListener("abort", abort);
         options.signal.addEventListener("abort", abort, { once: true });
-        connection.closed.addEventListener("abort", cleanup, { once: true });
+        leased.closed.addEventListener("abort", () => {
+            cleanup();
+            if (this.leasedConnection === leased) {
+                this.leasedConnection = undefined;
+                this.lastReleaseAtMs = Date.now();
+            }
+        }, { once: true });
         return connection;
+    }
+
+    private async authenticateAfterRelease(options: Parameters<typeof SpikeSignaling.connect>[0]) {
+        // A local close is synchronous, but the backend releases its exclusive
+        // account lease asynchronously. Retry only this narrowly scoped race,
+        // never bad credentials, network failures or arbitrary replay denials.
+        const recentlyReleased = Date.now() - this.lastReleaseAtMs < 2_000;
+        for (let attempt = 0; ; attempt++) {
+            if (options.signal.aborted) throw new SpikeSignalingError("cancelled");
+            try { return await this.authenticate(options); }
+            catch (error) {
+                if (!recentlyReleased || attempt >= 3 || !(error instanceof SpikeSignalingError) || error.code !== "rejected:replay") throw error;
+                await new Promise<void>((resolve, reject) => {
+                    const abort = () => { clearTimeout(timer); options.signal.removeEventListener("abort", abort); reject(new SpikeSignalingError("cancelled")); };
+                    const timer = setTimeout(() => { options.signal.removeEventListener("abort", abort); resolve(); }, 100 * (attempt + 1));
+                    options.signal.addEventListener("abort", abort, { once: true });
+                    if (options.signal.aborted) abort();
+                });
+            }
+        }
     }
 
     /** Legacy invite setup remains available for manual tests. */
@@ -172,7 +203,10 @@ export class DassSession {
         ++this.epoch;
         this.pending?.abort();
         this.pending = undefined;
+        if (this.idleConnection || this.leasedConnection) this.lastReleaseAtMs = Date.now();
         this.idleConnection?.close();
+        this.leasedConnection?.close();
+        this.leasedConnection = undefined;
         this.idleConnection = undefined;
         this.access = undefined;
         this.backendUrl = undefined;

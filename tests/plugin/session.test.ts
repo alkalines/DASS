@@ -177,3 +177,64 @@ test("idle connection expiry is reauthenticated automatically at the next media 
         expect(attempts).toBe(2);
     } finally { session.stop(); next.connection.close(); }
 });
+
+test("directory-to-media handoff retries only replay during local lease release", async () => {
+    const first = fakeConnection();
+    const next = fakeConnection();
+    let attempts = 0;
+    const session = new DassSession(undefined, async () => {
+        if (++attempts === 1) return first.connection;
+        if (attempts === 2) throw new SpikeSignalingError("rejected:replay");
+        return next.connection;
+    });
+    try {
+        await session.start(account.backendUrl);
+        await session.login(account, false);
+        const directoryAbort = new AbortController();
+        await session.connect({ experimental: true, backendUrl: account.backendUrl, ...session.getAccess(), signal: directoryAbort.signal });
+        directoryAbort.abort();
+        expect(first.closed.signal.aborted).toBe(true);
+        const media = await session.connect({ experimental: true, backendUrl: account.backendUrl, ...session.getAccess(), signal: new AbortController().signal });
+        expect(media).toBe(next.connection);
+        expect(attempts).toBe(3);
+        expect(session.getSnapshot().configured).toBe(true);
+        session.clear();
+        expect(next.closed.signal.aborted).toBe(true);
+    } finally { session.stop(); }
+});
+
+test("replay without a local connection release is not automatically retried", async () => {
+    let attempts = 0;
+    const session = new DassSession(undefined, async () => { attempts++; throw new SpikeSignalingError("rejected:replay"); });
+    try {
+        await session.start(account.backendUrl);
+        await session.login(account, false);
+        expect(attempts).toBe(1);
+        expect(session.getSnapshot().configured).toBe(true);
+        expect(session.getSnapshot().message).toContain("already have an active connection");
+    } finally { session.stop(); }
+});
+
+test("local lease-release replay retries are bounded and cancellable", async () => {
+    const first = fakeConnection();
+    let attempts = 0;
+    const session = new DassSession(undefined, async () => {
+        if (++attempts === 1) return first.connection;
+        throw new SpikeSignalingError("rejected:replay");
+    });
+    try {
+        await session.start(account.backendUrl);
+        await session.login(account, false);
+        const directoryAbort = new AbortController();
+        await session.connect({ experimental: true, backendUrl: account.backendUrl, ...session.getAccess(), signal: directoryAbort.signal });
+        directoryAbort.abort();
+        const abort = new AbortController();
+        const pending = session.connect({ experimental: true, backendUrl: account.backendUrl, ...session.getAccess(), signal: abort.signal });
+        await Promise.resolve();
+        abort.abort();
+        await expect(pending).rejects.toThrow("cancelled");
+        expect(attempts).toBe(2);
+        await expect(session.connect({ experimental: true, backendUrl: account.backendUrl, ...session.getAccess(), signal: new AbortController().signal })).rejects.toThrow("rejected:replay");
+        expect(attempts).toBe(6);
+    } finally { session.stop(); }
+});

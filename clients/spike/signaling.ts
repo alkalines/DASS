@@ -53,10 +53,14 @@ export function isAuthenticationRejected(error: unknown): boolean {
 
 export function signalingFailureMessage(error: unknown): string {
     if (isAuthenticationRejected(error)) return "The DASS backend rejected or revoked your access. Check your DASS credentials and permissions. No Discord fallback.";
+    if (error instanceof SpikeSignalingError && error.code === "rejected:replay") {
+        return "The DASS backend rejected a duplicate login or request [rejected:replay]. This account may already have an active connection. Your credentials were kept; no Discord fallback.";
+    }
     if (error instanceof SpikeSignalingError && (error.code === "expired" || error.code === "server:expired")) {
         return "DASS connection expired. Retry to authenticate again; your credentials were kept. No Discord fallback.";
     }
-    return "Could not connect to the DASS backend or complete signaling. Check backend availability, TLS and your network; your credentials were kept. No Discord fallback.";
+    const code = error instanceof SpikeSignalingError ? ` [${error.code}]` : "";
+    return `Could not connect to the DASS backend or complete signaling${code}. Check backend availability, TLS and your network; your credentials were kept. No Discord fallback.`;
 }
 
 /** Experimental control transport, staged into the plugin's manual test panel. */
