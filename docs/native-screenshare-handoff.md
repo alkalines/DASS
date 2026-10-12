@@ -209,6 +209,176 @@ lookup anchors. Full function starts/imports are more useful than truncated
 keyword matches. Spatial-room renderers `487048`/`321486` are not the ordinary
 call grid; `61230` is a channel popout, not proof of the sidebar card's renderer.
 
+## Follow-up live React-owner evidence
+
+The user supplied sidebar-card and selected-player owner reports on 2026-10-12.
+These are live mount evidence plus component source, not executed action traces.
+Module IDs remain build-specific research references; the follow-up reports did
+not independently report the running build number.
+
+- The selected sidebar element belongs to the activity-panel component in
+  `463481` (factory length 37,947). Its analytics location is
+  `ActivityPanelGameCard`. `157667` wraps it with `bt`, an activity-panel
+  analytics provider, above the separate RTC connection panel. This establishes
+  an activity-panel surface, not another Voice Connected share-button renderer.
+- That component subscribes to `getCurrentUserActiveStream()` and
+  `getStreamerActiveStreamMetadata()` through local import `e6.A`. Its `H`
+  streaming predicate requires a non-null stream owned by the current user and
+  a state other than `ENDED`. It also reads running games, embedded activities,
+  voice channel, quality/FPS and activity-popout state. The supplied function
+  was truncated before its render branch: preview source and card actions are
+  still unknown. Resolve the import and inspect the complete factory before
+  treating it as a reusable stream-only card.
+- Selected-player live ancestry includes `874739` -> `699707` -> `175203` ->
+  `40056` -> `802867` -> `51092` -> `113634`'s `e9` video component (with
+  intervening frame, focus, analytics and animation components). `699707`
+  receives selected participant and selection/fullscreen/context-menu callbacks
+  from above; the owner of that state remains untraced.
+- `699707` renders the enlarged tile with `focused: true`, not `selected: true`.
+  In `175203`, `selected` defaults to false and is passed to the stream renderer;
+  `focused` enables stream zoom. Thus these flags have distinct meanings:
+  equating `selected` with enlarged playback would send `802867` into its
+  placeholder branch instead of its active-video branch.
+- `461782` owns idle timing and a set of prevent-idle holders. `156652` routes
+  mouse movement/down to `onActive` and mouse leave to `onForceIdle`. This is
+  shared call presentation behavior rather than video-element hover alone.
+- `113634.e9` borrows a media-engine stream via `q.yL(streamId)` and calls
+  `O.NM`/`O.gm` on mount, pause and cleanup. Cleanup clears `srcObject` and calls
+  `load()`; this component does not itself stop borrowed tracks. The meanings
+  and owners of those imported functions, and the separate native stream-audio
+  path, still require tracing. Its video is always muted; that does not establish
+  that native remote stream audio is muted.
+
+The user subsequently supplied complete factories `463481` and `175203` and
+confirmed that share audio is optional at capture selection, while the focused
+player's speaker button toggles mute and exposes a volume slider on hover.
+These are separate capture and playback controls; a muted video element is not
+a muted stream-audio path.
+
+- `463481` resolves `e6.A` to `616356` (ApplicationStreamStore). Its card chooses
+  running-game, embedded-activity and frame branches before the ordinary active
+  stream branch `nv`. That branch renders metadata title/source icon and a
+  quality indicator, not a captured-frame video preview in this factory. The
+  imported source-icon component `118277` still needs inspection before making
+  claims about its internals.
+- The card's `t6` action group receives the stream and `isStreaming` predicate.
+  Its streaming button invokes `z`, which calls `338771.A(stream)`, followed by
+  activity-panel analytics. Non-streaming game/activity start buttons have their
+  own modal entry paths. Do not conflate those with the two supported DASS Share
+  interceptions.
+- Complete `175203` confirms the local stream-audio mute callback calls
+  `827343.default.toggleLocalMute(userId, STREAM)` with the stream media context
+  from `731854`. `CallTileOverlay` only adds this mute button in its non-focused
+  branch; focused controls here are zoom and, for tile popouts, stay-on-top and
+  close. Self-stream tiles hide this audio icon. This factory does not identify
+  the user's focused speaker/hover slider: inspect that control's own live owner
+  rather than assigning it to `CallTileOverlay`.
+
+The neighboring focused control's live owner is `128286` (popout toggle), inside
+`156652`'s call-level controls layout. Inspecting the layout's render callback
+sources located the controller and connected wrapper in `540462`:
+
+- `renderBottomRight` renders the audio control `ep.A` only for a selected,
+  non-activity participant whose user ID differs from the current user's ID.
+  This explains why self-stream investigation cannot select the speaker.
+  It receives `context: eM.A(participant.type)`, `userId`, the appropriate current
+  window, slider/button classes and a voice-control-tray analytics location.
+  The actual audio-control factory and context mapper remain to be resolved.
+- The connected wrapper `eZ` subscribes to local import `eP.A` for participants,
+  filtered participants, participant version, selected participant, mode,
+  layout and panel visibility. ApplicationStreamStore is separately used for
+  active streams and selected-stream metadata. These are distinct state owners.
+- `eq.handleSelectParticipant` can select a voice channel and invoke native
+  stream watch before updating selection through `x.A.selectParticipant`.
+  DASS intent must route before those native effects, not merely replace video.
+  Selection toggles off when the clicked participant is already selected.
+- Fullscreen/double-click delegates to selection as needed and then fullscreen;
+  popout opens the channel call and can additionally disconnect an embedded
+  activity or navigate to a guild route. These handlers are not pure layout.
+- The class owner source contains existing ShowHiddenChannels patches and did
+  not exactly match a factory, while its render callbacks and connected wrapper
+  matched `540462`. This is live patched-source evidence; preserve unrelated
+  plugin behavior when considering integration.
+
+Complete resolved dependency factories establish these further source boundaries:
+
+- Focused audio controller `821747` reads `192820`'s local volume/mute by user
+  ID and media context, then renders widget `20504`. It uses conversions from
+  `824744`, with slider maxima 200 on embedded platforms and 100 otherwise.
+  Moving the slider above zero unmutes an already-muted stream, then sets local
+  volume through `827343`; speaker click toggles local mute and emits analytics.
+  This is source evidence, not remote-audio interoperability verification.
+- Context mapper `520698` maps STREAM/HIDDEN_STREAM to STREAM audio and USER/
+  ACTIVITY to DEFAULT audio. Do not route DASS share volume into Discord voice.
+- `198052` is ChannelRTCStore. Per-channel participant collections are constructed
+  by `568598`; selection stores explicit and automatic IDs separately. Native
+  selection retrieval resolves an ID through that collection, so an arbitrary
+  DASS ID cannot become a focused participant just by updating selection.
+- Native selection updates inspect native stream-key format, parse owner IDs,
+  consult ApplicationStreamStore, rebuild participants and may change filmstrip
+  visibility. Native participant popout/return also updates collection/user state.
+  `367513` exposes Flux-dispatching actions, not an effect-free presentation API.
+  These observations rule out using fabricated native selection/stream events as
+  a DASS integration shortcut.
+- Potential safe reuse remains a hypothesis: widget `20504` may accept DASS-owned
+  mute/volume callbacks below the effectful `821747` wrapper. Inspect its complete
+  dependencies before calling it a pure reusable widget. A coherent bounded
+  DASS presentation projection is still needed for grid/focus/filmstrip routing.
+
+Complete `20504`, `568598` and `806931` factory reports further narrow reuse:
+
+- `20504` owns hover/focus/drag state and a 150 ms hover-hide timeout. It receives
+  controlled `value`/`muted`, callbacks and `currentWindow`; no media/store calls
+  appear directly in this factory. Arrow keys open the slider and then adjust
+  by 5% of its configured range; Escape closes keyboard focus. Muting sets the
+  grabber to zero without replacing the supplied volume. The lower-level media
+  bar `122641` still needs inspection. No unmount timeout cleanup is present in
+  the supplied class, so do not assert complete lifecycle safety from this dump.
+- `824744` only re-exports conversions from `792251`; their scale is still unknown.
+- `568598` builds native stream participants from Discord user records, voice
+  state, ApplicationStreamStore and media-engine user-stream data (`803301`).
+  It indexes stream/video/filtered/filmstrip/stage groups and sorts using native
+  user/name fields. Active-video filtering requires `streamId` and excludes
+  hidden or popped-out streams. There is no generic MediaStream input here.
+- `806931` defines only STREAM, HIDDEN_STREAM, USER and ACTIVITY, with predicates
+  matching those exact numeric types. A new DASS participant must not merely
+  masquerade as STREAM: downstream consumers assume native user/stream/engine
+  data, while an unhandled new type also breaks sorting/rendering.
+
+The resulting design direction is a bounded DASS-owned presentation projection
+at the connected call boundary, sharing grid/focus/filmstrip selection data while
+guarding DASS-specific tile, title, sort, controls, watch, zoom and popout paths.
+This is a proposal, not implemented or accepted interoperability. Keep native
+stores and ordinary voice untouched; preserve controller-owned capture/receiver
+tracks. Lower-level presentation controls can be reused only after checking
+their remaining dependencies and lifecycle behavior.
+
+Complete `122641` and `792251` reports close the immediate audio-widget trace:
+
+- `122641` is a presentation media bar using animation and DOM geometry, not a
+  media-engine controller. Volume drag is vertical, clamped to normalized 0..1,
+  and forwarded through callbacks. It registers drag listeners on the supplied
+  `currentWindow`. However, unmount removes listeners from global `window`, not
+  `currentWindow`; unmount during dragging in a different popout window can
+  therefore leave listeners attached. This is a source-derived lifecycle risk,
+  not a reproduced leak. Do not reuse unchanged and claim popout cleanup safety.
+- `792251.w` converts slider percentage `s` to engine-volume units: for default
+  reference 100 and `q = s / 100`, output is `100 * q^2.8` below 100%, otherwise
+  `100 * 10^((q - 1) * 6 / 20)`. `M` is the inverse. Thus 50% gives approximately
+  14.36 engine units and 200% gives approximately 199.53; those units are not
+  independently verified as direct playback gain. A linear HTML video-volume
+  assignment is not an equivalent native slider mapping. HTML media volume also
+  cannot represent amplification above unity by itself.
+- Safe control reuse is now narrower: retain controlled DASS volume/mute state,
+  no native audio-store/actions wrapper, preserve nonlinear slider semantics,
+  and explicitly address hover timeout and correct-window drag teardown. The
+  observed audio path remains separate from the always-muted native video tag.
+
+The remaining research gate is lifecycle execution and presentation projection
+coverage (selection, filmstrip, sort/title, watch, preview, zoom and popout), not
+additional generic audio-widget dumps. All findings above remain source/live-owner
+evidence; remote DASS audio and replacement UI acceptance are still unverified.
+
 ## Current DASS pipeline and ownership
 
 ```text
