@@ -128,10 +128,10 @@ was used. In a Docker-enabled shell, from the repository root:
 ```sh
 export LOCAL_UID="$(id -u)"
 export LOCAL_GID="$(id -g)"
-docker compose build tooling
-docker compose run --rm tooling cargo fmt --all -- --check
-docker compose run --rm tooling cargo clippy --workspace --all-targets --locked -- -D warnings
-docker compose run --rm tooling cargo test --workspace --locked
+docker build --target tooling -t dass-rust-tools .
+docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/workspace" dass-rust-tools cargo fmt --all -- --check
+docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/workspace" dass-rust-tools cargo clippy --workspace --all-targets --locked -- -D warnings
+docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/workspace" dass-rust-tools cargo test --workspace --locked
 docker compose build backend
 ```
 

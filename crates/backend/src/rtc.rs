@@ -609,9 +609,7 @@ impl SpikePeer {
         if self.packets_in_window > MAX_PACKETS_PER_SECOND {
             return Err(SpikeFailure);
         }
-        if !self.offered
-            || bytes.len() > MAX_DATAGRAM_BYTES
-            || !self.peer_endpoint_allowed(source)
+        if !self.offered || bytes.len() > MAX_DATAGRAM_BYTES || !self.peer_endpoint_allowed(source)
         {
             return Ok(());
         }
@@ -913,9 +911,7 @@ mod tests {
     async fn two_dtls_peers_forward_opus_and_vp8_payloads_without_transcoding() {
         let publisher_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let viewer_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let mut config = config_with_auto(true, None, None, true)
-            .unwrap()
-            .unwrap();
+        let mut config = config_with_auto(true, None, None, true).unwrap().unwrap();
         let probe = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         config.first_port = probe.local_addr().unwrap().port().min(65534);
         drop(probe);
@@ -939,12 +935,16 @@ mod tests {
         let mut publisher =
             TestClient::negotiate(publisher_socket, &mut publisher_peer, false).await;
         let mut viewer = TestClient::negotiate(viewer_socket, &mut viewer_peer, true).await;
-        assert!(publisher_peer
-            .session_peers
-            .contains(&publisher.socket.local_addr().unwrap()));
-        assert!(viewer_peer
-            .session_peers
-            .contains(&viewer.socket.local_addr().unwrap()));
+        assert!(
+            publisher_peer
+                .session_peers
+                .contains(&publisher.socket.local_addr().unwrap())
+        );
+        assert!(
+            viewer_peer
+                .session_peers
+                .contains(&viewer.socket.local_addr().unwrap())
+        );
         let trickle_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let trickle_address = trickle_socket.local_addr().unwrap();
         publisher_peer
@@ -1130,14 +1130,16 @@ mod tests {
         assert!(automatic.trusted_client_ips.is_empty());
 
         assert!(config_with_auto(true, None, None, false).is_err());
-        assert!(SpikeConfig::from_lookup(true, |name| match name {
-            "DASS_RTC_SPIKE" => Some("true".into()),
-            "DASS_RTC_BIND_IP" | "DASS_RTC_ADVERTISED_IP" => Some("127.0.0.1".into()),
-            "DASS_RTC_FIRST_PORT" => Some("45000".into()),
-            "DASS_RTC_AUTO_LAN_PEERS" => Some("yes".into()),
-            _ => None,
-        })
-        .is_err());
+        assert!(
+            SpikeConfig::from_lookup(true, |name| match name {
+                "DASS_RTC_SPIKE" => Some("true".into()),
+                "DASS_RTC_BIND_IP" | "DASS_RTC_ADVERTISED_IP" => Some("127.0.0.1".into()),
+                "DASS_RTC_FIRST_PORT" => Some("45000".into()),
+                "DASS_RTC_AUTO_LAN_PEERS" => Some("yes".into()),
+                _ => None,
+            })
+            .is_err()
+        );
 
         for ip in [
             Ipv4Addr::new(10, 0, 0, 4),
@@ -1194,9 +1196,7 @@ mod tests {
 
     #[tokio::test]
     async fn trusted_client_ip_accepts_dynamic_nonprivileged_ports_only_for_configured_hosts() {
-        let mut config = config_with(true, None, Some("127.0.0.1"))
-            .unwrap()
-            .unwrap();
+        let mut config = config_with(true, None, Some("127.0.0.1")).unwrap().unwrap();
         let probe = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         config.first_port = probe.local_addr().unwrap().port().min(65534);
         drop(probe);
@@ -1204,8 +1204,10 @@ mod tests {
 
         for port in [1024, 49152, 65535] {
             assert!(
-                peer.candidate(&format!("candidate:1 1 udp 2130706431 127.0.0.1 {port} typ host"))
-                    .is_ok(),
+                peer.candidate(&format!(
+                    "candidate:1 1 udp 2130706431 127.0.0.1 {port} typ host"
+                ))
+                .is_ok(),
                 "trusted address should accept non-privileged port {port}"
             );
         }
@@ -1222,21 +1224,17 @@ mod tests {
     #[tokio::test]
     async fn automatic_admission_is_bound_to_observed_lan_ip_and_validated_offer_candidates() {
         let observed_ip = Ipv4Addr::new(192, 168, 1, 8);
-        let config = config_with_auto(
-            true,
-            Some("127.0.0.1:50000"),
-            Some("192.168.1.9"),
-            true,
-        )
-        .unwrap()
-        .unwrap();
+        let config = config_with_auto(true, Some("127.0.0.1:50000"), Some("192.168.1.9"), true)
+            .unwrap()
+            .unwrap();
         let peer = SpikePeer::bind_for_session(&config, Some(observed_ip))
             .await
             .unwrap();
 
-        assert!(peer
-            .candidate("candidate:1 1 udp 2130706431 192.168.1.8 50000 typ host")
-            .is_ok());
+        assert!(
+            peer.candidate("candidate:1 1 udp 2130706431 192.168.1.8 50000 typ host")
+                .is_ok()
+        );
         for candidate in [
             // Static exact/trusted configuration cannot override observed-peer mismatch.
             "candidate:1 1 udp 2130706431 127.0.0.1 50000 typ host",
@@ -1254,9 +1252,8 @@ mod tests {
         assert_eq!(candidates.len(), 1);
         assert!(peer.session_peers.is_empty());
 
-        let mismatched = format!(
-            "{valid}a=candidate:2 1 udp 2130706431 192.168.1.9 50001 typ host\r\n"
-        );
+        let mismatched =
+            format!("{valid}a=candidate:2 1 udp 2130706431 192.168.1.9 50001 typ host\r\n");
         assert!(peer.validate_offer(&mismatched).is_err());
         assert!(peer.session_peers.is_empty());
 
@@ -1269,9 +1266,11 @@ mod tests {
         assert!(peer.session_peers.is_empty());
 
         assert!(SpikePeer::bind_for_session(&config, None).await.is_err());
-        assert!(SpikePeer::bind_for_session(&config, Some(Ipv4Addr::new(8, 8, 8, 8)))
-            .await
-            .is_err());
+        assert!(
+            SpikePeer::bind_for_session(&config, Some(Ipv4Addr::new(8, 8, 8, 8)))
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]

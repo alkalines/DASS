@@ -1,6 +1,7 @@
 //! Authenticated control plane with an explicit one-publisher/one-viewer RTC spike.
 
 use crate::auth::{InviteStore, Permission, random_identifier};
+use crate::listener::PeerAddress;
 use crate::rtc::{SpikeConfig, SpikePeer};
 use axum::{
     Router,
@@ -19,13 +20,13 @@ use dass_protocol::{
     PROTOCOL_VERSION,
     signaling::{
         ClientOperation, CloseReason, ErrorCode, LOGIN_DEADLINE_MS, MAX_DIRECTORY_SHARES,
-        MAX_MESSAGE_BYTES, MAX_ROOM_MEMBERS, MAX_SESSIONS, SETUP_DEADLINE_MS, PublisherMetadata,
+        MAX_MESSAGE_BYTES, MAX_ROOM_MEMBERS, MAX_SESSIONS, PublisherMetadata, SETUP_DEADLINE_MS,
         ServerMessage, ServerOperation, parse_client_message,
     },
 };
 use std::{
     collections::{HashMap, HashSet},
-    net::{IpAddr, Ipv4Addr, SocketAddr},
+    net::{IpAddr, Ipv4Addr},
     sync::{Arc, Mutex},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -284,7 +285,7 @@ async fn upgrade(
     State(state): State<SignalingState>,
     headers: HeaderMap,
     OriginalUri(uri): OriginalUri,
-    connect_info: Option<Extension<ConnectInfo<SocketAddr>>>,
+    connect_info: Option<Extension<ConnectInfo<PeerAddress>>>,
     upgrade: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
 ) -> Response {
     if !exact_origin(&headers) {
@@ -305,12 +306,13 @@ async fn upgrade(
     }
     // Only the accepted TCP socket's peer address is authoritative here. Do
     // not consult forwarding headers or any address claimed by the client.
-    let observed_peer_ip = connect_info.and_then(|Extension(ConnectInfo(address))| {
-        match address.ip() {
-            IpAddr::V4(ip) => Some(ip),
-            IpAddr::V6(_) => None,
-        }
-    });
+    let observed_peer_ip =
+        connect_info.and_then(
+            |Extension(ConnectInfo(PeerAddress(address)))| match address.ip() {
+                IpAddr::V4(ip) => Some(ip),
+                IpAddr::V6(_) => None,
+            },
+        );
     if state
         .rtc_spike
         .as_ref()
@@ -332,15 +334,7 @@ async fn upgrade(
         .max_write_buffer_size(maximum * 2)
         .max_message_size(maximum)
         .max_frame_size(maximum)
-        .on_upgrade(move |socket| {
-            run(
-                socket,
-                state,
-                connection,
-                unauthenticated,
-                observed_peer_ip,
-            )
-        })
+        .on_upgrade(move |socket| run(socket, state, connection, unauthenticated, observed_peer_ip))
 }
 
 pub fn now_seconds() -> Result<u32, &'static str> {
@@ -743,7 +737,15 @@ fn operate(
     session: &mut Option<JoinedSession>,
     last_left: &mut Option<String>,
 ) -> ServerOperation {
-    operate_for_peer(state, store, invite_id, now, operation, (None, session), last_left)
+    operate_for_peer(
+        state,
+        store,
+        invite_id,
+        now,
+        operation,
+        (None, session),
+        last_left,
+    )
 }
 
 fn operate_for_peer(
@@ -1593,10 +1595,10 @@ mod network_tests {
         let task = tokio::spawn(async move {
             axum::serve(
                 BoundedListener::new(tcp, Some(tls)),
-                router.into_make_service_with_connect_info::<SocketAddr>(),
+                router.into_make_service_with_connect_info::<PeerAddress>(),
             )
-                .await
-                .unwrap();
+            .await
+            .unwrap();
         });
         Server {
             address,

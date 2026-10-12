@@ -1,7 +1,10 @@
 //! Socket admission, timed TLS handshakes and lifetime bounds before HTTP routing.
 
 use crate::config::TlsFiles;
-use axum::serve::Listener;
+use axum::{
+    extract::connect_info::Connected,
+    serve::{IncomingStream, Listener},
+};
 use rustls_pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
 use std::{
     future::Future,
@@ -72,6 +75,16 @@ pub struct BoundedListener {
     tls: Option<TlsAcceptor>,
     connections: Arc<Semaphore>,
     pending: JoinSet<Option<(ConnectionIo, SocketAddr)>>,
+}
+
+/// The observed TCP peer, never an address supplied by HTTP headers or signaling.
+#[derive(Clone, Copy, Debug)]
+pub struct PeerAddress(pub SocketAddr);
+
+impl Connected<IncomingStream<'_, BoundedListener>> for PeerAddress {
+    fn connect_info(stream: IncomingStream<'_, BoundedListener>) -> Self {
+        Self(*stream.remote_addr())
+    }
 }
 
 impl BoundedListener {
@@ -221,7 +234,51 @@ impl AsyncWrite for ConnectionIo {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::io::AsyncReadExt;
+    use axum::{Router, extract::ConnectInfo, routing::get};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn connect_info_uses_tcp_peer_not_forwarding_headers() {
+        let tcp = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = tcp.local_addr().unwrap();
+        let router = Router::new().route(
+            "/",
+            get(
+                |ConnectInfo(PeerAddress(peer)): ConnectInfo<PeerAddress>| async move {
+                    peer.to_string()
+                },
+            ),
+        );
+        let (shutdown, shutdown_signal) = tokio::sync::oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                BoundedListener::new(tcp, None),
+                router.into_make_service_with_connect_info::<PeerAddress>(),
+            )
+            .with_graceful_shutdown(async {
+                let _ = shutdown_signal.await;
+            })
+            .await
+            .unwrap();
+        });
+        let mut client = TcpStream::connect(address).await.unwrap();
+        let peer = client.local_addr().unwrap();
+        client
+            .write_all(
+                b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nX-Forwarded-For: 192.0.2.1\r\nForwarded: for=192.0.2.2\r\n\r\n",
+            )
+            .await
+            .unwrap();
+        let mut response = String::new();
+        tokio::time::timeout(Duration::from_secs(5), client.read_to_string(&mut response))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert_eq!(response.split_once("\r\n\r\n").unwrap().1, peer.to_string());
+        shutdown.send(()).unwrap();
+        server.await.unwrap();
+    }
 
     #[tokio::test]
     async fn socket_permit_is_owned_until_io_drop_and_initial_read_times_out() {

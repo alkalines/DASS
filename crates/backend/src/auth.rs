@@ -467,9 +467,11 @@ mod tests {
                 .is_err()
         );
         assert!(store.verify("discord-token", 99).is_err());
-        assert!(store
-            .verify_account("invite_1", "correct horse battery staple", 99)
-            .is_err());
+        assert!(
+            store
+                .verify_account("invite_1", "correct horse battery staple", 99)
+                .is_err()
+        );
         assert!(store.authorize("invite_1", "room_1", Permission::Access, 99));
         assert!(store.authorize("invite_1", "room_1", Permission::Publish, 99));
         assert!(!store.authorize("invite_1", "room_1", Permission::Subscribe, 99));
@@ -581,12 +583,17 @@ mod tests {
     #[test]
     fn exact_and_all_rooms_grants_are_additive_not_deny_overrides() {
         let (mut store, _) = sample_user_store();
-        store.invites.get_mut("alice").unwrap().rooms.push(RoomGrant {
-            room_id: ALL_ROOMS_GRANT.into(),
-            access: true,
-            publish: true,
-            subscribe: false,
-        });
+        store
+            .invites
+            .get_mut("alice")
+            .unwrap()
+            .rooms
+            .push(RoomGrant {
+                room_id: ALL_ROOMS_GRANT.into(),
+                access: true,
+                publish: true,
+                subscribe: false,
+            });
         assert!(store.authorize("alice", "room_1", Permission::Publish, 99));
         assert!(store.authorize("alice", "room_1", Permission::Subscribe, 99));
         assert!(store.authorize("alice", "new_dm", Permission::Publish, 99));
@@ -609,18 +616,18 @@ mod tests {
                 .unwrap(),
             "alice"
         );
-        assert!(store
-            .verify_account("alice", "wrong password", 99)
-            .is_err());
-        assert!(store
-            .verify_account("alice", &"x".repeat(MAX_ACCOUNT_PASSWORD_BYTES + 1), 99)
-            .is_err());
-        assert!(store
-            .verify_account("alice", "bad\0password", 99)
-            .is_err());
-        assert!(store
-            .verify(&format!("alice.{}", "0".repeat(64)), 99)
-            .is_err());
+        assert!(store.verify_account("alice", "wrong password", 99).is_err());
+        assert!(
+            store
+                .verify_account("alice", &"x".repeat(MAX_ACCOUNT_PASSWORD_BYTES + 1), 99)
+                .is_err()
+        );
+        assert!(store.verify_account("alice", "bad\0password", 99).is_err());
+        assert!(
+            store
+                .verify(&format!("alice.{}", "0".repeat(64)), 99)
+                .is_err()
+        );
         assert!(store.authorize("alice", "room_1", Permission::Access, 99));
         assert!(store.authorize("alice", "room_1", Permission::Subscribe, 99));
         assert!(!store.authorize("alice", "room_1", Permission::Publish, 99));
@@ -629,9 +636,17 @@ mod tests {
             store.current("alice", 99).unwrap().display_name.as_deref(),
             Some("Alice Studio")
         );
-        assert!(store.verify_account("alice", "correct horse battery staple", 100).is_err());
+        assert!(
+            store
+                .verify_account("alice", "correct horse battery staple", 100)
+                .is_err()
+        );
         store.invites.get_mut("alice").unwrap().revoked = true;
-        assert!(store.verify_account("alice", "correct horse battery staple", 99).is_err());
+        assert!(
+            store
+                .verify_account("alice", "correct horse battery staple", 99)
+                .is_err()
+        );
         assert!(!store.authorize("alice", "room_1", Permission::Access, 99));
         assert!(validated_hash(&user.password_hash.replace("m=19456", "m=4294967295")).is_err());
     }
@@ -645,10 +660,10 @@ mod tests {
         })
         .unwrap();
         assert!(InviteStore::from_users_bytes(&duplicate).is_err());
-        assert!(InviteStore::from_users_bytes(
-            br#"{"version":1,"users":[],"discord_user_id":"123"}"#
-        )
-        .is_err());
+        assert!(
+            InviteStore::from_users_bytes(br#"{"version":1,"users":[],"discord_user_id":"123"}"#)
+                .is_err()
+        );
         assert!(InviteStore::from_users_bytes(&vec![b' '; MAX_USERS_FILE_BYTES + 1]).is_err());
 
         let mut invalid_hash = serde_json::to_value(UsersFile {
@@ -672,10 +687,26 @@ mod tests {
         for password in ["short", "has\ncontrol\ncharacters", &"x".repeat(513)] {
             assert!(create_user("alice".into(), password, None, vec![], 100).is_err());
         }
-        assert!(create_user("alice/name".into(), "correct horse battery staple", None, vec![], 100)
-            .is_err());
-        assert!(create_user("alice".into(), "correct horse battery staple", None, vec![], 0)
-            .is_err());
+        assert!(
+            create_user(
+                "alice/name".into(),
+                "correct horse battery staple",
+                None,
+                vec![],
+                100
+            )
+            .is_err()
+        );
+        assert!(
+            create_user(
+                "alice".into(),
+                "correct horse battery staple",
+                None,
+                vec![],
+                0
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -708,10 +739,12 @@ mod tests {
             invites: vec![unnamed],
         })
         .unwrap();
-        assert!(!legacy["invites"][0]
-            .as_object()
-            .unwrap()
-            .contains_key("display_name"));
+        assert!(
+            !legacy["invites"][0]
+                .as_object()
+                .unwrap()
+                .contains_key("display_name")
+        );
         legacy["invites"][0]
             .as_object_mut()
             .unwrap()
@@ -724,8 +757,9 @@ mod tests {
             "line\nbreak".to_owned(),
             "x".repeat(MAX_DISPLAY_NAME_BYTES + 1),
         ] {
-            assert!(create_invite_with_display_name("invalid".into(), Some(name), vec![], 100)
-                .is_err());
+            assert!(
+                create_invite_with_display_name("invalid".into(), Some(name), vec![], 100).is_err()
+            );
         }
     }
 }

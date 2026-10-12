@@ -125,7 +125,7 @@ The admin CLI accepts the same selector in its `ROOM_ID` argument. Quote it so
 the shell cannot expand it into filenames:
 
 ```sh
-docker compose run --rm tooling cargo run --locked -p dass-backend -- \
+docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/workspace" dass-rust-tools cargo run --locked -p dass-backend -- \
   create-user .secrets/accounts/alice.json .secrets/accounts/alice-password.txt \
   alice '*' both "$DASS_ACCOUNT_EXPIRES" 'Alice'
 ```
@@ -153,8 +153,8 @@ environment variables. A single final LF/CRLF from the editor is stripped.
 export LOCAL_UID="$(id -u)"
 export LOCAL_GID="$(id -g)"
 export DASS_ACCOUNT_EXPIRES="$(date -d '+30 days' +%s)"
-docker compose build tooling
-docker compose run --rm tooling cargo run --locked -p dass-backend -- \
+docker build --target tooling -t dass-rust-tools .
+docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/workspace" dass-rust-tools cargo run --locked -p dass-backend -- \
   create-user .secrets/accounts/alice.json .secrets/accounts/alice-password.txt \
   alice lan_test both "$DASS_ACCOUNT_EXPIRES" 'Alice'
 ```

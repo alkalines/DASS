@@ -56,15 +56,15 @@ the resulting lockfile for these locked checks. See [rtc-spike.md](rtc-spike.md)
 ```sh
 export LOCAL_UID="$(id -u)"
 export LOCAL_GID="$(id -g)"
-docker compose build tooling
+docker build --target tooling -t dass-rust-tools .
 git diff -- Cargo.lock
-docker compose run --rm tooling cargo tree --locked -e features -i rustls
-docker compose run --rm tooling cargo tree --locked -e features -i aws-lc-rs
-docker compose run --rm tooling cargo fmt --all
-docker compose run --rm tooling cargo fmt --all -- --check
-docker compose run --rm tooling cargo clippy --workspace --all-targets --locked -- -D warnings
-docker compose run --rm tooling cargo test --workspace --locked
-docker compose run --rm tooling cargo build --workspace --locked
+docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/workspace" dass-rust-tools cargo tree --locked -e features -i rustls
+docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/workspace" dass-rust-tools cargo tree --locked -e features -i aws-lc-rs
+docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/workspace" dass-rust-tools cargo fmt --all
+docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/workspace" dass-rust-tools cargo fmt --all -- --check
+docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/workspace" dass-rust-tools cargo clippy --workspace --all-targets --locked -- -D warnings
+docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/workspace" dass-rust-tools cargo test --workspace --locked
+docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/workspace" dass-rust-tools cargo build --workspace --locked
 docker compose build backend
 bun scripts/generate-protocol.mjs --check
 bun test ./tests/plugin
@@ -73,7 +73,7 @@ git diff --check
 
 Stop at a failure and share the output. Keep the Docker-generated `Cargo.lock`
 with this change after review. For a future intentional manifest/dependency update
-only, run `docker compose run --rm tooling cargo update --workspace` once and
+only, run `docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/workspace" dass-rust-tools cargo update --workspace` once and
 inspect its MSRV/resolution changes. Do not routinely regenerate the lockfile.
 Do not bypass a version conflict by removing pins or using a host toolchain.
 
@@ -141,8 +141,8 @@ After the locked build succeeds, create two distinct client invites:
 ```sh
 mkdir -m 700 .secrets
 export DASS_INVITE_EXPIRES="$(date -d '+1 day' +%s)"
-docker compose run --rm tooling cargo run --locked -p dass-backend -- create-invite .secrets/publisher-record.json .secrets/publisher-credential.txt publisher_invite room_1 publisher "$DASS_INVITE_EXPIRES"
-docker compose run --rm tooling cargo run --locked -p dass-backend -- create-invite .secrets/viewer-record.json .secrets/viewer-credential.txt viewer_invite room_1 viewer "$DASS_INVITE_EXPIRES"
+docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/workspace" dass-rust-tools cargo run --locked -p dass-backend -- create-invite .secrets/publisher-record.json .secrets/publisher-credential.txt publisher_invite room_1 publisher "$DASS_INVITE_EXPIRES"
+docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/workspace" dass-rust-tools cargo run --locked -p dass-backend -- create-invite .secrets/viewer-record.json .secrets/viewer-credential.txt viewer_invite room_1 viewer "$DASS_INVITE_EXPIRES"
 bun -e 'const fs = require("node:fs"); const documents = ["publisher", "viewer"].map(name => JSON.parse(fs.readFileSync(`.secrets/${name}-record.json`, "utf8"))); fs.writeFileSync(".secrets/invites.json", JSON.stringify({version: 1, invites: documents.flatMap(document => document.invites)}, null, 2), {mode: 0o600, flag: "wx"});'
 ```
 

@@ -1,9 +1,4 @@
-use std::{
-    fmt,
-    net::SocketAddr,
-    path::PathBuf,
-    time::Duration,
-};
+use std::{fmt, net::SocketAddr, path::PathBuf, time::Duration};
 
 use dass_protocol::ControlLimits;
 
@@ -218,14 +213,16 @@ mod tests {
             ("DASS_INVITE_FILE", "/run/secrets/invites.json"),
         ];
         assert!(config_with(&entries).unwrap().tls.is_some());
-        assert!(config_with(&[
-            ("DASS_TLS_CERT_FILE", "/run/secrets/cert.pem"),
-            ("DASS_TLS_KEY_FILE", "/run/secrets/key.pem"),
-            ("DASS_USERS", r#"{"version":1,"users":[]}"#),
-        ])
-        .unwrap()
-        .users_json
-        .is_some());
+        assert!(
+            config_with(&[
+                ("DASS_TLS_CERT_FILE", "/run/secrets/cert.pem"),
+                ("DASS_TLS_KEY_FILE", "/run/secrets/key.pem"),
+                ("DASS_USERS", r#"{"version":1,"users":[]}"#),
+            ])
+            .unwrap()
+            .users_json
+            .is_some()
+        );
         assert!(config_with(&entries[..1]).is_err());
         assert!(config_with(&entries[..2]).is_err());
         assert!(
@@ -248,28 +245,35 @@ mod tests {
     #[test]
     fn user_env_is_validated_bounded_and_exclusive_with_invite_file() {
         let valid_users = r#"{"version":1,"users":[]}"#;
-        assert!(config_with(&[
-            ("DASS_INSECURE_LOCAL_DEV", "true"),
-            ("DASS_USERS", valid_users),
-        ])
-        .unwrap()
-        .users_json
-        .is_some());
+        assert!(
+            config_with(&[
+                ("DASS_INSECURE_LOCAL_DEV", "true"),
+                ("DASS_USERS", valid_users),
+            ])
+            .unwrap()
+            .users_json
+            .is_some()
+        );
         for users in ["", "not-json", r#"{"version":2,"users":[]}"#] {
-            assert!(config_with(&[("DASS_INSECURE_LOCAL_DEV", "true"), ("DASS_USERS", users)])
-                .is_err());
+            assert!(
+                config_with(&[("DASS_INSECURE_LOCAL_DEV", "true"), ("DASS_USERS", users)]).is_err()
+            );
         }
-        assert!(config_with(&[
-            ("DASS_INSECURE_LOCAL_DEV", "true"),
-            ("DASS_INVITE_FILE", "/run/secrets/invites.json"),
-            ("DASS_USERS", valid_users),
-        ])
-        .is_err());
-        assert!(config_with(&[
-            ("DASS_INSECURE_LOCAL_DEV", "true"),
-            ("DASS_USERS", &"x".repeat(MAX_USERS_FILE_BYTES + 1)),
-        ])
-        .is_err());
+        assert!(
+            config_with(&[
+                ("DASS_INSECURE_LOCAL_DEV", "true"),
+                ("DASS_INVITE_FILE", "/run/secrets/invites.json"),
+                ("DASS_USERS", valid_users),
+            ])
+            .is_err()
+        );
+        assert!(
+            config_with(&[
+                ("DASS_INSECURE_LOCAL_DEV", "true"),
+                ("DASS_USERS", &"x".repeat(MAX_USERS_FILE_BYTES + 1)),
+            ])
+            .is_err()
+        );
 
         let secret_bearing_config = config_with(&[
             ("DASS_INSECURE_LOCAL_DEV", "true"),

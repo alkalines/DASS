@@ -93,9 +93,9 @@ Run from the **DASS repository root** in your `sudo su` shell:
 ```sh
 export LOCAL_UID="$(id -u)"
 export LOCAL_GID="$(id -g)"
-docker compose run --rm tooling cargo fmt --all
-docker compose run --rm tooling cargo clippy --workspace --all-targets --locked -- -D warnings
-docker compose run --rm tooling cargo test --workspace --locked
+docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/workspace" dass-rust-tools cargo fmt --all
+docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/workspace" dass-rust-tools cargo clippy --workspace --all-targets --locked -- -D warnings
+docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/workspace" dass-rust-tools cargo test --workspace --locked
 ```
 
 Stop at the first failure and share output. **No dependency/lockfile update is
@@ -107,8 +107,8 @@ completed. These are repeatable validation commands, not a request to regenerate
 the lockfile:
 
 ```sh
-docker compose run --rm tooling cargo fmt --all -- --check
-docker compose run --rm tooling cargo build --workspace --locked
+docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/workspace" dass-rust-tools cargo fmt --all -- --check
+docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/workspace" dass-rust-tools cargo build --workspace --locked
 docker compose build backend
 ```
 

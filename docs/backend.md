@@ -19,19 +19,33 @@ development only** and must not be exposed publicly.
 
 ## Bootstrap and validate
 
-Run every command from the repository root. Match the tooling container's user
-to your host user so Cargo and formatting do not create root-owned source files:
+Run from the repository root. A single command checks formatting, runs Clippy
+with warnings denied, runs workspace tests and builds the locked release binary
+and minimal runtime image:
 
 ```sh
-export LOCAL_UID="$(id -u)"
-export LOCAL_GID="$(id -g)"
-docker compose build tooling
-docker compose run --rm tooling cargo fmt --all
-docker compose run --rm tooling cargo fmt --all -- --check
-docker compose run --rm tooling cargo clippy --workspace --all-targets --locked -- -D warnings
-docker compose run --rm tooling cargo test --workspace --locked
-docker compose run --rm tooling cargo build --workspace --locked
 docker compose build backend
+```
+
+To build, validate and start the backend in one command instead:
+
+```sh
+docker compose up -d --build backend
+```
+
+Checks fail the image build on error; they never reformat source automatically.
+Docker may reuse successful check layers when their inputs are unchanged. Build
+tools and test artifacts remain in intermediate stages, not the runtime image.
+No separate tooling container needs to be started. This workflow still needs
+Docker validation after its introduction; it is not runtime compatibility evidence.
+
+There is no tooling Compose service or development Compose file. For occasional
+source formatting or intentional dependency maintenance, use the existing
+Dockerfile build stage directly. Match the container user to your host user:
+
+```sh
+docker build --target tooling -t dass-rust-tools .
+docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/workspace" dass-rust-tools cargo fmt --all
 ```
 
 Use the Docker-generated `Cargo.lock` included in the checkout. The runtime build
@@ -39,7 +53,7 @@ deliberately requires it and uses `--locked`; dependency changes must be intenti
 If bootstrapping a checkout without a lockfile, generate it once inside Docker:
 
 ```sh
-docker compose run --rm tooling cargo generate-lockfile
+docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/workspace" dass-rust-tools cargo generate-lockfile
 ```
 
 Review dependencies/licenses and commit the result, rather than regenerating it
@@ -60,28 +74,10 @@ both images. These Dockerfiles do not require BuildKit-only features. Container
 startup does not prove ongoing health or successful HTTP smoke checks; those are
 still pending. No host Rust tooling was used.
 
-The `tooling` service bind-mounts source and uses named volumes for Cargo's cache
-and build artifacts. It runs as the configured UID/GID. Run tooling commands
-sequentially: parallel Cargo/formatting jobs against the same source are unnecessary.
-
-Cargo caches and build artifacts now use UID-specific subdirectories in those
-volumes, so earlier root-run tooling does not require changing ownership of shared
-registry/build files. If you prefer a root shell for Docker, enter it explicitly
-and set Compose ownership variables **inside that shell**:
-
-```sh
-sudo su
-export LOCAL_UID="$(id -u)"
-export LOCAL_GID="$(id -g)"
-docker compose run --rm tooling cargo test --workspace --locked
-```
-
-In this example tooling also runs as root and uses the `uid-0` cache/target
-directories. Newly generated bind-mounted files may be root-owned. The runtime
-image still runs as UID 10001; root tooling does not change that. No Docker
-socket permissions or host groups need changing. Run the intentional dependency
-update in [control-plane.md](control-plane.md) first when its new manifest pins
-are not yet represented in `Cargo.lock`.
+The former tooling service and its cache-volume declarations have been removed.
+Existing Docker volumes are not deleted automatically. Normal checks run inside
+the image build without bind-mounting or rewriting source. The runtime image
+still runs as UID 10001. No Docker socket permissions or host groups are changed.
 
 The subsequent receive-only RTC spike introduces new manifest pins; its Docker
 lockfile update, formatting, Clippy and all 37 Rust tests passed in the user's

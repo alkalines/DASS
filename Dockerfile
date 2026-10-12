@@ -9,6 +9,10 @@ RUN mkdir -p /opt/cargo /workspace/target && chmod 1777 /opt/cargo /workspace/ta
 FROM tooling AS builder
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
+COPY tests/plugin/fixtures/scaffold-capabilities.json ./tests/plugin/fixtures/scaffold-capabilities.json
+RUN cargo fmt --all -- --check
+RUN cargo clippy --workspace --all-targets --locked -- -D warnings
+RUN cargo test --workspace --locked
 RUN cargo build --locked --release -p dass-backend
 
 FROM debian:bookworm-slim AS runtime

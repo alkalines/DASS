@@ -1,18 +1,17 @@
 use dass_backend::{
     app_with_signaling,
     auth::{
-        create_invite_with_display_name, create_user, InviteFile, InviteStore,
-        MAX_ACCOUNT_PASSWORD_BYTES, RoomGrant, UsersFile,
+        InviteFile, InviteStore, MAX_ACCOUNT_PASSWORD_BYTES, RoomGrant, UsersFile,
+        create_invite_with_display_name, create_user,
     },
     config::Config,
-    listener::{BoundedListener, tls_acceptor},
+    listener::{BoundedListener, PeerAddress, tls_acceptor},
     rtc::SpikeConfig,
     signaling::{SignalingState, now_seconds},
 };
 use std::{
     fs::File,
     io::{Read, Write},
-    net::SocketAddr,
     os::unix::fs::OpenOptionsExt,
     path::PathBuf,
     sync::Arc,
@@ -46,32 +45,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::from_env()?;
     let tls = config.tls.as_ref().map(tls_acceptor).transpose()?;
     let rtc_spike = SpikeConfig::from_env(tls.is_some())?;
-    let (sender, state, reload_task) =
-        match (config.invite_file.clone(), config.users_json.clone()) {
-            (Some(path), None) => {
-                let store = Arc::new(InviteStore::load(&path)?);
-                let (sender, receiver) = watch::channel(store);
-                let reload_task = tokio::spawn(reload_invites(path, sender.clone()));
-                (
-                    Some(sender),
-                    Some(SignalingState::new(receiver).with_rtc_spike(rtc_spike)),
-                    Some(reload_task),
-                )
-            }
-            (None, Some(users_json)) => {
-                let store = Arc::new(InviteStore::from_users_bytes(users_json.as_bytes())?);
-                let (sender, receiver) = watch::channel(store);
-                (
-                    Some(sender),
-                    Some(SignalingState::new(receiver).with_rtc_spike(rtc_spike)),
-                    None,
-                )
-            }
-            (None, None) => (None, None, None),
-            (Some(_), Some(_)) => {
-                return Err("configure only one of DASS_INVITE_FILE or DASS_USERS".into());
-            }
-        };
+    let (sender, state, reload_task) = match (config.invite_file.clone(), config.users_json.clone())
+    {
+        (Some(path), None) => {
+            let store = Arc::new(InviteStore::load(&path)?);
+            let (sender, receiver) = watch::channel(store);
+            let reload_task = tokio::spawn(reload_invites(path, sender.clone()));
+            (
+                Some(sender),
+                Some(SignalingState::new(receiver).with_rtc_spike(rtc_spike)),
+                Some(reload_task),
+            )
+        }
+        (None, Some(users_json)) => {
+            let store = Arc::new(InviteStore::from_users_bytes(users_json.as_bytes())?);
+            let (sender, receiver) = watch::channel(store);
+            (
+                Some(sender),
+                Some(SignalingState::new(receiver).with_rtc_spike(rtc_spike)),
+                None,
+            )
+        }
+        (None, None) => (None, None, None),
+        (Some(_), Some(_)) => {
+            return Err("configure only one of DASS_INVITE_FILE or DASS_USERS".into());
+        }
+    };
     let listener = BoundedListener::new(
         tokio::net::TcpListener::bind(config.listen_addr).await?,
         tls,
@@ -80,10 +79,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let abort_reload = reload_task.as_ref().map(|task| task.abort_handle());
     axum::serve(
         listener,
-        app_with_signaling(config, state).into_make_service_with_connect_info::<SocketAddr>(),
+        app_with_signaling(config, state).into_make_service_with_connect_info::<PeerAddress>(),
     )
-        .with_graceful_shutdown(shutdown_signal(sender, abort_reload))
-        .await?;
+    .with_graceful_shutdown(shutdown_signal(sender, abort_reload))
+    .await?;
     Ok(())
 }
 
