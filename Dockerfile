@@ -17,6 +17,7 @@ RUN cargo build --locked --release -p dass-backend
 
 FROM debian:bookworm-slim AS runtime
 RUN groupadd --gid 10001 dass && useradd --uid 10001 --gid dass --no-create-home dass
+RUN mkdir -p /var/lib/dass && chown 10001:10001 /var/lib/dass && chmod 700 /var/lib/dass
 COPY --from=builder /workspace/target/release/dass-backend /usr/local/bin/dass-backend
 USER 10001:10001
 EXPOSE 8080/tcp

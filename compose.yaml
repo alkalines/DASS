@@ -3,7 +3,9 @@ services:
     build:
       context: .
       target: runtime
-    # Compose >= 2.30: raw preserves Argon2 '$' characters in DASS_USERS.
+    # Compose >= 2.30: raw preserves Argon2 '$' in DASS_USERS/DASS_ADMIN_USERS.
+    # Optional panel auth: DASS_ADMIN_USERS=USER1:ARGON2HASH;USER2:ARGON2HASH
+    # Put this in the raw private env file below, NOT interpolated .env.
     # Optional so the default loopback discovery scaffold needs no secrets.
     env_file:
       - path: ./.secrets/backend.env
@@ -14,6 +16,7 @@ services:
       DASS_LISTEN_ADDR: "0.0.0.0:8080"
       DASS_MAX_CONCURRENT_REQUESTS: "128"
       DASS_MAX_CONTROL_MESSAGE_BYTES: "16384"
+      DASS_ADMIN_DATA_FILE: "/var/lib/dass/policy.json"
       DASS_RTC_SPIKE: "${DASS_RTC_SPIKE:-false}"
       DASS_RTC_BIND_IP: "0.0.0.0"
       DASS_RTC_ADVERTISED_IP: "${DASS_LAN_SERVER_IPV4:-127.0.0.1}"
@@ -29,6 +32,8 @@ services:
     volumes:
       # Only runtime TLS/invite files belong here, never password source files.
       - ./.secrets/runtime:/run/dass:ro
+      # Writable account policy only; the container root filesystem stays read-only.
+      - backend-data:/var/lib/dass
     read_only: true
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
@@ -36,3 +41,6 @@ services:
     mem_limit: 256m
     cpus: 1.0
     stop_grace_period: 10s
+
+volumes:
+  backend-data:

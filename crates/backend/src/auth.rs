@@ -6,6 +6,7 @@ use std::{
     collections::{HashMap, HashSet},
     fs::File,
     io::Read,
+    net::IpAddr,
     path::Path,
 };
 
@@ -58,6 +59,9 @@ pub struct User {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
     pub rooms: Vec<RoomGrant>,
+    /// Empty permits any observed TCP peer; otherwise only these exact IPs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_ips: Vec<IpAddr>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -74,6 +78,8 @@ pub struct InviteStore {
     // the legacy invitation credential verifier.
     invites: HashMap<String, Invite>,
     account_ids: HashSet<String>,
+    allowed_ips: HashMap<String, Vec<IpAddr>>,
+    blocked_rooms: HashSet<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -109,9 +115,64 @@ fn valid_room_grants(rooms: &[RoomGrant], allow_all_rooms: bool) -> bool {
     })
 }
 
-fn valid_account_password(password: &str) -> bool {
-    (MIN_ACCOUNT_PASSWORD_BYTES..=MAX_ACCOUNT_PASSWORD_BYTES).contains(&password.len())
-        && !password.chars().any(char::is_control)
+pub fn validate_account_password(password: &str) -> Result<(), &'static str> {
+    if !(MIN_ACCOUNT_PASSWORD_BYTES..=MAX_ACCOUNT_PASSWORD_BYTES).contains(&password.len()) {
+        return Err("Password must contain 12–512 UTF-8 bytes.");
+    }
+    if password.chars().any(char::is_control) {
+        return Err("Password must not contain control characters.");
+    }
+    Ok(())
+}
+
+pub fn validate_user_fields(
+    username: &str,
+    display_name: Option<&str>,
+    rooms: &[RoomGrant],
+    expires_at_unix_seconds: u32,
+    allowed_ips: &[IpAddr],
+) -> Result<(), &'static str> {
+    if !valid_identifier(username) {
+        return Err("Username must contain 1–64 ASCII letters, digits, underscores or hyphens.");
+    }
+    if expires_at_unix_seconds == 0 {
+        return Err("Expiration must be a nonzero Unix timestamp.");
+    }
+    if display_name.is_some_and(|name| !valid_display_name(name)) {
+        return Err(
+            "Display name must contain 1–128 UTF-8 bytes, non-whitespace text and no control characters.",
+        );
+    }
+    if rooms.len() > MAX_GRANTS {
+        return Err("Each user can have at most 16 room grants.");
+    }
+    let mut unique_rooms = HashSet::new();
+    for grant in rooms {
+        if !valid_identifier(&grant.room_id) && grant.room_id != ALL_ROOMS_GRANT {
+            return Err(
+                "Room ID must contain 1–64 ASCII letters, digits, underscores or hyphens, or be exactly *.",
+            );
+        }
+        if !unique_rooms.insert(&grant.room_id) {
+            return Err("Room grants must not contain duplicate room IDs.");
+        }
+        if !grant.access && (grant.publish || grant.subscribe) {
+            return Err("Publishing and watching require room access.");
+        }
+    }
+    if allowed_ips.len() > 16 {
+        return Err("Each user can have at most 16 allowed IPs.");
+    }
+    if allowed_ips
+        .iter()
+        .any(|ip| ip.is_unspecified() || ip.is_multicast())
+    {
+        return Err("Allowed IPs must not be unspecified or multicast addresses.");
+    }
+    if allowed_ips.iter().collect::<HashSet<_>>().len() != allowed_ips.len() {
+        return Err("Allowed IPs must not contain duplicates.");
+    }
+    Ok(())
 }
 
 fn hasher() -> Argon2<'static> {
@@ -122,7 +183,7 @@ fn hasher() -> Argon2<'static> {
     )
 }
 
-fn validated_hash(value: &str) -> Result<PasswordHash, &'static str> {
+pub(crate) fn validated_hash(value: &str) -> Result<PasswordHash, &'static str> {
     // Verify cost parameters BEFORE invoking the verifier (it uses stored parameters).
     if value.len() > 256 {
         return Err("invalid invite hash");
@@ -179,6 +240,7 @@ impl InviteStore {
         Ok(Self {
             invites,
             account_ids: HashSet::new(),
+            ..Self::default()
         })
     }
 
@@ -193,6 +255,7 @@ impl InviteStore {
         }
         let mut invites = HashMap::new();
         let mut account_ids = HashSet::new();
+        let mut allowed_ips = HashMap::new();
         for user in file.users {
             if !valid_identifier(&user.username)
                 || user.expires_at_unix_seconds == 0
@@ -201,11 +264,18 @@ impl InviteStore {
                     .as_deref()
                     .is_some_and(|name| !valid_display_name(name))
                 || !valid_room_grants(&user.rooms, true)
+                || user.allowed_ips.len() > 16
+                || user
+                    .allowed_ips
+                    .iter()
+                    .any(|ip| ip.is_unspecified() || ip.is_multicast())
+                || user.allowed_ips.iter().collect::<HashSet<_>>().len() != user.allowed_ips.len()
             {
                 return Err("invalid DASS_USERS record");
             }
             validated_hash(&user.password_hash)?;
             let username = user.username;
+            allowed_ips.insert(username.clone(), user.allowed_ips);
             if !account_ids.insert(username.clone()) {
                 return Err("duplicate DASS username");
             }
@@ -224,6 +294,8 @@ impl InviteStore {
         Ok(Self {
             invites,
             account_ids,
+            allowed_ips,
+            blocked_rooms: HashSet::new(),
         })
     }
 
@@ -285,6 +357,17 @@ impl InviteStore {
             .filter(|invite| !invite.revoked && now_seconds < invite.expires_at_unix_seconds)
     }
 
+    pub fn permits_ip(&self, identity: &str, observed_ip: Option<IpAddr>) -> bool {
+        self.allowed_ips
+            .get(identity)
+            .is_none_or(|ips| ips.is_empty() || observed_ip.is_some_and(|ip| ips.contains(&ip)))
+    }
+
+    pub fn with_blocked_rooms(mut self, rooms: HashSet<String>) -> Self {
+        self.blocked_rooms = rooms;
+        self
+    }
+
     pub fn authorize(
         &self,
         invite_id: &str,
@@ -292,7 +375,7 @@ impl InviteStore {
         permission: Permission,
         now_seconds: u32,
     ) -> bool {
-        if !valid_identifier(room_id) {
+        if !valid_identifier(room_id) || self.blocked_rooms.contains(room_id) {
             return false;
         }
         self.current(invite_id, now_seconds).is_some_and(|invite| {
@@ -379,16 +462,14 @@ pub fn create_user(
     rooms: Vec<RoomGrant>,
     expires_at_unix_seconds: u32,
 ) -> Result<User, &'static str> {
-    if !valid_identifier(&username)
-        || !valid_account_password(password)
-        || expires_at_unix_seconds == 0
-        || display_name
-            .as_deref()
-            .is_some_and(|name| !valid_display_name(name))
-        || !valid_room_grants(&rooms, true)
-    {
-        return Err("invalid DASS user record");
-    }
+    validate_account_password(password)?;
+    validate_user_fields(
+        &username,
+        display_name.as_deref(),
+        &rooms,
+        expires_at_unix_seconds,
+        &[],
+    )?;
     let mut salt = [0u8; 16];
     getrandom::fill(&mut salt).map_err(|_| "random source unavailable")?;
     let password_hash = hasher()
@@ -402,6 +483,7 @@ pub fn create_user(
         revoked: false,
         display_name,
         rooms,
+        allowed_ips: vec![],
     };
     let bytes = serde_json::to_vec(&UsersFile {
         version: 1,
@@ -415,6 +497,51 @@ pub fn create_user(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn account_ip_restrictions_and_blocked_rooms_fail_closed() {
+        let (_, mut user) = sample_user_store();
+        user.allowed_ips = vec!["192.168.1.20".parse().unwrap(), "::1".parse().unwrap()];
+        let bytes = serde_json::to_vec(&UsersFile {
+            version: 1,
+            users: vec![user.clone()],
+        })
+        .unwrap();
+        let store = InviteStore::from_users_bytes(&bytes).unwrap();
+        assert!(store.permits_ip("alice", Some("192.168.1.20".parse().unwrap())));
+        assert!(store.permits_ip("alice", Some("::1".parse().unwrap())));
+        assert!(!store.permits_ip("alice", Some("192.168.1.21".parse().unwrap())));
+        assert!(!store.permits_ip("alice", None));
+        assert!(store.authorize("alice", "room_1", Permission::Subscribe, 99));
+        let blocked = store.with_blocked_rooms(HashSet::from(["room_1".into()]));
+        assert!(!blocked.authorize("alice", "room_1", Permission::Subscribe, 99));
+        for ips in [
+            vec!["0.0.0.0"],
+            vec!["224.0.0.1"],
+            vec!["::"],
+            vec!["::1", "::1"],
+            vec!["127.0.0.1"; 17],
+        ] {
+            user.allowed_ips = ips.into_iter().map(|ip| ip.parse().unwrap()).collect();
+            let bytes = serde_json::to_vec(&UsersFile {
+                version: 1,
+                users: vec![user.clone()],
+            })
+            .unwrap();
+            assert!(InviteStore::from_users_bytes(&bytes).is_err());
+        }
+        user.allowed_ips.clear();
+        let bytes = serde_json::to_vec(&UsersFile {
+            version: 1,
+            users: vec![user],
+        })
+        .unwrap();
+        assert!(
+            InviteStore::from_users_bytes(&bytes)
+                .unwrap()
+                .permits_ip("alice", None)
+        );
+    }
 
     fn sample() -> (InviteStore, String, Invite) {
         let (invite, credential) = create_invite(
@@ -431,6 +558,7 @@ mod tests {
         let store = InviteStore {
             invites: HashMap::from([(invite.invite_id.clone(), invite.clone())]),
             account_ids: HashSet::new(),
+            ..InviteStore::default()
         };
         (store, credential, invite)
     }

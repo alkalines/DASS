@@ -44,6 +44,11 @@ restart capture or reconnect a failed stream without a user action.
 
 ## Account environment format
 
+For browser account management, see the optional [control panel](control-panel.md).
+Its persistent Docker-volume policy takes precedence over the environment seed
+after initialization. The file-edit/recreate instructions below describe the
+original environment-only mode, with no existing panel policy file.
+
 **Edit `.secrets/accounts/users.json` to manage users.** Generate each password
 hash with `create-user` below; never put plaintext passwords in this JSON.
 After editing, regenerate `.secrets/backend.env` and recreate the backend as
@@ -79,6 +84,9 @@ shown below. Both files are private and ignored by Git.
 - Account display names are optional, at most 128 UTF-8 bytes, and cannot contain
   control characters. Unnamed accounts display their username. These labels do
   not verify a Discord identity.
+- Accounts may include `allowed_ips`, an array of at most 16 distinct exact IPs.
+  Empty/omitted means no additional login IP restriction. A nonempty list is checked
+  against the observed TCP peer, never proxy headers; see the panel guide for limits.
 - Configure **either** `DASS_USERS` **or** `DASS_INVITE_FILE`, not both. Legacy
   invite authentication remains supported separately; an account cannot use the
   invite-login path, nor can an invite use account login.
@@ -220,6 +228,39 @@ changes, regenerate `.secrets/backend.env` above and run
 `docker compose up -d --force-recreate backend`; no image rebuild is needed for
 account-only changes. Keep `.env` for network/mode settings and
 `.secrets/backend.env` for TLS paths and `DASS_USERS`.
+
+### Recover HTTPS after a configuration change
+
+Compose reads network/mode settings from the shell or root `.env`, **not** from
+`.secrets/backend.env` for interpolation. In particular, putting
+`DASS_INSECURE_LOCAL_DEV=false` only in the private file does not override
+Compose's default `true`. Keep `DASS_INSECURE_LOCAL_DEV=false` in `.env` for HTTPS;
+keep `DASS_LAN_SERVER_IPV4` and the other network/media settings there too.
+
+Ensure `.secrets/backend.env` still contains both TLS paths:
+
+```dotenv
+DASS_TLS_CERT_FILE=/run/dass/cert.pem
+DASS_TLS_KEY_FILE=/run/dass/key.pem
+```
+
+Both files must exist in `.secrets/runtime` and be readable by UID 10001. The
+old `.secrets/lan-test` directory is no longer mounted. Preserve your existing
+certificate/key and account/admin entries; do not regenerate certificates or
+overwrite the private environment file as a routine repair. Check certificate
+expiry and that its SAN matches the hostname/IP in the client's HTTPS URL.
+
+From the repository root, after correcting the files:
+
+```sh
+docker compose config --quiet
+docker compose up -d --force-recreate backend
+curl --cacert .secrets/runtime/cert.pem https://YOUR_TLS_SERVER:8080/health/live
+```
+
+Expect HTTP 204 from liveness. Do not use `curl -k` or enable insecure mode to
+work around certificate failures. Shell-exported settings take precedence over
+`.env`; remove stale overrides if Compose still selects the wrong mode.
 
 This is an explicit user startup command, not a service deployed by the agent.
 It retains the non-root, read-only, capability-free, bounded backend container.

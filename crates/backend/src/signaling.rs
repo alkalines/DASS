@@ -80,6 +80,33 @@ impl RateWindow {
 }
 
 impl SignalingState {
+    /// Administrative metadata only; never exposes SDP, credentials or candidates.
+    pub fn admin_snapshot(&self) -> Result<serde_json::Value, &'static str> {
+        let rooms = self.rooms.lock().map_err(|_| "room state unavailable")?;
+        let publishers = self
+            .publishers
+            .lock()
+            .map_err(|_| "stream state unavailable")?;
+        let mut room_list: Vec<_> = rooms
+            .iter()
+            .map(|(room_id, members)| serde_json::json!({"room_id": room_id, "members": members}))
+            .collect();
+        room_list.sort_by_key(|room| room["room_id"].as_str().unwrap_or_default().to_owned());
+        let mut streams: Vec<_> = publishers
+            .iter()
+            .map(|(publisher_id, entry)| {
+                serde_json::json!({"publisher_id": publisher_id, "room_id": entry.room_id, "username": entry.invite_id})
+            })
+            .collect();
+        streams.sort_by_key(|stream| {
+            stream["publisher_id"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned()
+        });
+        Ok(serde_json::json!({"rooms": room_list, "streams": streams, "watch_available": false}))
+    }
+
     pub fn new(invites: watch::Receiver<Arc<InviteStore>>) -> Self {
         Self {
             invites,
@@ -306,13 +333,11 @@ async fn upgrade(
     }
     // Only the accepted TCP socket's peer address is authoritative here. Do
     // not consult forwarding headers or any address claimed by the client.
-    let observed_peer_ip =
-        connect_info.and_then(
-            |Extension(ConnectInfo(PeerAddress(address)))| match address.ip() {
-                IpAddr::V4(ip) => Some(ip),
-                IpAddr::V6(_) => None,
-            },
-        );
+    let observed_ip = connect_info.map(|Extension(ConnectInfo(PeerAddress(address)))| address.ip());
+    let observed_peer_ip = observed_ip.and_then(|ip| match ip {
+        IpAddr::V4(ip) => Some(ip),
+        IpAddr::V6(_) => None,
+    });
     if state
         .rtc_spike
         .as_ref()
@@ -334,7 +359,7 @@ async fn upgrade(
         .max_write_buffer_size(maximum * 2)
         .max_message_size(maximum)
         .max_frame_size(maximum)
-        .on_upgrade(move |socket| run(socket, state, connection, unauthenticated, observed_peer_ip))
+        .on_upgrade(move |socket| run(socket, state, connection, unauthenticated, observed_ip))
 }
 
 pub fn now_seconds() -> Result<u32, &'static str> {
@@ -396,6 +421,7 @@ async fn login(
     socket: &mut WebSocket,
     state: &mut SignalingState,
     failure_request_id: &mut String,
+    observed_ip: Option<IpAddr>,
 ) -> Result<(String, InviteLease, u32), ErrorCode> {
     let Some(Ok(Message::Text(text))) = socket.recv().await else {
         return Err(ErrorCode::InvalidMessage);
@@ -414,6 +440,11 @@ async fn login(
         },
         _ => return Err(ErrorCode::Unauthorized),
     };
+    if let LoginInput::Account { username, .. } = &login_input
+        && !state.invites.borrow().permits_ip(username, observed_ip)
+    {
+        return Err(ErrorCode::Unauthorized);
+    }
     if !state
         .login_rate
         .lock()
@@ -454,6 +485,9 @@ async fn login(
         )
         .ok_or(ErrorCode::Unauthorized)?
         .expires_at_unix_seconds;
+    if !current_policy.permits_ip(&invite_id, observed_ip) {
+        return Err(ErrorCode::Unauthorized);
+    }
     let lease = state.claim_invite(invite_id)?;
     Ok((message.request_id, lease, expires))
 }
@@ -474,12 +508,21 @@ async fn run(
     mut state: SignalingState,
     _connection: OwnedSemaphorePermit,
     unauthenticated: OwnedSemaphorePermit,
-    observed_peer_ip: Option<Ipv4Addr>,
+    observed_ip: Option<IpAddr>,
 ) {
+    let observed_peer_ip = observed_ip.and_then(|ip| match ip {
+        IpAddr::V4(ip) => Some(ip),
+        IpAddr::V6(_) => None,
+    });
     let mut failure_request_id = "login_rejected".to_owned();
     let result = tokio::time::timeout(
         Duration::from_millis(LOGIN_DEADLINE_MS as u64),
-        login(&mut socket, &mut state, &mut failure_request_id),
+        login(
+            &mut socket,
+            &mut state,
+            &mut failure_request_id,
+            observed_ip,
+        ),
     )
     .await;
     let (request_id, identity, expires) = match result {
@@ -1521,6 +1564,53 @@ mod network_tests {
 
     async fn start(expires: u32) -> Server {
         start_with_spike(expires, None).await
+    }
+
+    #[tokio::test]
+    async fn account_allowed_ips_use_tcp_peer_not_spoofed_forwarding_header() {
+        use crate::auth::{UsersFile, create_user};
+
+        let expires = now_seconds().unwrap() + 60;
+        let server = start(expires).await;
+        let mut user = create_user(
+            "alice".into(),
+            "a long user password",
+            None,
+            vec![],
+            expires,
+        )
+        .unwrap();
+        // connect() sends X-Forwarded-For: 192.168.1.77; that is not the TCP IP.
+        user.allowed_ips = vec!["192.168.1.77".parse().unwrap()];
+        let bytes = serde_json::to_vec(&UsersFile {
+            version: 1,
+            users: vec![user.clone()],
+        })
+        .unwrap();
+        server
+            .invites
+            .send_replace(Arc::new(InviteStore::from_users_bytes(&bytes).unwrap()));
+        let mut client = connect(&server, "https://discord.com", "").await.unwrap();
+        let login = serde_json::json!({
+            "type": "account_login", "username": "alice", "password": "a long user password"
+        });
+        let denied = request(&mut client, "denied_ip", login.clone()).await;
+        assert_eq!(denied["operation"]["type"], "rejected");
+        assert_eq!(denied["operation"]["code"], "unauthorized");
+        drop(client);
+
+        user.allowed_ips = vec!["127.0.0.1".parse().unwrap()];
+        let bytes = serde_json::to_vec(&UsersFile {
+            version: 1,
+            users: vec![user],
+        })
+        .unwrap();
+        server
+            .invites
+            .send_replace(Arc::new(InviteStore::from_users_bytes(&bytes).unwrap()));
+        let mut client = connect(&server, "https://discord.com", "").await.unwrap();
+        let allowed = request(&mut client, "allowed_ip", login).await;
+        assert_eq!(allowed["operation"]["type"], "authenticated");
     }
 
     async fn start_with_spike(expires: u32, spike: Option<SpikeConfig>) -> Server {

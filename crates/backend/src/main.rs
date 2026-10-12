@@ -1,5 +1,6 @@
 use dass_backend::{
-    app_with_signaling,
+    admin::{AdminDocument, AdminState, parse_credentials},
+    app_with_control_panel,
     auth::{
         InviteFile, InviteStore, MAX_ACCOUNT_PASSWORD_BYTES, RoomGrant, UsersFile,
         create_invite_with_display_name, create_user,
@@ -38,13 +39,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let result = match arguments.first().map(String::as_str) {
             Some("create-invite") => create_invite_files(&arguments),
             Some("create-user") => create_user_file(&arguments),
-            _ => Err("usage: dass-backend create-invite ... | create-user ..."),
+            Some("create-admin") => create_admin_file(&arguments),
+            _ => Err("usage: dass-backend create-invite ... | create-user ... | create-admin ..."),
         };
         return result.map_err(Into::into);
     }
     let config = Config::from_env()?;
     let tls = config.tls.as_ref().map(tls_acceptor).transpose()?;
     let rtc_spike = SpikeConfig::from_env(tls.is_some())?;
+    let admin_credentials = match std::env::var("DASS_ADMIN_USERS") {
+        Ok(value) if value.is_empty() => None,
+        Ok(value) => Some(parse_credentials(&value)?),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(_) => return Err("DASS_ADMIN_USERS must be UTF-8".into()),
+    };
+    if admin_credentials.is_some() && config.users_json.is_none() {
+        return Err("the control panel requires DASS_USERS account mode, not invite mode".into());
+    }
+    let admin_path = PathBuf::from(
+        std::env::var("DASS_ADMIN_DATA_FILE")
+            .unwrap_or_else(|_| "/var/lib/dass/policy.json".into()),
+    );
+    let mut admin_document = None;
     let (sender, state, reload_task) = match (config.invite_file.clone(), config.users_json.clone())
     {
         (Some(path), None) => {
@@ -58,7 +74,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             )
         }
         (None, Some(users_json)) => {
-            let store = Arc::new(InviteStore::from_users_bytes(users_json.as_bytes())?);
+            // Removing admin login must not resurrect the old environment seed.
+            let store = if admin_credentials.is_some() || admin_path.try_exists()? {
+                let document = AdminDocument::load_or_seed(&admin_path, &users_json)?;
+                let store = Arc::new(document.store()?);
+                admin_document = Some(document);
+                store
+            } else {
+                Arc::new(InviteStore::from_users_bytes(users_json.as_bytes())?)
+            };
             let (sender, receiver) = watch::channel(store);
             (
                 Some(sender),
@@ -71,6 +95,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             return Err("configure only one of DASS_INVITE_FILE or DASS_USERS".into());
         }
     };
+    let panel = match (admin_credentials, admin_document) {
+        (Some(credentials), Some(document)) => Some(AdminState::new(
+            credentials,
+            document,
+            admin_path,
+            sender.clone().ok_or("panel account policy unavailable")?,
+            state.clone().ok_or("panel signaling unavailable")?,
+        )),
+        _ => None,
+    };
     let listener = BoundedListener::new(
         tokio::net::TcpListener::bind(config.listen_addr).await?,
         tls,
@@ -79,7 +113,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let abort_reload = reload_task.as_ref().map(|task| task.abort_handle());
     axum::serve(
         listener,
-        app_with_signaling(config, state).into_make_service_with_connect_info::<PeerAddress>(),
+        app_with_control_panel(config, state, panel)
+            .into_make_service_with_connect_info::<PeerAddress>(),
     )
     .with_graceful_shutdown(shutdown_signal(sender, abort_reload))
     .await?;
@@ -261,4 +296,25 @@ fn read_account_password(path: &str) -> Result<String, &'static str> {
         return Err("password file does not meet the account password policy");
     }
     Ok(password)
+}
+
+fn create_admin_file(arguments: &[String]) -> Result<(), &'static str> {
+    if arguments.len() != 4 {
+        return Err("usage: dass-backend create-admin RECORD_FILE PASSWORD_FILE USERNAME");
+    }
+    let password = read_account_password(&arguments[2])?;
+    let user = create_user(arguments[3].clone(), &password, None, vec![], u32::MAX)?;
+    // Administrator hashes are separate from account authorization; no room grants.
+    let pair = format!("{}:{}", user.username, user.password_hash);
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&arguments[1])
+        .map_err(|_| "cannot create administrator record file")?;
+    file.write_all(pair.as_bytes())
+        .and_then(|_| file.sync_all())
+        .map_err(|_| "cannot write administrator record file")?;
+    tracing::info!("DASS administrator hash record created; password was not written to output");
+    Ok(())
 }

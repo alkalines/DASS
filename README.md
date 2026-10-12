@@ -8,6 +8,7 @@ Early-stage project for an Equicord plugin and self-hosted Rust screensharing ba
 - [Build and install the plugin in Equicord or Equibop](docs/plugin.md)
 - [Session setup and Share-button DASS workflow](docs/session-workflow.md)
 - [LAN accounts and automatic client UDP admission](docs/lan-accounts.md)
+- [Optional Users / Rooms / Streams control panel](docs/control-panel.md)
 - [Experimental authenticated directory and DASS viewer](docs/watching.md)
 
 The proposed architecture uses Equibop's existing capture pipeline and a Rust
@@ -41,6 +42,9 @@ to `.env` and set your server IP. **Users are configured in
 then loaded through the private `.secrets/backend.env` file. See the exact
 [account setup commands](docs/lan-accounts.md#generate-the-hash-without-exposing-the-password).
 No `.env` or secrets means loopback-only discovery, not a working media server.
+The optional [control panel](docs/control-panel.md) uses separate HTTP Basic admin
+credentials and persists user/room edits in a Docker volume. With it enabled,
+environment users are only the initial seed; the persisted policy takes precedence.
 
 To build Equicord with DASS, run `bun scripts/build-plugin.mjs` from this repository
 root (Bun 1.4.2, Node >=22 and Git required). In Equibop's Developer Options, select

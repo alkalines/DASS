@@ -1,3 +1,4 @@
+pub mod admin;
 pub mod auth;
 pub mod config;
 pub mod forwarding;
@@ -26,6 +27,14 @@ pub fn app(config: Config) -> Router {
 }
 
 pub fn app_with_signaling(config: Config, signaling: Option<signaling::SignalingState>) -> Router {
+    app_with_control_panel(config, signaling, None)
+}
+
+pub fn app_with_control_panel(
+    config: Config,
+    signaling: Option<signaling::SignalingState>,
+    panel: Option<admin::AdminState>,
+) -> Router {
     let request_limits = RequestLimits {
         semaphore: Arc::new(Semaphore::new(config.limits.max_concurrent_requests)),
         max_body_bytes: config.limits.max_control_message_bytes,
@@ -44,6 +53,10 @@ pub fn app_with_signaling(config: Config, signaling: Option<signaling::Signaling
         .with_state(discovery);
     let router = match signaling {
         Some(state) => router.merge(signaling::router(state, maximum_message_bytes)),
+        None => router,
+    };
+    let router = match panel {
+        Some(state) => router.merge(admin::router(state)),
         None => router,
     };
     router
