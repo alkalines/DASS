@@ -1,0 +1,81 @@
+/*
+ * Vencord, a Discord client mod
+ * Copyright (c) 2026 Vendicated and contributors
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ */
+
+import { Button } from "@components/Button";
+import { ContextMenuApi, useState } from "@webpack/common";
+
+import { StreamSidebarCard, StreamTileSurface } from "../../plugins/dass/streamUi";
+
+declare const __DASS_UI_CSS__: string;
+declare const Vencord: {
+    Webpack: { findByProps(...props: string[]): { createRoot(element: Element): { render(node: unknown): void; unmount(): void; }; }; };
+};
+
+declare global {
+    interface Window {
+        dassUiPreview?: { remove(): void; };
+    }
+}
+
+window.dassUiPreview?.remove();
+const mount = document.createElement("div");
+mount.className = "vc-dass-ui-preview";
+mount.setAttribute("role", "region");
+mount.setAttribute("aria-label", "DASS visual preview");
+const style = document.createElement("style");
+style.textContent = __DASS_UI_CSS__;
+document.body.append(style, mount);
+const root = Vencord.Webpack.findByProps("createRoot").createRoot(mount);
+let removed = false;
+function remove() {
+    if (removed) return;
+    removed = true;
+    ContextMenuApi.closeContextMenu();
+    root.unmount();
+    mount.remove();
+    style.remove();
+    delete window.dassUiPreview;
+}
+window.dassUiPreview = { remove };
+
+function Preview() {
+    const [local, setLocal] = useState(true);
+    const [focused, setFocused] = useState(false);
+    const [showPreview, setShowPreview] = useState(true);
+    const [pauseWhenUnfocused, setPauseWhenUnfocused] = useState(true);
+    const [premiumQuality, setPremiumQuality] = useState(true);
+    const [status, setStatus] = useState("Visual mock only. Your active share is untouched.");
+    const mockAction = (action: string) => () => setStatus(`${action} clicked. Preview only, no media action.`);
+    return <>
+        <header className="vc-dass-ui-preview-header">
+            <strong>DASS UI preview</strong>
+            <Button variant="none" size="xs" aria-label="Close DASS preview" onClick={remove}>Close</Button>
+        </header>
+        <div className="vc-dass-ui-preview-body">
+            <div className="vc-dass-ui-preview-toolbar">
+                <Button variant="secondary" size="xs" onClick={() => setLocal(!local)}>{local ? "Show viewer" : "Show publisher"}</Button>
+                <Button variant="secondary" size="xs" onClick={() => setFocused(!focused)}>{focused ? "Grid tile" : "Focused tile"}</Button>
+                <Button variant="secondary" size="xs" onClick={() => setPremiumQuality(!premiumQuality)}>{premiumQuality ? "Standard quality" : "Nitro styling"}</Button>
+            </div>
+            <StreamTileSurface title="MegArthur" local={local} focused={focused}
+                quality={{ resolution: premiumQuality ? "1080p" : "720p", framesPerSecond: 30, premium: premiumQuality }}
+                className={focused ? "vc-dass-ui-preview-focused" : undefined}
+                stop={mockAction(local ? "Stop Streaming" : "Stop Watching")}
+                changeSource={mockAction("Change Stream")} popout={mockAction("Pop Out Stream")}
+                onFocusStream={() => setFocused(!focused)}
+                previewOptions={{ showPreview, pauseWhenUnfocused, setShowPreview, setPauseWhenUnfocused: value => {
+                    setPauseWhenUnfocused(value);
+                    setStatus(`Pause when unfocused: ${value ? "on" : "off"}. Preview preference only, no media action.`);
+                } }}>
+                <div className="vc-dass-ui-preview-placeholder"><span>Screen preview</span><small>No capture requested</small></div>
+            </StreamTileSurface>
+            <StreamSidebarCard qualityLabel={premiumQuality ? "1080p 30FPS" : "720p 30FPS"} premiumQuality={premiumQuality} stop={mockAction("Stop Streaming")} />
+            <p className="vc-dass-ui-preview-status" role="status">{status}</p>
+        </div>
+    </>;
+}
+
+root.render(<Preview />);

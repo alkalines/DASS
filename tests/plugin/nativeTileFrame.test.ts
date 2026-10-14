@@ -7,7 +7,7 @@
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 
-import { NATIVE_LIVE_BADGE_SOURCE_SIGNATURE, NATIVE_TILE_FRAME_SOURCE_SIGNATURE } from "../../plugins/dass/discordAdapter";
+import { NATIVE_TILE_FRAME_SOURCE_SIGNATURE } from "../../plugins/dass/discordAdapter";
 
 const OBSERVED_FRAME = 'function l(e){let{children:t,className:n,style:r,noBorder:l=!1,participantUserId:o,ref:d}=e;return(0,i.jsx)("div",{className:a()(n,s.V,{[s.E]:l}),style:r,ref:d,"data-selenium-video-tile":o,"data-call-tile":"",children:t})}';
 const OBSERVED_BADGE = 'function A(e){let{className:t,style:n,shape:i=o.EG.ROUND,look:a="RED",size:u=_.LARGE,count:A}=e,h=null!=A&&A>1?d.intl.format(d.t.hOnBrr,{count:A}):d.intl.string(d.t.dI3q4h);return"RED"===a?(0,r.jsx)(o.Lp,{text:h,className:s()(t,c.VD,u),color:l.A.colors.BADGE_NOTIFICATION_BACKGROUND.css,shape:E[i],style:n}):(0,r.jsx)(o.Lp,{text:h,className:s()(t,c.VD,u,c.Oh),disableColor:!0,shape:E[i],style:n})}';
@@ -17,11 +17,9 @@ interface FrameResult {
     props: Record<string, unknown>;
 }
 
-test("native presentation signatures match the supplied frame and badge, not media components", () => {
+test("native frame signature does not select a badge or media component", () => {
     expect(NATIVE_TILE_FRAME_SOURCE_SIGNATURE.every(token => OBSERVED_FRAME.includes(token))).toBe(true);
-    expect(NATIVE_LIVE_BADGE_SOURCE_SIGNATURE.every(token => OBSERVED_BADGE.includes(token))).toBe(true);
     expect(NATIVE_TILE_FRAME_SOURCE_SIGNATURE.every(token => OBSERVED_BADGE.includes(token))).toBe(false);
-    expect(NATIVE_LIVE_BADGE_SOURCE_SIGNATURE.every(token => OBSERVED_FRAME.includes(token))).toBe(false);
 });
 
 test("the actual frame renders native border classes and borrowed children without a Discord identity", () => {
@@ -53,5 +51,7 @@ test("DASS tile uses the native frame without Card styling, native media IDs or 
     expect(source).not.toContain("participantUserId=");
     expect(source).not.toContain("streamKey=");
     expect(source).toContain('role="group" aria-label={title}');
+    expect(source).toContain("<StreamLiveBadge quality={quality} />");
+    expect(source).toContain("<StreamOverlay title={title}");
     expect(css.match(/\.vc-dass-grid-tile \{[^}]+\}/)?.[0]).not.toContain("border-radius");
 });

@@ -15,11 +15,13 @@ import { Clickable, Slider, useEffect, useRef, useState } from "@webpack/common"
 import type { ComponentType, CSSProperties, MouseEvent, ReactNode } from "react";
 
 import { CallPresentation, type DassParticipant, participantTitle, projectParticipants, sliderPlaybackVolume } from "./callPresentation";
-import { NATIVE_LIVE_BADGE_SOURCE_SIGNATURE, NATIVE_TILE_FRAME_SOURCE_SIGNATURE } from "./discordAdapter";
+import { NATIVE_TILE_FRAME_SOURCE_SIGNATURE } from "./discordAdapter";
 import { gridShares } from "./gridPresentation";
 import type { PublishController } from "./publishing";
 import type { DassShare } from "./routing";
 import { usePublisherStatus } from "./shareButton";
+import { shouldPauseLocalPreview, streamTrackQuality } from "./streamPresentation";
+import { StreamLiveBadge, StreamOverlay, type StreamQuality } from "./streamUi";
 import { attachTilePlayback } from "./tilePlayback";
 import type { WatchController } from "./watching";
 
@@ -31,7 +33,6 @@ interface NativeTileFrameProps {
 }
 
 const TileFrame = findComponentByCodeLazy<NativeTileFrameProps>(...NATIVE_TILE_FRAME_SOURCE_SIGNATURE);
-const LiveBadge = findComponentByCodeLazy(...NATIVE_LIVE_BADGE_SOURCE_SIGNATURE);
 
 export const callPresentation = new CallPresentation();
 
@@ -40,6 +41,7 @@ export interface GridRuntime {
     directory: WatchController;
     watching: WatchController;
     currentCall(): string | undefined;
+    localDisplayName(): string | undefined;
     isActive(): boolean;
     watch(share: DassShare): void;
     stopWatching(): void;
@@ -91,53 +93,84 @@ export interface CallTileProps {
     onVideoResize?: (size: { width: number; height: number; }) => void;
 }
 
-function GridTile({ runtime, participant, width, className, focused, selected, paused, controlsBottom, onClick, onDoubleClick, onVideoResize,
+function GridTile({ runtime, participant, width, className, focused, paused, controlsBottom, onClick, onDoubleClick, onVideoResize,
     style, noBorder }: CallTileProps & { runtime: GridRuntime; }) {
     const tile = participant.dassShare;
     const { publisher, watching } = useGridState(runtime, tile.kind === "local" ? runtime.currentCall() ?? "" : tile.share.roomId);
     const [playbackMessage, setPlaybackMessage] = useState("");
+    const [quality, setQuality] = useState<StreamQuality>();
+    const [windowFocused, setWindowFocused] = useState(true);
     const video = useRef<HTMLVideoElement>(null);
+    const previewPreferences = callPresentation.getPreview();
+    const local = tile.kind === "local";
+    const previewPaused = local && shouldPauseLocalPreview(previewPreferences, windowFocused);
     const receiving = tile.kind === "remote" && watching.watchingShare?.roomId === tile.share.roomId
         && watching.watchingShare.shareId === tile.share.shareId;
     const stream = tile.kind === "local" ? runtime.publisher.getPreviewStream() : receiving ? watching.stream : undefined;
     useEffect(() => {
+        if (!local) return;
+        const ownerDocument = video.current?.ownerDocument;
+        const ownerWindow = ownerDocument?.defaultView;
+        if (!ownerDocument || !ownerWindow) return;
+        const updateFocus = () => setWindowFocused(ownerDocument.hasFocus() && ownerDocument.visibilityState !== "hidden");
+        updateFocus();
+        ownerWindow.addEventListener("focus", updateFocus);
+        ownerWindow.addEventListener("blur", updateFocus);
+        ownerDocument.addEventListener("visibilitychange", updateFocus);
+        return () => {
+            ownerWindow.removeEventListener("focus", updateFocus);
+            ownerWindow.removeEventListener("blur", updateFocus);
+            ownerDocument.removeEventListener("visibilitychange", updateFocus);
+        };
+    }, [local]);
+    useEffect(() => {
         const element = video.current;
         if (!element) return;
         setPlaybackMessage("");
-        return attachTilePlayback(element, paused ? undefined : stream, true, () => setPlaybackMessage("Playback was blocked."));
-    }, [stream, paused]);
+        return attachTilePlayback(element, paused || previewPaused ? undefined : stream, true, () => setPlaybackMessage("Playback was blocked."));
+    }, [stream, paused, previewPaused]);
+    useEffect(() => {
+        setQuality(streamTrackQuality(stream?.getVideoTracks()[0]?.getSettings()));
+    }, [stream]);
     useEffect(() => {
         const track = stream?.getVideoTracks()[0];
         const settings = track?.getSettings();
         if (settings?.width && settings.height) onVideoResize?.({ width: settings.width, height: settings.height });
     }, [stream, onVideoResize]);
-    const title = participantTitle(participant);
-    return <TileFrame className={classes(className, "vc-dass-grid-tile", focused && "vc-dass-grid-focused")}
+    const title = participantTitle(participant, runtime.localDisplayName());
+    return <TileFrame className={classes(className, "vc-dass-grid-tile", "vc-dass-stream-surface", focused && "vc-dass-grid-focused",
+        focused && "vc-dass-stream-surface-focused")}
         style={{ ...style, width: focused ? "100%" : width }} noBorder={noBorder}>
         <div className="vc-dass-grid-content" role="group" aria-label={title}>
             <Clickable className="vc-dass-grid-focus" aria-label={title} onClick={event => onClick?.(participant, event)}
                 onDoubleClick={event => onDoubleClick?.(participant, event)}>
-                <video ref={video} muted playsInline aria-label={title} onLoadedMetadata={event => {
+                <video ref={video} muted playsInline hidden={previewPaused} aria-label={title} onLoadedMetadata={event => {
                     const element = event.currentTarget;
+                    setQuality(streamTrackQuality({ ...stream?.getVideoTracks()[0]?.getSettings(), height: element.videoHeight }));
                     if (element.videoWidth && element.videoHeight) onVideoResize?.({ width: element.videoWidth, height: element.videoHeight });
                 }} />
             </Clickable>
-            <div className="vc-dass-grid-live"><LiveBadge /></div>
+            <div className="vc-dass-stream-indicators"><StreamLiveBadge quality={quality} /></div>
+            {previewPaused && <div className={classes("vc-dass-grid-placeholder", "vc-dass-grid-preview-status")}><Paragraph role="status">
+                {previewPreferences.showPreview ? "Your preview is paused while Discord is unfocused." : "Your screen share preview is hidden."}
+            </Paragraph></div>}
             {!stream && <div className="vc-dass-grid-placeholder">
                 <Paragraph role="status">{tile.kind === "local" ? publisher.message : receiving ? watching.message : "Screen share available."}</Paragraph>
                 {tile.kind === "remote" && !receiving && <Button disabled={watching.phase === "loading" || !!watching.stream}
                     onClick={event => { event.stopPropagation(); runtime.watch(tile.share); }}>Watch Stream</Button>}
             </div>}
-            {!selected && <div className="vc-dass-grid-controls" style={{ marginBottom: controlsBottom }}>
-                <span>{title}</span>
-                {tile.kind === "remote" && receiving && !focused && <CallAudioControl />}
-                {tile.kind === "local" ? <Button size="small" onClick={() => runtime.stopPublishing()}>Stop Streaming</Button>
-                    : receiving ? <Button size="small" onClick={() => runtime.stopWatching()}>Stop Watching</Button> : null}
-                {stream && playbackMessage && <Button onClick={() => {
-                    const element = video.current;
-                    if (element) void element.play().then(() => setPlaybackMessage(""), () => setPlaybackMessage("Playback was blocked."));
-                }}>Play</Button>}
-            </div>}
+            <StreamOverlay title={title} local={local} controlsBottom={controlsBottom == null ? undefined : controlsBottom + 12}
+                stop={local ? runtime.stopPublishing : receiving ? runtime.stopWatching : undefined}
+                previewOptions={local ? { ...previewPreferences,
+                    setShowPreview: showPreview => callPresentation.setPreview({ ...callPresentation.getPreview(), showPreview }),
+                    setPauseWhenUnfocused: pauseWhenUnfocused => callPresentation.setPreview({ ...callPresentation.getPreview(), pauseWhenUnfocused }) } : undefined}
+                audioControl={<>
+                    {tile.kind === "remote" && receiving && !focused && <CallAudioControl />}
+                    {stream && playbackMessage && !previewPaused && !paused && <Button size="small" onClick={() => {
+                        const element = video.current;
+                        if (element) void element.play().then(() => setPlaybackMessage(""), () => setPlaybackMessage("Playback was blocked."));
+                    }}>Play</Button>}
+                </>} />
         </div>
     </TileFrame>;
 }

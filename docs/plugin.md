@@ -19,11 +19,12 @@ The user reports local preview and LIVE presentation in the intended grid space.
 DASS-owned preview/watch tiles use the existing call grid, without a separate
 panel. The latest revision projects DASS-owned selection into the connected call
 view and reuses the focused layout and filmstrip, with guarded DASS tile rendering.
-The sidebar now reuses Discord's existing activity-panel frame, stream-card body,
-source icon, title, action button, Stop icon and localized tooltip above Voice
-Connected. It replaces only the local display metadata and DASS Stop callback,
-without registering a native Discord stream. The rejected custom card and its
-stylesheet are removed.
+The sidebar reuses Discord's existing activity-panel frame, action button, Stop
+icon and localized tooltip above Voice Connected. Its DASS branch now renders the
+approved DASS-owned source/title/quality body inside that frame, using actual
+capture settings and an isolated Stop callback. Ordinary Discord shares keep
+their original body. No native Discord stream is registered. The separate
+comparison-panel card is not mounted in the production sidebar.
 These changes and remote playback/audio are not yet runtime-verified. Remote
 voice-row badges remain unavailable. Streaming state begins after OS source selection
 and quality/audio consent complete, rather than during authentication or the
@@ -36,7 +37,12 @@ needed to trace those remaining private hooks. No backend changes are required
 by this client integration; latest publisher/viewer runtime acceptance is still
 outstanding.
 
-Tiles reuse Discord's actual frame and LIVE badge rather than the generic Card.
+Tiles reuse Discord's actual frame rather than the generic Card. Their LIVE badge,
+publisher name and Options overlay now use the approved DASS-owned components.
+The quality segment uses measured width and a sliding reveal instead of the
+earlier grid-track animation. Quality labels come from track settings; unavailable
+resolution/FPS is omitted instead of invented. DASS does not display a Nitro
+entitlement badge for real shares or require a Discord subscription.
 Their DASS video and watch content remain independent of Discord's media engine.
 All tile videos are muted, including filmstrip previews; the connected call owns
 separate audible playback of the receiver stream. Share mute/volume is independent
@@ -48,6 +54,22 @@ Browser video controls are removed. Call-level fullscreen/popout controls retain
 their native routes, but popout media/audio handoff still needs runtime testing;
 individual tile popouts and zoom are unavailable. Tile overlays use DASS-owned
 hover/focus styling rather than the complete native idle/overlay implementation.
+Stop Streaming and Stop Watching use the owning DASS controllers; Stop Watching
+is disabled for a tile that is not being received. Change Stream and individual
+popout remain disabled. Publisher More Options shares its Show My Screen Share
+and Pause Preview When Discord Isn’t Focused preferences across grid/focused
+tiles. These are session-only presentation preferences. They detach local preview
+playback without disabling/stopping capture tracks or interrupting publishing.
+Receiver video/audio and ordinary Discord voice are unaffected by those preferences.
+
+The adapter is gated to exact Discord builds **634304** and **637268**, not the
+intermediate build range. On October 14, 2026, all 46 replacements across 11 patch
+groups matched once in a read-only check of build 637268 (hash
+`a935e483c18dcf082c62ce19bc9e3560fce10581`). No live module factories were replaced
+by that check. Build success and source matching do not establish real media,
+preview-blur, popout or sidebar acceptance; testing the built plugin requires a
+full client restart and DASS enabled. See [stream-ui-preview.md](stream-ui-preview.md)
+for the separate safe visual comparison tool.
 
 ## Sharing diagnostics
 

@@ -51,7 +51,7 @@
     height: 100%;
 }
 
-.vc-dass-grid-focused {
+.vc-dass-grid-tile.vc-dass-grid-focused {
     height: 100%;
     aspect-ratio: auto;
 }
@@ -60,33 +60,6 @@
     width: 100%;
     height: 100%;
     object-fit: contain;
-}
-
-.vc-dass-grid-controls {
-    position: absolute;
-    z-index: 1;
-    left: 12px;
-    right: 12px;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 8px;
-    background: var(--background-primary);
-    border-radius: 4px;
-    padding: 4px 8px;
-}
-
-.vc-dass-grid-controls {
-    bottom: 8px;
-    opacity: 0;
-    pointer-events: none;
-    transition: opacity 150ms ease;
-}
-
-.vc-dass-grid-tile:hover .vc-dass-grid-controls,
-.vc-dass-grid-tile:focus-within .vc-dass-grid-controls {
-    opacity: 1;
-    pointer-events: auto;
 }
 
 .vc-dass-grid-placeholder {
@@ -104,10 +77,7 @@
     height: 100%;
 }
 
-.vc-dass-grid-live {
-    position: absolute;
-    top: 12px;
-    right: 12px;
+.vc-dass-grid-preview-status {
     pointer-events: none;
 }
 

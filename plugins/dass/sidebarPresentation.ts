@@ -5,12 +5,8 @@
  */
 
 export interface SidebarState {
-    metadata: { sourceName?: string; };
+    metadata: { sourceName?: string; qualityLabel?: string; };
     stop(): void;
-}
-
-export interface SidebarBodyProps {
-    streamMetadata: SidebarState["metadata"];
 }
 
 export function sidebarActionProps<T extends Record<string, unknown>>(nativeProps: T, state: SidebarState | undefined) {

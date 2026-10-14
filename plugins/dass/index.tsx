@@ -25,9 +25,11 @@ import type { DassShare } from "./routing";
 import { DassSession } from "./session";
 import { SettingsPanel } from "./settingsPanel";
 import { NativeShareButton, type ShareButtonProps, usePublisherStatus, usePublishingState } from "./shareButton";
-import { sidebarActionProps, type SidebarBodyProps, type SidebarState, stopSidebarStream } from "./sidebarPresentation";
+import { sidebarActionProps, type SidebarState, stopSidebarStream } from "./sidebarPresentation";
 import { SpikePeer } from "../../clients/spike/peer";
 import { stopSpikeTest } from "./spikeTest";
+import { streamQualityLabel, streamTrackQuality } from "./streamPresentation";
+import { StreamSidebarBody } from "./streamUi";
 import { WatchController } from "./watching";
 
 const currentCall = () => SelectedChannelStore.getVoiceChannelId();
@@ -68,13 +70,14 @@ async function watchGridShare(share: DassShare) {
 }
 
 const gridRuntime: GridRuntime = { publisher, directory, watching, currentCall, isActive: () => pluginActive,
+    localDisplayName: () => { const user = UserStore.getCurrentUser(); return user?.globalName ?? user?.username; },
     watch: share => { void watchGridShare(share); }, stopWatching: stopGridWatching, stopPublishing: () => publisher.reset() };
 
 function currentParticipants(channelId: string) {
     return projectParticipants(gridShares(channelId, currentCall(), pluginActive, !!publisher.getPreviewStream(), directory.getSnapshot(), watching.getSnapshot()));
 }
 
-let NativeSidebarBody: ComponentType<SidebarBodyProps> | undefined;
+const DassSidebarBody = ErrorBoundary.wrap(StreamSidebarBody, { message: "DASS stream card failed." });
 
 function stopMedia() {
     publisher.reset();
@@ -196,7 +199,9 @@ export default definePlugin({
     },
     gridTileKeyExtractor,
     isDassParticipant,
-    dassParticipantTitle: participantTitle,
+    dassParticipantTitle(participant: Parameters<typeof participantTitle>[0]) {
+        return participantTitle(participant, gridRuntime.localDisplayName());
+    },
     nativeParticipant(participant: unknown) {
         return isDassParticipant(participant) ? null : participant;
     },
@@ -224,15 +229,14 @@ export default definePlugin({
     useNativeSidebarProps<T extends Record<string, unknown>>(props: T) {
         const status = usePublisherStatus(publisher);
         const preview = publisher.getPreviewStream();
+        const track = preview?.getVideoTracks()[0];
         const dassSidebar: SidebarState | undefined = pluginActive && hasAcceptedPublishCapture(status.phase) && preview
-            ? { metadata: { sourceName: preview.getVideoTracks()[0]?.label || undefined }, stop: gridRuntime.stopPublishing } : undefined;
+            ? { metadata: { sourceName: track?.label || undefined, qualityLabel: streamQualityLabel(streamTrackQuality(track?.getSettings())) },
+                stop: gridRuntime.stopPublishing } : undefined;
         return { ...props, dassSidebar };
     },
-    setNativeSidebarBody(Body: ComponentType<SidebarBodyProps>) {
-        NativeSidebarBody = ErrorBoundary.wrap(Body, { message: "DASS native stream card failed." });
-    },
     renderNativeSidebarBody(metadata: SidebarState["metadata"]) {
-        return NativeSidebarBody ? <NativeSidebarBody streamMetadata={metadata} /> : <Paragraph>DASS native stream card unavailable.</Paragraph>;
+        return <DassSidebarBody {...metadata} />;
     },
     sidebarActionProps,
     stopSidebarStream,

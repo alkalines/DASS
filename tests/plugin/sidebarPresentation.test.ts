@@ -23,10 +23,11 @@ function patched(input = source) {
     return input;
 }
 
-test("native card patches preserve the original frame, source icon, title, stop button and localized tooltip", () => {
+test("native card patches preserve native branches, frame, stop button and localized tooltip", () => {
     const result = patched();
     expect(() => new Function("$self", result)).not.toThrow();
-    expect(result).toContain("$self.setNativeSidebarBody(nv);function nv");
+    expect(result).not.toContain("setNativeSidebarBody");
+    expect(result).toContain("dassSidebar?$self.renderNativeSidebarBody(dassSidebar.metadata):eg");
     expect(result).toContain("className:l()(nm.nd,i)");
     expect(result).toContain("className:nm.rf");
     expect(result).toContain("(0,r.jsx)(eQ.A,{title:s,icon:t?.sourceIcon})");
@@ -62,11 +63,10 @@ test("DASS stop never invokes native stream stop; ordinary native stop retains i
     expect(calls).toEqual(["dass", "native"]);
 });
 
-test("executed native sidebar keeps its renderer and mounts only its original body and stop action for DASS", () => {
+test("executed sidebar mounts the DASS body inside the native frame with an isolated stop action", () => {
     for (const active of [false, true]) {
         const calls: string[] = [];
-        let registeredBody: unknown;
-        const state: SidebarState = { metadata: { sourceName: "Screen" }, stop: () => calls.push("DASS stop") };
+        const state: SidebarState = { metadata: { sourceName: "Screen", qualityLabel: "1080p 30FPS" }, stop: () => calls.push("DASS stop") };
         const jsx = (component: unknown, props: Record<string, unknown>) => ({ component, props });
         const env = {
             a: { memo: (component: unknown) => component, useRef: () => null, useCallback: (fn: unknown) => fn },
@@ -81,9 +81,8 @@ test("executed native sidebar keeps its renderer and mounts only its original bo
             tG: "native-clips", nR: "native-popover", nativeBody: active ? null : "native-existing-body", nativeStream: { ownerId: "self" }, nativeStreaming: true
         };
         const adapter = {
-            setNativeSidebarBody: (body: unknown) => { registeredBody = body; },
             useNativeSidebarProps: (props: Record<string, unknown>) => ({ ...props, dassSidebar: active ? state : undefined }),
-            renderNativeSidebarBody: (metadata: unknown) => jsx(registeredBody, { streamMetadata: metadata }),
+            renderNativeSidebarBody: (metadata: unknown) => jsx("dass-body", { streamMetadata: metadata }),
             sidebarActionProps, stopSidebarStream
         };
         const render = new Function("env", "$self", `const {${Object.keys(env).join(",")}}=env;${patched()};return nb;`)(env, adapter);
@@ -93,15 +92,9 @@ test("executed native sidebar keeps its renderer and mounts only its original bo
         expect(inner.props.className).toBe("native-card-inner");
         const [body, actions, popover] = inner.props.children;
         if (active) {
-            expect(body.component).toBe(registeredBody);
+            expect(body.component).toBe("dass-body");
             expect(body.props.streamMetadata).toBe(state.metadata);
-            const renderedBody = body.component(body.props);
-            expect(renderedBody.props.className).toBe("native-body");
-            const [sourceIcon, titleArea] = renderedBody.props.children;
-            expect(sourceIcon.component).toBe("native-source-icon");
-            expect(sourceIcon.props.icon).toBeUndefined();
-            expect(titleArea.props.children[0].component).toBe("native-title");
-            expect(titleArea.props.children[0].props.children).toBe("Screen");
+            expect(body.props.streamMetadata.qualityLabel).toBe("1080p 30FPS");
             expect(popover).toBeNull();
         } else {
             expect(body).toBe("native-existing-body");

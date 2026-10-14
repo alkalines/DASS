@@ -5,6 +5,7 @@
  */
 
 import type { GridShare } from "./gridPresentation";
+import type { PreviewPreferences } from "./streamPresentation";
 
 export interface DassParticipant {
     id: string;
@@ -21,8 +22,8 @@ export function projectParticipants(shares: readonly GridShare[]): DassParticipa
     return shares.map(dassShare => ({ id: dassShare.key, type: "dass", dassShare }));
 }
 
-export function participantTitle(participant: DassParticipant) {
-    return participant.dassShare.kind === "local" ? "Your screen" : participant.dassShare.share.displayName ?? "Screen share";
+export function participantTitle(participant: DassParticipant, localDisplayName?: string) {
+    return participant.dassShare.kind === "local" ? localDisplayName || "Your screen" : participant.dassShare.share.displayName ?? "Screen share";
 }
 
 export function sliderPlaybackVolume(sliderPercent: number) {
@@ -34,6 +35,7 @@ export class CallPresentation {
     private selectedId: string | undefined;
     private readonly listeners = new Set<() => void>();
     private audio = { muted: false, sliderPercent: 100 };
+    private preview: PreviewPreferences = { showPreview: true, pauseWhenUnfocused: true };
 
     subscribe = (listener: () => void) => {
         this.listeners.add(listener);
@@ -68,6 +70,13 @@ export class CallPresentation {
 
     getAudio() { return this.audio; }
 
+    getPreview() { return this.preview; }
+
+    setPreview(preferences: PreviewPreferences) {
+        this.preview = { ...preferences };
+        this.emit();
+    }
+
     setAudio(muted: boolean, sliderPercent = this.audio.sliderPercent) {
         this.audio = { muted, sliderPercent: Math.max(0, Math.min(100, sliderPercent)) };
         this.emit();
@@ -76,6 +85,7 @@ export class CallPresentation {
     reset() {
         this.selectedId = this.channelId = undefined;
         this.audio = { muted: false, sliderPercent: 100 };
+        this.preview = { showPreview: true, pauseWhenUnfocused: true };
         this.emit();
     }
 

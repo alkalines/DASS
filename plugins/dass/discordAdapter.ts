@@ -10,9 +10,8 @@ const VOICE_PANEL_SHARE_START_MATCH = /(\i=\i\.useCallback\(\(\)=>\{)(\(0,\i\.A\
 const CALL_GRID_ROOT_MATCH = /(channel:(\i),hasConnectPermission:\i,className:\i,inCall:\i,showParticipants:\i=!0,width:\i,height:\i,idle:\i,mode:\i,popoutType:\i,awaitingRemoteSessionInfo:\i,callContainerDimensions:\i\}=\i;)(?=\i\.useEffect\(\(\)=>\{\i\._\.dispatch\(\i\.jej.REMEASURE_TARGET\))/;
 
 export const NATIVE_TILE_FRAME_SOURCE_SIGNATURE = ['"data-selenium-video-tile":', '"data-call-tile":""'] as const;
-export const NATIVE_LIVE_BADGE_SOURCE_SIGNATURE = ['"RED"===', ".BADGE_NOTIFICATION_BACKGROUND.css"] as const;
 
-export const DISCORD_SHARE_PATCHES = [{
+const SHARE_PATCHES = [{
     find: /renderNUXHighlight:\i,buttonRef:\i,onClick:null!=\i\?\i:\i(?=\}\))/,
     fromBuild: 634304,
     toBuild: 634304,
@@ -101,7 +100,7 @@ export const DISCORD_SHARE_PATCHES = [{
     }]
 }];
 
-export const DISCORD_PRESENTATION_PATCHES = [{
+const PRESENTATION_PATCHES = [{
     find: "handleFullscreenParticipant=",
     fromBuild: 634304,
     toBuild: 634304,
@@ -186,9 +185,6 @@ export const DISCORD_PRESENTATION_PATCHES = [{
     toBuild: 634304,
     group: true,
     replacement: [{
-        match: /(function (\i)\(\i\)\{let\{streamMetadata:\i,accountLinkUpsellTargetRef:\i,streamQualityIndicator:\i\}=\i)/,
-        replace: "$self.setNativeSidebarBody($2);$1"
-    }, {
         match: /let\{guildId:(\i),analyticsContext:(\i),className:(\i)\}=(\i)(?=,\i=\i\.useRef\(null\),\i=\i\.useRef\(null\),\i=\i\.useRef\(null\))/,
         replace: "let{guildId:$1,analyticsContext:$2,className:$3,dassSidebar}=$self.useNativeSidebarProps($4)"
     }, {
@@ -220,6 +216,12 @@ export const DISCORD_PRESENTATION_PATCHES = [{
         replace: "dassStop?null:$1"
     }]
 }];
+
+export const SUPPORTED_DISCORD_BUILDS = [634304, 637268] as const;
+export const DISCORD_SHARE_PATCHES = SUPPORTED_DISCORD_BUILDS.flatMap(build =>
+    SHARE_PATCHES.map(patch => ({ ...patch, fromBuild: build, toBuild: build })));
+export const DISCORD_PRESENTATION_PATCHES = SUPPORTED_DISCORD_BUILDS.flatMap(build =>
+    PRESENTATION_PATCHES.map(patch => ({ ...patch, fromBuild: build, toBuild: build })));
 
 export interface LocalLiveContext {
     pluginActive: boolean;

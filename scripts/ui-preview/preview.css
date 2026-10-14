@@ -1,0 +1,61 @@
+.vc-dass-ui-preview {
+    position: fixed;
+    z-index: 1000;
+    inset-inline-end: 24px;
+    bottom: 24px;
+    width: 402px;
+    max-width: calc(100vw - 32px);
+    max-height: calc(100vh - 32px);
+    overflow: auto;
+    border: 1px solid var(--border-normal);
+    border-radius: 12px;
+    background: var(--background-surface-high, var(--background-secondary));
+    color: var(--text-default, var(--text-normal));
+    box-shadow: 0 12px 24px rgb(0 0 0 / 24%);
+    font-family: var(--font-primary, "gg sans", "Noto Sans", sans-serif);
+}
+
+.vc-dass-ui-preview-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border-muted);
+    font-size: 14px;
+}
+
+.vc-dass-ui-preview-body {
+    padding: 12px;
+}
+
+.vc-dass-ui-preview-toolbar {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 12px;
+}
+
+.vc-dass-ui-preview-focused {
+    height: 300px;
+}
+
+.vc-dass-ui-preview-placeholder {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    height: 100%;
+    color: var(--text-muted);
+    font-size: 14px;
+}
+
+.vc-dass-ui-preview-placeholder small {
+    font-size: 12px;
+}
+
+.vc-dass-ui-preview-status {
+    margin: 12px 0 0;
+    color: var(--text-muted);
+    font-size: 12px;
+    line-height: 16px;
+}
