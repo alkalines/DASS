@@ -8,7 +8,7 @@ import { definePluginSettings } from "@api/Settings";
 import ErrorBoundary from "@components/ErrorBoundary";
 import { Paragraph } from "@components/Paragraph";
 import definePlugin, { OptionType } from "@utils/types";
-import { SelectedChannelStore, showToast, UserStore } from "@webpack/common";
+import { FluxDispatcher, SelectedChannelStore, showToast, UserStore } from "@webpack/common";
 import type { ComponentType } from "react";
 
 import { forgetRememberedAccount, readRememberedAccount, writeRememberedAccount } from "./accountStorage";
@@ -25,6 +25,7 @@ import type { DassShare } from "./routing";
 import { DassSession } from "./session";
 import { SettingsPanel } from "./settingsPanel";
 import { NativeShareButton, type ShareButtonProps, usePublisherStatus, usePublishingState } from "./shareButton";
+import { cancelShareTransportChooser, showShareTransportChooser } from "./shareTransport";
 import { sidebarActionProps, type SidebarState, stopSidebarStream } from "./sidebarPresentation";
 import { SpikePeer } from "../../clients/spike/peer";
 import { stopSpikeTest } from "./spikeTest";
@@ -45,6 +46,7 @@ let pluginActive = false;
 let unsubscribeWatchStatus: (() => void) | undefined;
 let unsubscribePublishStatus: (() => void) | undefined;
 let unsubscribeAccountStatus: (() => void) | undefined;
+let unsubscribeDirectoryStatus: (() => void) | undefined;
 let gridWatchEpoch = 0;
 
 function stopGridWatching() {
@@ -79,7 +81,17 @@ function currentParticipants(channelId: string) {
 
 const DassSidebarBody = ErrorBoundary.wrap(StreamSidebarBody, { message: "DASS stream card failed." });
 
+function hasCallShares(discordChannelId: string) {
+    return currentParticipants(discordChannelId).length > 0;
+}
+
+function releaseUnavailableFullscreen() {
+    callPresentation.releaseUnavailableFullscreen(hasCallShares);
+}
+
 function stopMedia() {
+    cancelShareTransportChooser();
+    callPresentation.exitFullscreen();
     publisher.reset();
     stopGridWatching();
     stopSpikeTest();
@@ -101,9 +113,9 @@ function AccountConfiguration() {
 const settings = definePluginSettings({
     defaultDass: {
         type: OptionType.BOOLEAN,
-        description: "Use DASS instead of Discord for screen sharing in calls. No automatic Discord fallback.",
+        description: "Prefer DASS in the transport chooser. Sharing always requires an explicit Discord or DASS choice.",
         default: true,
-        onChange: stopMedia
+        onChange: cancelShareTransportChooser
     },
     backendUrl: {
         type: OptionType.STRING,
@@ -138,6 +150,7 @@ function startRuntime() {
     });
     void session.start(settings.store.backendUrl);
     unsubscribeWatchStatus = watching.subscribeStatus(() => {
+        releaseUnavailableFullscreen();
         if (watching.getSnapshot().phase === "unauthorized") {
             showToast(watching.getSnapshot().message);
             session.clear();
@@ -145,8 +158,10 @@ function startRuntime() {
         if (["loading", "ready", "watching"].includes(watching.getSnapshot().phase)) callDiscovery.sync();
         else queueMicrotask(() => callDiscovery.sync());
     });
+    unsubscribeDirectoryStatus = directory.subscribeStatus(releaseUnavailableFullscreen);
     let previousPhase = publisher.getSnapshot().phase;
     unsubscribePublishStatus = publisher.subscribe(() => {
+        releaseUnavailableFullscreen();
         const { phase, message } = publisher.getSnapshot();
         if (phase !== previousPhase && phase === "failed") showToast(message);
         previousPhase = phase;
@@ -161,8 +176,10 @@ function stopRuntime() {
     unsubscribeWatchStatus?.();
     unsubscribePublishStatus?.();
     unsubscribeAccountStatus?.();
+    unsubscribeDirectoryStatus?.();
     unsubscribeWatchStatus = unsubscribePublishStatus = undefined;
     unsubscribeAccountStatus = undefined;
+    unsubscribeDirectoryStatus = undefined;
     stopMedia();
     callDiscovery.stop();
     publisher.stop();
@@ -196,6 +213,16 @@ export default definePlugin({
     },
     useHasGridShares(channelId: string) {
         return useHasGridShares(gridRuntime, channelId);
+    },
+    hasCallShares,
+    ownCallFullscreen(discordChannelId: string, appContext: unknown, exit: () => void) {
+        callPresentation.ownFullscreen(discordChannelId, appContext, () => {
+            if (FluxDispatcher.isDispatching()) FluxDispatcher.wait(exit);
+            else exit();
+        });
+    },
+    releaseCallFullscreen(appContext: unknown) {
+        callPresentation.releaseFullscreen(appContext);
     },
     gridTileKeyExtractor,
     isDassParticipant,
@@ -243,15 +270,21 @@ export default definePlugin({
     chooseShareTransport(nativeStart: () => void) {
         logDiagnostic("share action intercepted", { pluginActive, defaultDass: settings.store.defaultDass,
             inCall: !!currentCall(), configured: session.getSnapshot().configured });
-        if (!pluginActive || !settings.store.defaultDass) return nativeStart();
+        if (!pluginActive) return nativeStart();
         if (!["idle", "failed"].includes(publisher.getSnapshot().phase)) return publisher.reset();
-        if (!currentCall()) return showToast("Join a Discord call before sharing.");
-        if (!session.getSnapshot().configured) return showToast("Configure your DASS account in plugin settings before sharing.");
-        stopGridWatching();
-        stopSpikeTest();
-        localCapture.stop();
-        const host = globalThis as typeof globalThis & { Equibop?: { DassCapture?: EquibopCaptureBridge; }; };
-        void publisher.publish(settings.store.backendUrl, host.Equibop?.DassCapture);
+        const discordChannelId = currentCall();
+        if (!discordChannelId) return showToast("Join a Discord call before sharing.");
+        showShareTransportChooser(settings.store.defaultDass, () => pluginActive && currentCall() === discordChannelId,
+            () => { logDiagnostic("transport selected", { transport: "discord" }); nativeStart(); },
+            () => {
+                logDiagnostic("transport selected", { transport: "dass" });
+                if (!session.getSnapshot().configured) return showToast("Configure your DASS account in plugin settings before sharing.");
+                stopGridWatching();
+                stopSpikeTest();
+                localCapture.stop();
+                const host = globalThis as typeof globalThis & { Equibop?: { DassCapture?: EquibopCaptureBridge; }; };
+                void publisher.publish(settings.store.backendUrl, host.Equibop?.DassCapture);
+            });
     },
     stopPublishing() {
         publisher.reset();

@@ -62,21 +62,32 @@ backend and clients together for the updated directory metadata contract.
 
 ## Normal sharing and watching
 
-On Discord stable build **634304**, the center call Share button and the left
-Voice Connected Share callback use DASS by default. With session setup present,
-clicking Share authenticates, invokes the **installed**
+On supported Discord builds **634304** and **637268**, the center call Share button
+and the left Voice Connected Share callback open an explicit **Discord / DASS**
+transport chooser. Cancel, Escape, outside dismissal, logout, disable or leaving
+the call starts neither transport. Repeated clicks replace the pending chooser;
+each selection is single-use and bound to the originating call.
+
+Selecting **DASS**, with account setup present, authenticates and invokes the **installed**
 Equibop source/quality/audio picker, gathers Chromium candidates and activates
-the publisher automatically, without an extra modal. Missing setup produces a
+the publisher automatically after capture consent. Missing setup produces a
 notification directing the user to plugin settings.
 Selecting share audio remains explicit; the microphone is not acquired implicitly.
+Selecting **Discord** invokes only the original native share callback and picker.
+No DASS login/capture is started by that selection. The account's background
+session/discovery may already be running independently of the chooser.
 
 Click the supported Share button again to stop. The center call button wraps its
 existing native component to reflect DASS capture through `streamActive`; no
 new user-area button or synthetic stream record is added. Source end, voice-context
 exit, logout, disable and backend changes cancel pending work and release capture.
 
-Native stream tiles, watch clicks and player attachment are **not implemented**.
-For testing only, expand **Show advanced options** in plugin settings and select
+DASS-owned tiles now use the existing call grid, focused layout and filmstrip.
+Automatically discovered remote DASS shares expose **Watch Stream**, with
+independent DASS playback/audio. Stock Discord shares remain a separate transport.
+These viewer workflows and popout handoff still need runtime acceptance.
+The temporary advanced test viewer also remains available: expand
+**Show advanced options** in plugin settings and select
 **Find DASS streams** while in the call. Preparation and authenticated
 directory binding happen together, with no copied publisher ID or repeated
 credential entry. Choose a listed DASS stream to watch. Video starts muted;
@@ -84,11 +95,16 @@ credential entry. Choose a listed DASS stream to watch. Video starts muted;
 player; use **Close DASS viewer and room** to release the receiving connection.
 Publishing and watching replace each other to keep one media session per client.
 
-Disable **Use DASS instead of Discord for screen sharing in calls** to select
-native Discord sharing explicitly. There is no transport-chooser modal.
+The retained `defaultDass` setting now chooses only which transport is emphasized
+in the modal; it never bypasses explicit selection. Changing that preference
+cancels a pending chooser but does not stop an active share.
 DASS failures never invoke the native callback, upload previews or fall
 back to Discord. Other Share entry points remain native; other Discord builds
 are not patched. This is two supported buttons, **not** universal interception.
+Stop buttons still stop their current owner immediately without reopening the
+transport chooser. Hover the tile's Options button to see **Options (DASS)** for
+a DASS tile; the PC-icon/name pill is also part of native Discord presentation
+and is not, by itself, evidence of a particular transport.
 
 ## Exact-port policy and diagnostics
 

@@ -92,6 +92,7 @@ export interface StreamOverlayProps extends StreamActions {
     title: string;
     audioControl?: ReactNode;
     controlsBottom?: number;
+    transportLabel?: string;
 }
 
 export function StreamOverlay(props: StreamOverlayProps) {
@@ -103,7 +104,7 @@ export function StreamOverlay(props: StreamOverlayProps) {
         <span className="vc-dass-stream-title"><StreamIcon name="screen" /><span>{props.title}</span></span>
         <div className="vc-dass-stream-overlay-actions" onClick={event => event.stopPropagation()} onDoubleClick={event => event.stopPropagation()}>
             {props.audioControl}
-            <Tooltip text="Options">{tooltipProps => <Button {...tooltipProps} variant="none" size="small"
+            <Tooltip text={props.transportLabel ? `Options (${props.transportLabel})` : "Options"}>{tooltipProps => <Button {...tooltipProps} variant="none" size="small"
                 className="vc-dass-stream-options" aria-label="Options" aria-haspopup="menu" onClick={openMenu}>
                 <StreamIcon name="options" />
             </Button>}</Tooltip>

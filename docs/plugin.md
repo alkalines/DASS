@@ -71,6 +71,19 @@ preview-blur, popout or sidebar acceptance; testing the built plugin requires a
 full client restart and DASS enabled. See [stream-ui-preview.md](stream-ui-preview.md)
 for the separate safe visual comparison tool.
 
+The fullscreen follow-up protects the saved native call layout from voice-only
+participant updates while the current call has DASS tiles. Native voice mode is
+not changed, no Discord stream is registered and other calls retain their normal
+layout cleanup. DASS owns a bounded set of native fullscreen-exit callbacks and
+releases them on exit/unmount or when its view is lost. Logout/disable/context
+exit close owned fullscreen before teardown; exits during Flux dispatch use the
+host's deferred-dispatch helper. The CallTile hook also handles the conditional
+neighboring frame export found on build 637268, so focused DASS tiles do not fall
+through to native media assumptions. These source-level fixes still need a live
+fullscreen/escape/stop regression test after restarting the rebuilt client. The
+follow-up read-only check found all 50 replacements in 12 patch groups matching
+once on build 637268; this did not modify any live module factories.
+
 ## Sharing diagnostics
 
 Rebuild from the repository root with `bun scripts/build-plugin.mjs`, then fully
@@ -113,8 +126,10 @@ The current [session and Share-button workflow](session-workflow.md) and
 [LAN account setup](lan-accounts.md) replace the manual publishing/refusal path
 below. Accounts can be remembered with OS-backed encryption and authenticate
 on plugin load; LAN client endpoints are admitted per session automatically.
-Supported Share buttons start DASS by default. The older sections document the
-development history, not the current normal workflow.
+Supported Share buttons now ask explicitly for Discord or DASS. The retained
+`defaultDass` setting only emphasizes the preferred choice. Cancel/dismissal
+starts neither transport, and active Stop actions bypass the chooser. The older
+sections document development history, not the current normal workflow.
 
 The capability checker sends no credentials, rejects redirects, requires HTTPS except for explicitly
 enabled loopback HTTP, and bounds discovery to 5 seconds and 16 KiB. Only the

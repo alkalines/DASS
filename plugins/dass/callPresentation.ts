@@ -36,6 +36,7 @@ export class CallPresentation {
     private readonly listeners = new Set<() => void>();
     private audio = { muted: false, sliderPercent: 100 };
     private preview: PreviewPreferences = { showPreview: true, pauseWhenUnfocused: true };
+    private readonly fullscreenExits = new Map<unknown, { discordChannelId: string; exit(): void; }>();
 
     subscribe = (listener: () => void) => {
         this.listeners.add(listener);
@@ -71,6 +72,29 @@ export class CallPresentation {
     getAudio() { return this.audio; }
 
     getPreview() { return this.preview; }
+
+    ownFullscreen(discordChannelId: string, appContext: unknown, exit: () => void) {
+        if (!this.fullscreenExits.has(appContext) && this.fullscreenExits.size >= 4) return;
+        this.fullscreenExits.set(appContext, { discordChannelId, exit });
+    }
+
+    releaseFullscreen(appContext: unknown) {
+        this.fullscreenExits.delete(appContext);
+    }
+
+    releaseUnavailableFullscreen(hasShares: (discordChannelId: string) => boolean) {
+        for (const [context, entry] of this.fullscreenExits) {
+            if (hasShares(entry.discordChannelId)) continue;
+            this.fullscreenExits.delete(context);
+            entry.exit();
+        }
+    }
+
+    exitFullscreen() {
+        const entries = [...this.fullscreenExits.values()];
+        this.fullscreenExits.clear();
+        for (const entry of entries) entry.exit();
+    }
 
     setPreview(preferences: PreviewPreferences) {
         this.preview = { ...preferences };

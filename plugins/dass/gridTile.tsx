@@ -159,7 +159,7 @@ function GridTile({ runtime, participant, width, className, focused, paused, con
                 {tile.kind === "remote" && !receiving && <Button disabled={watching.phase === "loading" || !!watching.stream}
                     onClick={event => { event.stopPropagation(); runtime.watch(tile.share); }}>Watch Stream</Button>}
             </div>}
-            <StreamOverlay title={title} local={local} controlsBottom={controlsBottom == null ? undefined : controlsBottom + 12}
+            <StreamOverlay title={title} local={local} transportLabel="DASS" controlsBottom={controlsBottom == null ? undefined : controlsBottom + 12}
                 stop={local ? runtime.stopPublishing : receiving ? runtime.stopWatching : undefined}
                 previewOptions={local ? { ...previewPreferences,
                     setShowPreview: showPreview => callPresentation.setPreview({ ...callPresentation.getPreview(), showPreview }),

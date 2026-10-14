@@ -11,13 +11,15 @@ import { fileURLToPath } from "node:url";
 const root = new URL("../", import.meta.url);
 const require = createRequire(new URL("build/Equicord/package.json", root));
 const { build } = require("esbuild");
+const chooserPreview = process.argv.includes("--chooser");
 const css = ["plugins/dass/streamUi.css", "scripts/ui-preview/preview.css"]
     .map(path => readFileSync(new URL(path, root), "utf8")).join("\n");
 const result = await build({
-    entryPoints: [fileURLToPath(new URL("scripts/ui-preview/index.tsx", root))],
+    entryPoints: [fileURLToPath(new URL(chooserPreview ? "scripts/ui-preview/chooser.ts" : "scripts/ui-preview/index.tsx", root))],
     bundle: true,
     write: false,
     format: "iife",
+    globalName: chooserPreview ? "DassChooserPreview" : undefined,
     platform: "browser",
     jsx: "transform",
     jsxFactory: "Vencord.Webpack.Common.React.createElement",
@@ -26,12 +28,14 @@ const result = await build({
     plugins: [{
         name: "existing-equicord-runtime",
         setup(builder) {
-            builder.onResolve({ filter: /^(@webpack\/common|@components\/Button|@components\/ErrorBoundary|@utils\/misc)$/ }, args => ({ path: args.path, namespace: "host" }));
+            builder.onResolve({ filter: /^(@webpack\/common|@components\/Button|@components\/Paragraph|@components\/ErrorBoundary|@utils\/misc)$/ }, args => ({ path: args.path, namespace: "host" }));
             builder.onLoad({ filter: /.*/, namespace: "host" }, args => ({
                 contents: args.path === "@webpack/common"
-                    ? "export const {Clickable,ContextMenuApi,Menu,React,Tooltip,useLayoutEffect,useRef,useState}=Vencord.Webpack.Common;"
+                    ? "export const {Clickable,closeModal,ContextMenuApi,Menu,Modal,openModal,React,Tooltip,useLayoutEffect,useRef,useState}=Vencord.Webpack.Common;"
                     : args.path === "@components/Button"
                         ? "export const {Button}=Vencord.Components;"
+                        : args.path === "@components/Paragraph"
+                            ? "export const {Paragraph}=Vencord.Components;"
                         : args.path === "@components/ErrorBoundary"
                             ? "export default Vencord.Components.ErrorBoundary;"
                             : "export const classes=(...names)=>names.filter(Boolean).join(' ');",
@@ -43,5 +47,6 @@ const result = await build({
     }]
 });
 mkdirSync("/tmp/opencode", { recursive: true });
-writeFileSync("/tmp/opencode/dass-ui-preview.js", result.outputFiles[0].text);
-console.log("Built /tmp/opencode/dass-ui-preview.js using the host React, Button, Tooltip and Menu. No client media or transport code included.");
+const outputPath = chooserPreview ? "/tmp/opencode/dass-chooser-preview.js" : "/tmp/opencode/dass-ui-preview.js";
+writeFileSync(outputPath, result.outputFiles[0].text);
+console.log(`Built ${outputPath} using host UI primitives. No capture or network callbacks included.`);

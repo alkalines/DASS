@@ -138,6 +138,15 @@ const PRESENTATION_PATCHES = [{
     }, {
         match: /(participantsVersion:\i\.A\.getParticipantsVersion\(\i\.id\)\}\},\[)(\i,\i\.id,\i)(\]\))/,
         replace: "$1$2,dassCallVideo$3"
+    }, {
+        match: /(handleFullScreen=\(\)=>\{)/,
+        replace: "$1if($self.hasCallShares(this.props.channel.id))$self.ownCallFullscreen(this.props.channel.id,this.props.appContext,()=>this.maybeLeaveFullScreen());"
+    }, {
+        match: /(maybeLeaveFullScreen=\(\)=>\{)/,
+        replace: "$1$self.releaseCallFullscreen(this.props.appContext);"
+    }, {
+        match: /(componentWillUnmount\(\)\{)/,
+        replace: "$1$self.releaseCallFullscreen(this.props.appContext);"
     }]
 }, {
     find: /\i=\i\.Ay\.getVideoComponent\(\),\i=\i\.default\.getId\(\),\[\i,\i\]=\i\.useState\(null\)/,
@@ -156,7 +165,7 @@ const PRESENTATION_PATCHES = [{
     fromBuild: 634304,
     toBuild: 634304,
     replacement: [{
-        match: /(\i=\i\.\$,)(\i=)(\i)(?=\})/,
+        match: /(,)(\i=)(\i)(?=\}$)/,
         replace: "$1$2$self.wrapCallTile($3)"
     }]
 }, {
@@ -214,6 +223,15 @@ const PRESENTATION_PATCHES = [{
     }, {
         match: /(\(\i\?\?\i\)==null\?\(0,\i\.jsx\)\(\i,\{isActivity:)/,
         replace: "dassStop?null:$1"
+    }]
+}, {
+    find: "CHANNEL_RTC_UPDATE_LAYOUT:function",
+    fromBuild: 634304,
+    toBuild: 634304,
+    group: true,
+    replacement: [{
+        match: /(\i===\i\._Of\.VOICE\?\(delete \i\[(\i)\],)(delete \i\[\2\])(?=\):\i\[\2\]=\i)/,
+        replace: "$1$self.hasCallShares($2)||$3"
     }]
 }];
 

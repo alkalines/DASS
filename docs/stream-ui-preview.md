@@ -61,7 +61,8 @@ No screenshots were taken, and no Discord bundled source was copied.
 
 The development checkout uses Equicord revision
 `e0e85c8d4f6dc73aac9368cf3f4b2200eac4d4b4`.
-The preview build and 209 plugin tests passed with Bun 1.4.3 after integration.
+The preview build and 216 plugin tests passed with Bun 1.4.3 after the
+fullscreen/chooser follow-up.
 The plugin build adapter also passed lint, full typecheck and both host bundle
 builds. These checks do not establish screenshare interoperability or visual
 acceptance.
@@ -96,3 +97,20 @@ from track settings, and no Nitro entitlement styling is supplied. Native source
 matching was checked on Discord build 637268; actual media and focus/blur behavior
 still require runtime acceptance after rebuilding and restarting. See
 [plugin.md](plugin.md) for installation and compatibility details.
+
+## Safe chooser UI check
+
+From the repository root:
+
+```sh
+bun scripts/build-ui-preview.mjs --chooser
+```
+
+The generated `/tmp/opencode/dass-chooser-preview.js` exposes
+`DassChooserPreview.open()`, `.cancel()` and `.selected()` when evaluated directly
+in DevTools. Both transport callbacks only record the chosen label. They never
+start Discord or DASS sharing. This uses the same host Modal composition as the
+real chooser. The build does not bundle a second React or any capture/backend
+callback. Cancellation and a stale-context choice were checked against the live
+dialog and recorded no transport start; explicit DASS selected only the mock
+DASS callback. This is UI evidence, not a test of real capture or signaling.

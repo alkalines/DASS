@@ -65,6 +65,9 @@ test("ended shares lose selection, including when a new local capture later uses
 const controllerSource = `let eK={[ez.BRT.POPOUT]:eW.SW,[ez.BRT.APP]:null,[ez.BRT.OVERLAY]:null,[ez.BRT.CALL_TILE_POPOUT]:null};
 function eX(e){let{layout:t,channel:n,selectedParticipant:l,canChangeLayout:a,canInvite:s,onToggleChat:r,maybeLeaveFullScreen:o}=e;return l}
 class eq {
+componentWillUnmount(){this.maybeLeaveFullScreen()}
+handleFullScreen=()=>{return "native fullscreen"};
+maybeLeaveFullScreen=()=>{return "native exit"};
 handleSelectParticipant=(e,t)=>{let{channel:n,selectedParticipant:i,allActiveStreams:l,inCall:a,mode:s}=this.props;(0,eF.Ay)(e)&&(0,B.eo)(n,eb.A,eI.A,eN.A,V.default)[0]&&(j.default.selectVoiceChannel(n.id),0===l.filter(t=>(0,k._z)(t)===e.id&&t.state!==ez.XYD.ENDED).length&&(0,y.A9)((0,k.Iy)(e.id),{forceMultiple:t.shiftKey})),a&&s===ez._Of.VIDEO&&(i?.id===e.id?x.A.selectParticipant(n.id,null):x.A.selectParticipant(n.id,e.id))};
 handleContextMenu=(e,t,l,a)=>{let{channel:s}=this.props;this.trackCallTileContextMenuImpression(e,eF.qs.STREAM)};
 renderBottomLeft=()=>{let{layout:e,channel:t,selectedParticipant:n,inCall:l}=this.props,{canChangeLayout:a,canInvite:s}=this.viewProperties,r=e===ez.DUB.FULL_SCREEN?()=>{this._prevLayout=ez.DUB.NORMAL,this.handleFullScreen()}:this.handleToggleLayout;return!l||t.isGuildStageVoice()?null:(0,i.jsx)(eX,{layout:e,channel:t,selectedParticipant:n,canChangeLayout:a,canInvite:s,onToggleChat:r,maybeLeaveFullScreen:this.maybeLeaveFullScreen})};
@@ -161,4 +164,51 @@ test("CallTile export routes to a DASS-owned component before native hooks mount
     const source = patch(`${tileSource}}`, 2);
     expect(source).toContain("eY=$self.wrapCallTile(eU)");
     expect(() => new Function("$self", `function factory(){${source}`)).not.toThrow();
+});
+
+test("CallTile wrapping does not depend on the neighboring frame export being unconditional", () => {
+    const conditional = 'let eP=l.memo(e=>native(e));eP.displayName="CallTile";let e$=/^(123|456)$/.test(l.j)?F.$:null,ez=eP}';
+    const source = patch(conditional, 2);
+    expect(source).toContain("ez=$self.wrapCallTile(eP)");
+    expect(source).toContain("/^(123|456)$/.test(l.j)?F.$:null");
+    expect(() => new Function("$self", `function factory(){${source}`)).not.toThrow();
+});
+
+test("voice participant updates preserve DASS call layout without changing native voice mode", () => {
+    const original = 'function recompute(e,n){n===L._Of.VOICE?(delete w[e],delete G[e]):w[e]=n;return {mode:w[e],layout:G[e]}}';
+    const source = patch(original, 6);
+    for (const hasShares of [false, true]) {
+        const layout = { APP: "fullscreen", POPOUT: "normal" };
+        const recompute = new Function("$self", "w", "G", `const L={_Of:{VOICE:"voice"}};${source};return recompute;`)(
+            { hasCallShares: (channelId: string) => { expect(channelId).toBe("call"); return hasShares; } },
+            { call: "video" }, { call: layout }
+        );
+        const result = recompute("call", "voice");
+        expect(result.mode).toBeUndefined();
+        expect(result.layout).toBe(hasShares ? layout : undefined);
+    }
+    expect(source).not.toContain("STREAM_CREATE");
+});
+
+test("fullscreen exit ownership is bounded, context-specific and idempotent", () => {
+    const presentation = new CallPresentation();
+    const exits: string[] = [];
+    presentation.ownFullscreen("call", "APP", () => { exits.push("APP"); presentation.releaseFullscreen("APP"); });
+    presentation.ownFullscreen("other", "POPOUT", () => exits.push("POPOUT"));
+    presentation.releaseUnavailableFullscreen(channelId => channelId === "call");
+    expect(exits).toEqual(["POPOUT"]);
+    presentation.exitFullscreen();
+    presentation.exitFullscreen();
+    expect(exits).toEqual(["POPOUT", "APP"]);
+    for (let index = 0; index < 5; index++) presentation.ownFullscreen("call", index, () => exits.push(String(index)));
+    presentation.releaseFullscreen(1);
+    presentation.exitFullscreen();
+    expect(exits.slice(2)).toEqual(["0", "2", "3"]);
+});
+
+test("native fullscreen callbacks register only for DASS and release on exit or unmount", () => {
+    const source = patch(controllerSource, 0);
+    expect(source).toContain("$self.ownCallFullscreen(this.props.channel.id,this.props.appContext,()=>this.maybeLeaveFullScreen())");
+    expect(source).toContain("maybeLeaveFullScreen=()=>{$self.releaseCallFullscreen(this.props.appContext);");
+    expect(source).toContain("componentWillUnmount(){$self.releaseCallFullscreen(this.props.appContext);");
 });
