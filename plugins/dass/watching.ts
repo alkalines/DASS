@@ -17,6 +17,9 @@ export interface WatchStatus {
     candidates: readonly string[];
     stream?: MediaStream;
     watchingShare?: DassShare;
+    closedShare?: DassShare;
+    failedShare?: DassShare;
+    directoryRoomId?: string;
 }
 
 /** One independently authorized room, one prepared/active decoder, no native streams. */
@@ -26,6 +29,7 @@ export class WatchController implements ScreenshareTransport {
     private epoch = 0;
     private roomId?: string;
     private contextId?: string;
+    private closedContextId?: string;
     private backendUrl = "";
     private abort?: AbortController;
     private signaling?: SpikeSignaling;
@@ -59,11 +63,12 @@ export class WatchController implements ScreenshareTransport {
         clearInterval(this.contextCheck);
         // Also catch context loss not represented by a known Discord flux action.
         this.contextCheck = setInterval(() => {
-            if (this.contextId && this.currentContext() !== this.contextId) this.reset();
+            if (this.contextId && this.currentContext() !== this.contextId
+                || this.closedContextId && this.currentContext() !== this.closedContextId) this.reset();
         }, 250);
     }
 
-    reset(phase: WatchStatus["phase"] = "disconnected", message = "DASS viewer closed. Room binding and media were cleared.") {
+    reset(phase: WatchStatus["phase"] = "disconnected", message = "DASS viewer closed. Room binding and media were cleared.", closedShare?: DassShare, failedShare?: DassShare) {
         ++this.epoch;
         clearTimeout(this.poll);
         this.routing.setRoom(undefined);
@@ -74,9 +79,10 @@ export class WatchController implements ScreenshareTransport {
         this.abort = undefined;
         this.peer = undefined;
         this.signaling = undefined;
+        this.closedContextId = closedShare || failedShare ? this.contextId : undefined;
         this.contextId = this.roomId = undefined;
         this.busy = false;
-        this.update({ phase, message, shares: [], candidates: [] });
+        this.update({ phase, message, shares: [], candidates: [], closedShare, failedShare });
     }
 
     stop() {
@@ -96,9 +102,18 @@ export class WatchController implements ScreenshareTransport {
         const code = error instanceof SpikeSignalingError ? error.code : "";
         const unauthorized = isAuthenticationRejected(error);
         const disconnected = ["socket", "closed", "timeout", "expired", "server:expired", "server:transport_failed"].includes(code);
-        this.reset(unauthorized ? "unauthorized" : disconnected ? "disconnected" : "failed", error instanceof SpikeSignalingError
+        const message = error instanceof SpikeSignalingError
             ? signalingFailureMessage(error)
-                : "DASS setup failed. Check TLS, room access, LAN IP matching and the UDP path. No Discord fallback.");
+                : "DASS setup failed. Check TLS, room access, LAN IP matching and the UDP path. No Discord fallback.";
+        if (unauthorized) this.reset("unauthorized", message);
+        else this.unexpectedClose(disconnected ? "disconnected" : "failed", message);
+    }
+
+    private unexpectedClose(phase: "disconnected" | "failed", message: string) {
+        const share = this.status.phase === "watching" && this.status.stream ? this.status.watchingShare : undefined;
+        const failed = !share ? this.status.watchingShare : undefined;
+        const metadata = (value: DassShare | undefined) => value ? { roomId: value.roomId, shareId: value.shareId, displayName: value.displayName } : undefined;
+        this.reset(phase, message, metadata(share), metadata(failed));
     }
 
     async bind(backendUrl: string, roomId: string, credential: string | DassAuthentication) {
@@ -137,8 +152,9 @@ export class WatchController implements ScreenshareTransport {
         const result = await this.routing.detect(this.roomId);
         if (!this.current(epoch)) return;
         this.busy = false;
-        if (!result.ok) { this.reset("failed", result.message); return; }
-        this.update({ ...this.status, phase: "ready", message: "Authorized DASS shares only. Media follows the backend's LAN admission policy; no Discord fallback.", shares: result.value });
+        if (!result.ok) { this.unexpectedClose("failed", result.message); return; }
+        this.update({ ...this.status, phase: "ready", message: "Authorized DASS shares only. Media follows the backend's LAN admission policy; no Discord fallback.",
+            directoryRoomId: this.roomId, shares: result.value });
         // At most 120 directory requests in the transport's ten-minute lifetime.
         this.poll = setTimeout(() => void this.refresh(), 5_000);
     }
@@ -157,7 +173,7 @@ export class WatchController implements ScreenshareTransport {
             if (!this.current(epoch)) { peer.close(); return; }
             this.peer = peer;
             peer.closed.addEventListener("abort", () => {
-                if (this.current(epoch)) this.reset("disconnected", peer.closeMessage);
+                if (this.current(epoch)) this.unexpectedClose("disconnected", peer.closeMessage);
             }, { once: true });
             if (peer.closed.aborted) throw new Error("Viewer closed.");
             this.update({ ...this.status, phase: "ready", message: "Viewer prepared for 180 seconds. Automatic LAN admission needs no port updates; static policies require allowlisting. No capture is requested.",
@@ -180,7 +196,8 @@ export class WatchController implements ScreenshareTransport {
         }
         clearTimeout(this.poll);
         this.busy = true;
-        this.update({ ...this.status, phase: "loading", message: "Subscribing through DASS; waiting for a received video track…" });
+        this.update({ ...this.status, phase: "loading", message: "Subscribing through DASS; waiting for a received video track…",
+            watchingShare: this.status.shares.find(listed => listed.roomId === share.roomId && listed.shareId === share.shareId) });
         const intercepted = routeWatch(this.routing, { transport: "dass", share });
         if (!intercepted.handled) throw new Error("DASS watch was not consumed.");
         const result = await intercepted.completion;
@@ -188,7 +205,7 @@ export class WatchController implements ScreenshareTransport {
             this.busy = false;
             if (result.ok) this.update({ ...this.status, phase: "watching", message: "DASS tracks attached. Use Enable audio to permit sound playback.", stream: result.value,
                 watchingShare: this.status.shares.find(listed => listed.shareId === share.shareId) ?? { roomId: share.roomId, shareId: share.shareId } });
-            else this.reset("failed", result.message);
+            else this.unexpectedClose("failed", result.message);
         }
         return result;
     }
@@ -203,7 +220,7 @@ export class WatchController implements ScreenshareTransport {
         if (!this.current(epoch)) return { ok: false as const, message: "DASS watching was cancelled." };
         if (this.status.phase !== "ready") return { ok: false as const, message: this.status.message };
         if (!this.status.shares.some(listed => listed.roomId === share.roomId && listed.shareId === share.shareId)) {
-            this.reset("failed", "This publisher is no longer in the authorized DASS directory.");
+            this.unexpectedClose("failed", "This publisher is no longer in the authorized DASS directory.");
             return { ok: false as const, message: this.status.message };
         }
         return this.watch(share);

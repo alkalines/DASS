@@ -61,8 +61,8 @@ No screenshots were taken, and no Discord bundled source was copied.
 
 The development checkout uses Equicord revision
 `e0e85c8d4f6dc73aac9368cf3f4b2200eac4d4b4`.
-The preview build and 216 plugin tests passed with Bun 1.4.3 after the
-fullscreen/chooser follow-up.
+The preview build and 230 plugin tests passed with Bun 1.4.3 after the
+sidebar/focused-controls follow-up.
 The plugin build adapter also passed lint, full typecheck and both host bundle
 builds. These checks do not establish screenshare interoperability or visual
 acceptance.
@@ -88,9 +88,33 @@ On October 14, a DOM-only animation sample increased the demo segment from 0 to
 its measured 105.75px width and decreased it back to 0 without overshoot or a
 width jump. This checks the reveal geometry, not pixel-perfect motion acceptance.
 
-This first pass does not recreate the source picker, stream-ended/resuming
-screens, stream-quality picker, viewer volume popover or popout window. The
-sidebar supports a supplied source icon, with a first-letter placeholder in the
+The preview's **Stream ended** toggle now shows the same ended component used
+in DASS tiles. It borrows the host couch illustration through lazy CSS-property
+discovery and uses owned layout plus host controls. DOM checks confirmed the
+185px/134px illustration areas, compact-art hiding, 20px normal heading with a
+24px line height, and a close button matching the native reference's width and
+background. The mock Close Stream action and preview teardown were exercised.
+No real stream was stopped by these checks. The comparison panel was removed
+afterward so it would not cover the next volume-control inspection.
+
+The preview now also includes the production vertical speaker/volume control
+with mock state only, independent of active call audio. DOM inspection confirmed
+a 24px speaker, 72px vertical input and approximately 32px by 88px dark panel.
+Mock mute displayed zero and unmute restored 100%; ArrowDown changed 100 to 95,
+Home reached zero, ArrowUp reached 5, and Escape hid the panel. These checks do
+not establish real pointer-drag/playback or popout compatibility.
+
+The source picker, resuming screen, stream-quality picker, sound cues and popout
+window remain outside this preview.
+
+The **Stream error** toggle previews the production failure screen with mock
+DASS status. On build 637268, DOM inspection confirmed the native reference's
+16px/600 heading, 14px/600 error label, 14px/500 help line and 16px button gap.
+Mock help expansion and Close Stream were exercised without changing the active
+call. DASS uses its own setup/connection error labels and inline guidance rather
+than Discord error 2012 or Discord's support link. The panel was removed after
+the checks.
+The sidebar supports a supplied source icon, with a first-letter placeholder in the
 demo. In production, unsupported change-source/popout actions are disabled when
 their callbacks are absent. Real stop actions are connected, quality text comes
 from track settings, and no Nitro entitlement styling is supplied. Native source

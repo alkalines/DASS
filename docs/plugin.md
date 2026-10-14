@@ -47,20 +47,87 @@ Their DASS video and watch content remain independent of Discord's media engine.
 All tile videos are muted, including filmstrip previews; the connected call owns
 separate audible playback of the receiver stream. Share mute/volume is independent
 of Discord voice and uses the researched nonlinear curve over 0..100%, without
-amplification. The hover/focus slider uses the host Slider rather than the native
-audio-store wrapper or the media bar with the documented popout listener risk.
-It is not an exact reproduction of the native vertical speaker widget.
+amplification. The volume control now uses a host Clickable speaker icon and an
+owned, accessible vertical range input above it, replacing the labeled horizontal
+slider. The 72px track, 6px rail, 10px thumb and dark rounded panel follow the
+native control inspected on Discord build 637268. Hover/focus reveals it; a
+150ms hover-exit delay and a pointer bridge keep it reachable. Clicking the
+speaker toggles mute without losing the remembered level. Arrow keys change
+volume by 5%, Home/End reach the bounds, and Escape dismisses an open panel
+without triggering call fullscreen exit. Pointer cancellation and unmount clear
+owned interaction state/timers. It does not reuse the native audio-store wrapper
+or media bar with the documented popout listener risk, and installs no window
+listeners. This is a visual/interaction recreation, not the native component.
+Mock DevTools checks covered layout, mute restoration, keyboard changes and
+Escape without changing real stream audio. Real pointer dragging, playback and
+popout behavior still need runtime acceptance. Native sound cues are not added.
 Browser video controls are removed. Call-level fullscreen/popout controls retain
 their native routes, but popout media/audio handoff still needs runtime testing;
 individual tile popouts and zoom are unavailable. Tile overlays use DASS-owned
 hover/focus styling rather than the complete native idle/overlay implementation.
+The name/screen-icon pill is now independently anchored 12px from the frame's
+lower-left corner. Native controls-bottom offsets raise only the actions, not
+the name. A DOM-only mock check retained the 12px name inset while actions were
+raised 96px.
+
+When the selected DASS participant is the actually received remote share in the
+current call, the native center disconnect/stop control uses its **Stop
+Watching** branch. Its action stops only DASS reception and clears DASS focus;
+it never disconnects ordinary voice, stops another native stream or falls back
+to native stopping. Local previews, merely listed shares, errors and other calls
+do not own this action. The hook subscribes to DASS watch/presentation state and
+includes it in native callback dependencies; the native animation, icon and
+tooltip remain native. A stale DASS callback is a no-op after context/selection
+changes. Native stream/activity/call branches remain unchanged otherwise.
+
+The missing publishing sidebar follow-up changes the Activity Panel entry
+anchor to its unique **ActivityPanelGameCard** configuration location. Live
+inspection on build 637268 found the old mounted component had no DASS hook;
+the new anchor and all ten card replacements matched once and compiled in a
+read-only source check. The six focused-watch replacements also matched once
+and compiled. These checks do not prove that the rebuilt hooks mount at runtime:
+fully restart with DASS enabled and verify the sidebar card and focused stop
+action. No live module factories or active media were modified for the checks.
 Stop Streaming and Stop Watching use the owning DASS controllers; Stop Watching
-is disabled for a tile that is not being received. Change Stream and individual
+is disabled unless receiving a tile or dismissing its closed-view metadata. Change Stream and individual
 popout remain disabled. Publisher More Options shares its Show My Screen Share
 and Pause Preview When Discord Isn’t Focused preferences across grid/focused
 tiles. These are session-only presentation preferences. They detach local preview
 playback without disabling/stopping capture tracks or interrupting publishing.
 Receiver video/audio and ordinary Discord voice are unaffected by those preferences.
+
+The viewer now retains one closed share's room/ID/display-name metadata after an
+unexpected closure of actual received media. Peer, signaling, room binding,
+candidates and playback are released immediately; no final frame is retained.
+Only a successful authenticated directory refresh for the same room that no
+longer lists the publisher produces **This stream has ended.** Otherwise the
+closed view stays a connection error with a close action, not a false normal end.
+The ended card keeps its grid key and focused selection until **Close Stream**;
+stop, logout, disable, revocation or context loss clear retained metadata.
+Closing changes only DASS viewing, not Discord voice. There is no automatic
+resubscription or Discord fallback.
+
+The ended layout uses the host Button/Heading and dynamically resolved native
+illustration style, not copied bundled functions, hashed class names or a
+hardcoded asset URL. The couch artwork remains a host resource and is not
+redistributed in the plugin. If its style module is unavailable, the decorative
+illustration is omitted while the heading and close action remain usable.
+Small tiles hide the art; medium and large views use 134px/185px art areas.
+The safe DevTools preview was checked against the visible native screen without
+screenshots. Real publisher-end/directory timing still needs runtime acceptance.
+
+Failed selected-share setup now retains a separate bounded metadata entry for
+an error tile, never qualifying for the normal ended card. The native-like error
+screen uses a black background, centered 16px semibold heading, muted 14px error
+label, help action and host **Close Stream** button. Established media closure
+reads **Stream disconnected :(**; failed setup reads **Stream failed to start
+:(**. Labels are DASS setup/connection categories, not invented Discord numeric
+codes. The help action expands the existing sanitized DASS status and local
+troubleshooting advice, without sending diagnostics to Discord or another
+service. No automatic retry, capture or fallback is triggered. Close, context
+loss, logout, disable and revoked access clear retained entries. DevTools mock
+checks verified typography, help expansion and close behavior; real failure
+timing still needs runtime acceptance.
 
 The adapter is gated to exact Discord builds **634304** and **637268**, not the
 intermediate build range. On October 14, 2026, all 46 replacements across 11 patch

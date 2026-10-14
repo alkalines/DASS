@@ -42,6 +42,24 @@ test("native grid keys and callbacks are untouched; only owned render callbacks 
     expect(tiles[0]).toBe(render);
 });
 
+test("a previously watched share ends only after matching authenticated directory confirmation", () => {
+    const closed: WatchStatus = { ...idle, phase: "disconnected", closedShare: share };
+    const confirmed: WatchStatus = { ...directory, directoryRoomId: "call", shares: [] };
+    const expected = [{ key: "dass-remote:call:publisher", kind: "remote", share, ended: true }];
+    expect(gridShares("call", "call", true, false, confirmed, closed)).toEqual(expected);
+    for (const unconfirmed of [idle, { ...confirmed, phase: "failed" as const },
+        { ...confirmed, phase: "unauthorized" as const }, { ...confirmed, directoryRoomId: "other" },
+        { ...confirmed, directoryRoomId: undefined }, { ...confirmed, shares: [share] }]) {
+        const tiles = gridShares("call", "call", true, false, unconfirmed, closed);
+        expect(tiles).toHaveLength(1);
+        expect(tiles[0]).not.toHaveProperty("ended");
+    }
+    expect(gridShares("call", "call", false, false, confirmed, closed)).toEqual([]);
+    expect(gridShares("call", "other", true, false, confirmed, closed)).toEqual([]);
+    expect(gridShares("call", "call", true, false, confirmed, idle)).toEqual([]);
+    expect(gridShares("call", "call", true, false, confirmed, { ...closed, phase: "unauthorized" })).toEqual([]);
+});
+
 const OBSERVED_GRID = 'function b(e){let{participants:t,onClick:n,onDoubleClick:b,onContextMenu:_,channel:S,className:T,inCall:R,totalNumberOfParticipants:O,popoutType:L}=e,P=(0,f.Us)()===E.BRT.POPOUT,M=(0,r.bG)([C.A],()=>C.A.getGuild(S.guild_id),[S.guild_id]),{dismissedActivityEntryPointTileChannel:w}=(0,N.P)(),U=(0,r.bG)([h.A],()=>h.A.getUserParticipantCount(S.id),[S]),D=(0,g.vp)(S.id,t),V=l.useCallback(()=>{(0,s.r)(()=>{N.P.setState({dismissedActivityEntryPointTileChannel:S.id})})},[S.id]);l.useEffect(()=>{null!=w&&S.id!==w&&(0,s.r)(()=>{N.P.setState({dismissedActivityEntryPointTileChannel:null})})},[S.id,w]);let G=(0,r.bG)([j.A],()=>S.isPrivate()||(0,A.K)(j.A,M,S),[M,S]),k=M?.afkChannelId===S.id,B=S.userLimit<=0||S.userLimit>1,F=(0,r.bG)([c.Ay],()=>c.Ay.getEmbeddedActivitiesForChannel(S.id).length<=0),z=(0,m.HX)(o.M.VC_TILE_ACTIVITIES_ENTRY_POINT),H=(0,d.et)(S.id)!==d.xy.CAN_LAUNCH,W=null!=w&&w===S.id,Y=D.map(e=>t=>(0,i.jsx)(I.Ay,{participant:e,channel:S,className:v.V,onClick:n,onDoubleClick:b,onContextMenu:_,inCall:R,width:t,popoutType:L},e.id));(0,u.A)({type:a.ImpressionTypes.VIEW,name:a.ImpressionNames.CHANNEL_CALL_VIDEO_GRID_VIEW,properties:{total_participants:O,can_invite:G,is_afk_channel:k,channel_user_limit:S.userLimit}},{trackOnInitialLoad:!0},[]);let $=F&&!H,[K,X]=(0,p._)();null!=M&&!k&&!S.isGuildStageVoice()&&(K?Y.push(e=>(0,i.jsx)(p.V,{width:e,handleClose:X},"clips-video-call-tile")):U>=2&&$&&!z&&!W?Y.push(e=>(0,i.jsx)(y.y,{channel:S,guild:M,width:e,inPopout:P,handleClose:V,userParticipantCount:U})):B&&1===U&&G&&Y.push(e=>(0,i.jsx)(y.y,{channel:S,guild:M,width:e,inPopout:P,handleClose:V,userParticipantCount:U,activitiesEnabled:$})));let q=l.useCallback(e=>D[e]?.id??"empty-tile",[D]);return(0,i.jsx)(x.A,{className:T,keyExtractor:q,paddingTop:64,paddingBottom:64,children:Y})}';
 const OBSERVED_ROOT = 'e=>{let{participants:t,filteredParticipants:n,selectedParticipant:s,participantsVersion:j,layout:y,onSelectParticipant:I,onContextMenuParticipant:N,onFullscreenParticipant:E,channel:v,hasConnectPermission:b,className:_,inCall:S,showParticipants:T=!0,width:R,height:O,idle:L,mode:P,popoutType:M,awaitingRemoteSessionInfo:w,callContainerDimensions:U}=e;l.useEffect(()=>{u._.dispatch(x.jej.REMEASURE_TARGET)},[R,O,U.width,U.height]);let D=l.useMemo(()=>n.filter(e=>e.type!==g.lp.ACTIVITY||!e.participants.some(e=>(0,r.S)(e))),[n,j]),V=(0,a.bG)([o.A],()=>o.A.getVoiceParticipantsHidden(v.id),[v.id]);if(w?.channelId===v.id)return(0,i.jsx)(p.A,{height:O});if(v?.isGuildVocalOrThread()&&!S)return(0,i.jsx)(h.A,{channel:v,participants:t,hasConnectPermission:b});if(n=S?n:t,P===x._Of.VOICE)return(0,i.jsx)(c.A,{guildId:v.guild_id,width:R,className:C.Er,participants:t,onContextMenu:N});if(null==s){if(0===n.length){let e=t.length>0&&!V;return(0,i.jsx)(f.A,{channelId:v.id,allPoppedOut:e})}return(0,i.jsx)(d.A,{className:C.HA,justify:d.A.Justify.CENTER,align:d.A.Align.CENTER,children:(0,i.jsx)(m.A,{channel:v,className:C.g9,participants:D,totalNumberOfParticipants:t.length,onClick:I,onDoubleClick:E,onContextMenu:N,inCall:S,popoutType:M})})}return(0,i.jsx)(A.A,{onFullscreenParticipant:E,onContextMenuParticipant:N,onSelectParticipant:I,selectedParticipant:s,filteredParticipants:D,participants:t,popoutType:M,className:_,idle:L,height:O,width:R,layout:y,inCall:S,channel:v,showParticipants:T})}';
 

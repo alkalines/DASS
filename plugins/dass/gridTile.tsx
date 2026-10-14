@@ -11,18 +11,21 @@ import ErrorBoundary from "@components/ErrorBoundary";
 import { Paragraph } from "@components/Paragraph";
 import { classes } from "@utils/misc";
 import { findComponentByCodeLazy } from "@webpack";
-import { Clickable, Slider, useEffect, useRef, useState } from "@webpack/common";
+import { Clickable, useEffect, useRef, useState } from "@webpack/common";
 import type { ComponentType, CSSProperties, MouseEvent, ReactNode } from "react";
 
-import { CallPresentation, type DassParticipant, participantTitle, projectParticipants, sliderPlaybackVolume } from "./callPresentation";
+import { CallPresentation, type DassParticipant, isFocusedDassWatch, participantTitle, projectParticipants, sliderPlaybackVolume } from "./callPresentation";
 import { NATIVE_TILE_FRAME_SOURCE_SIGNATURE } from "./discordAdapter";
 import { gridShares } from "./gridPresentation";
 import type { PublishController } from "./publishing";
 import type { DassShare } from "./routing";
 import { usePublisherStatus } from "./shareButton";
+import { StreamEndedScreen } from "./streamEnded";
+import { StreamErrorScreen } from "./streamError";
 import { shouldPauseLocalPreview, streamTrackQuality } from "./streamPresentation";
 import { StreamLiveBadge, StreamOverlay, type StreamQuality } from "./streamUi";
 import { attachTilePlayback } from "./tilePlayback";
+import { StreamVolumeControl } from "./volumeControl";
 import type { WatchController } from "./watching";
 
 interface NativeTileFrameProps {
@@ -67,6 +70,12 @@ export function useHasGridShares(runtime: GridRuntime, channelId: string) {
     return useGridState(runtime, channelId).shares.length > 0;
 }
 
+export function useFocusedWatchingState(runtime: GridRuntime, channelId: string) {
+    const { shares, watching } = useGridState(runtime, channelId);
+    return runtime.isActive() && runtime.currentCall() === channelId
+        && isFocusedDassWatch(callPresentation.getSelected(channelId, projectParticipants(shares)), watching, channelId);
+}
+
 export function useGridTiles(runtime: GridRuntime, channelId: string, nativeTiles: GridTileRenderer[], className: string,
     onClick?: TileAction, onDoubleClick?: TileAction) {
     const { shares } = useGridState(runtime, channelId);
@@ -106,6 +115,10 @@ function GridTile({ runtime, participant, width, className, focused, paused, con
     const previewPaused = local && shouldPauseLocalPreview(previewPreferences, windowFocused);
     const receiving = tile.kind === "remote" && watching.watchingShare?.roomId === tile.share.roomId
         && watching.watchingShare.shareId === tile.share.shareId;
+    const retained = watching.closedShare ?? watching.failedShare;
+    const closed = tile.kind === "remote" && retained?.roomId === tile.share.roomId && retained.shareId === tile.share.shareId;
+    const ended = tile.kind === "remote" && tile.ended;
+    const failed = closed && ["disconnected", "failed"].includes(watching.phase) && !ended;
     const stream = tile.kind === "local" ? runtime.publisher.getPreviewStream() : receiving ? watching.stream : undefined;
     useEffect(() => {
         if (!local) return;
@@ -141,7 +154,12 @@ function GridTile({ runtime, participant, width, className, focused, paused, con
     return <TileFrame className={classes(className, "vc-dass-grid-tile", "vc-dass-stream-surface", focused && "vc-dass-grid-focused",
         focused && "vc-dass-stream-surface-focused")}
         style={{ ...style, width: focused ? "100%" : width }} noBorder={noBorder}>
-        <div className="vc-dass-grid-content" role="group" aria-label={title}>
+        <div className="vc-dass-grid-content" role="group" aria-label={title}
+            onClick={ended || failed ? event => onClick?.(participant, event) : undefined}
+            onDoubleClick={ended || failed ? event => onDoubleClick?.(participant, event) : undefined}>
+            {ended ? <StreamEndedScreen onClose={event => { event.stopPropagation(); runtime.stopWatching(); }} />
+                : failed ? <StreamErrorScreen started={!!watching.closedShare} message={watching.message}
+                    onClose={event => { event.stopPropagation(); runtime.stopWatching(); }} /> : <>
             <Clickable className="vc-dass-grid-focus" aria-label={title} onClick={event => onClick?.(participant, event)}
                 onDoubleClick={event => onDoubleClick?.(participant, event)}>
                 <video ref={video} muted playsInline hidden={previewPaused} aria-label={title} onLoadedMetadata={event => {
@@ -155,12 +173,13 @@ function GridTile({ runtime, participant, width, className, focused, paused, con
                 {previewPreferences.showPreview ? "Your preview is paused while Discord is unfocused." : "Your screen share preview is hidden."}
             </Paragraph></div>}
             {!stream && <div className="vc-dass-grid-placeholder">
-                <Paragraph role="status">{tile.kind === "local" ? publisher.message : receiving ? watching.message : "Screen share available."}</Paragraph>
+                <Paragraph role="status">{tile.kind === "local" ? publisher.message : receiving || closed ? watching.message : "Screen share available."}</Paragraph>
                 {tile.kind === "remote" && !receiving && <Button disabled={watching.phase === "loading" || !!watching.stream}
                     onClick={event => { event.stopPropagation(); runtime.watch(tile.share); }}>Watch Stream</Button>}
+                {closed && <Button variant="secondary" onClick={event => { event.stopPropagation(); runtime.stopWatching(); }}>Close Stream</Button>}
             </div>}
             <StreamOverlay title={title} local={local} transportLabel="DASS" controlsBottom={controlsBottom == null ? undefined : controlsBottom + 12}
-                stop={local ? runtime.stopPublishing : receiving ? runtime.stopWatching : undefined}
+                stop={local ? runtime.stopPublishing : receiving || closed ? runtime.stopWatching : undefined}
                 previewOptions={local ? { ...previewPreferences,
                     setShowPreview: showPreview => callPresentation.setPreview({ ...callPresentation.getPreview(), showPreview }),
                     setPauseWhenUnfocused: pauseWhenUnfocused => callPresentation.setPreview({ ...callPresentation.getPreview(), pauseWhenUnfocused }) } : undefined}
@@ -171,6 +190,7 @@ function GridTile({ runtime, participant, width, className, focused, paused, con
                         if (element) void element.play().then(() => setPlaybackMessage(""), () => setPlaybackMessage("Playback was blocked."));
                     }}>Play</Button>}
                 </>} />
+            </>}
         </div>
     </TileFrame>;
 }
@@ -181,16 +201,9 @@ function AudioControl() {
     const [, update] = useState(0);
     useEffect(() => callPresentation.subscribe(() => update(version => version + 1)), []);
     const { muted, sliderPercent } = callPresentation.getAudio();
-    return <div className="vc-dass-audio-control">
-        <Button size="small" aria-label={muted ? "Unmute stream" : "Mute stream"} aria-pressed={muted}
-            onClick={() => callPresentation.setAudio(!muted)}>{muted ? "Unmute" : "Mute"}</Button>
-        <div className="vc-dass-volume">
-            <Paragraph>Stream volume</Paragraph>
-            <Slider minValue={0} maxValue={100} initialValue={sliderPercent} keyboardStep={5} aria-label="Stream volume"
-                onValueRender={value => `${Math.round(value)}%`}
-                asValueChanges={value => callPresentation.setAudio(value > 0 ? false : muted, value)} />
-        </div>
-    </div>;
+    return <StreamVolumeControl muted={muted} sliderPercent={sliderPercent}
+        onToggleMute={() => callPresentation.setAudio(!muted)}
+        onVolumeChange={value => callPresentation.setAudio(value > 0 ? false : muted, value)} />;
 }
 
 export const CallAudioControl = ErrorBoundary.wrap(AudioControl, { message: "DASS audio controls failed." });

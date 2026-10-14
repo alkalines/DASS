@@ -10,6 +10,7 @@ const VOICE_PANEL_SHARE_START_MATCH = /(\i=\i\.useCallback\(\(\)=>\{)(\(0,\i\.A\
 const CALL_GRID_ROOT_MATCH = /(channel:(\i),hasConnectPermission:\i,className:\i,inCall:\i,showParticipants:\i=!0,width:\i,height:\i,idle:\i,mode:\i,popoutType:\i,awaitingRemoteSessionInfo:\i,callContainerDimensions:\i\}=\i;)(?=\i\.useEffect\(\(\)=>\{\i\._\.dispatch\(\i\.jej.REMEASURE_TARGET\))/;
 
 export const NATIVE_TILE_FRAME_SOURCE_SIGNATURE = ['"data-selenium-video-tile":', '"data-call-tile":""'] as const;
+export const NATIVE_STREAM_ENDED_ART_STYLE_KEYS = ["artContainer", "art", "cta", "header", "container", "large", "medium", "small"] as const;
 
 const SHARE_PATCHES = [{
     find: /renderNUXHighlight:\i,buttonRef:\i,onClick:null!=\i\?\i:\i(?=\}\))/,
@@ -189,7 +190,7 @@ const PRESENTATION_PATCHES = [{
         replace: "$1 $self.isDassParticipant($2)?[]:"
     }]
 }, {
-    find: /getCurrentUserActiveStream\(\),\i\.A\.getStreamerActiveStreamMetadata\(\)/,
+    find: "ActivityPanelGameCard",
     fromBuild: 634304,
     toBuild: 634304,
     group: true,
@@ -232,6 +233,30 @@ const PRESENTATION_PATCHES = [{
     replacement: [{
         match: /(\i===\i\._Of\.VOICE\?\(delete \i\[(\i)\],)(delete \i\[\2\])(?=\):\i\[\2\]=\i)/,
         replace: "$1$self.hasCallShares($2)||$3"
+    }]
+}, {
+    find: "CenterControlTray: currentUser cannot be undefined",
+    fromBuild: 634304,
+    toBuild: 634304,
+    group: true,
+    replacement: [{
+        match: /(let\{currentUser:\i,onDisconnectCall:\i,channel:(\i),connectedEmbeddedActivity:\i\}=\i,)/,
+        replace: "$1dassFocusedWatching=$self.useFocusedWatchingState($2.id),"
+    }, {
+        match: /(\i\.useCallback\(\(\)=>)(?=\i\?\.type===\i\.lp\.ACTIVITY&&\i\.applicationId===\i\?\.applicationId\?"ACTIVITY":\i\|\|\i\?"STREAM":)/,
+        replace: '$1dassFocusedWatching?"STREAM":'
+    }, {
+        match: /(\[\i,\i\?\.applicationId,\i,\i,\i)(\]\),\[\i,\i\]=\i\.useState\(\i\(\)\))/,
+        replace: "$1,dassFocusedWatching$2"
+    }, {
+        match: /(\i\.useCallback\(\(\)=>\{)(?=if\(null!=\i\)\(0,\i\.vN\)\(\(0,\i\._z\)\(\i\)\);else for\(let \i of \i\))/,
+        replace: "$1if(dassFocusedWatching){$self.stopFocusedWatching(arguments[0].channel.id);return;}"
+    }, {
+        match: /(\[\i,\i)(\]\);return\(0,\i\.jsx\)\(\i\.Y,\{targetElementRef:\i,renderPopout:)/,
+        replace: "$1,dassFocusedWatching,arguments[0].channel.id$2"
+    }, {
+        match: /(onPopoutClick:)(\i\.length>1\?\i:null)(?=,isSelfStream:!1)/,
+        replace: "$1dassFocusedWatching?null:$2"
     }]
 }];
 

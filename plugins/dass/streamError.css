@@ -1,0 +1,82 @@
+.vc-dass-stream-error {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: safe center;
+    box-sizing: border-box;
+    height: 100%;
+    width: 100%;
+    padding: 4px;
+    overflow: auto;
+    background: #000;
+    text-align: center;
+}
+
+.vc-dass-stream-error .vc-dass-stream-error-heading {
+    margin: 0 0 4px;
+    color: var(--white, #fff);
+    font-family: var(--font-primary);
+    font-size: 16px;
+    font-weight: 600;
+    line-height: 20px;
+}
+
+.vc-dass-stream-error-code {
+    color: var(--text-muted);
+    font-size: 14px;
+    font-weight: 600;
+    line-height: 18px;
+    user-select: text;
+}
+
+.vc-dass-stream-error-help {
+    max-width: 480px;
+    color: var(--primary-200);
+    font-size: 14px;
+    font-weight: 500;
+    line-height: 18px;
+}
+
+.vc-dass-stream-error-help summary {
+    list-style: none;
+    cursor: pointer;
+}
+
+.vc-dass-stream-error-help summary::-webkit-details-marker {
+    display: none;
+}
+
+.vc-dass-stream-error-help summary span {
+    color: var(--text-link);
+}
+
+.vc-dass-stream-error-help summary:hover span {
+    text-decoration: underline;
+}
+
+.vc-dass-stream-error-help summary:focus-visible {
+    outline: 2px solid var(--focus-primary);
+    outline-offset: 2px;
+}
+
+.vc-dass-stream-error-details {
+    padding: 8px;
+    color: var(--text-default);
+    font-weight: 400;
+    overflow-wrap: anywhere;
+}
+
+.vc-dass-stream-error-details p {
+    margin: 0 0 8px;
+}
+
+.vc-dass-stream-error .vc-dass-stream-error-close {
+    flex-shrink: 0;
+    margin-top: 16px;
+    min-height: 41px;
+    padding: 7px 15px;
+    border-width: 1.5px;
+    font-size: 16px;
+    font-weight: 500;
+    line-height: 20px;
+}

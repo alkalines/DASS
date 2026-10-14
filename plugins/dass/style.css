@@ -81,27 +81,6 @@
     pointer-events: none;
 }
 
-.vc-dass-audio-control {
-    position: relative;
-}
-
-.vc-dass-volume {
-    position: absolute;
-    display: none;
-    bottom: 100%;
-    right: 0;
-    width: 160px;
-    padding: 12px;
-    background: var(--background-floating);
-    border-radius: 8px;
-    z-index: 2;
-}
-
-.vc-dass-audio-control:hover .vc-dass-volume,
-.vc-dass-audio-control:focus-within .vc-dass-volume {
-    display: block;
-}
-
 .vc-dass-play-audio {
     position: absolute;
     bottom: 72px;

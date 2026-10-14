@@ -66,6 +66,7 @@ function fixture() {
     controller.start();
     return { controller, socket, peer, stream, closed, prepares: () => prepares, activations: () => activations,
         exit: () => { context = undefined; controller.reset(); },
+        loseContext: () => { context = undefined; },
         delayVideo: () => { deliverVideo = false; },
         deliver: () => { tracks = [track]; tracksChanged.dispatchEvent(new Event("change")); } };
 }
@@ -152,6 +153,76 @@ test("cross-room watches cannot activate the viewer", async () => {
         await f.controller.bind("https://dass.example", "room", "secret");
         expect((await f.controller.watch({ roomId: "other_room", shareId: "source" })).ok).toBe(false);
         expect(f.activations()).toBe(0);
+    } finally { f.controller.stop(); }
+});
+
+test("unexpected media closure retains only watched share metadata until explicit close", async () => {
+    const f = fixture();
+    try {
+        await f.controller.prepareViewer();
+        await f.controller.bind("https://dass.example", "room", "secret");
+        expect(f.controller.getSnapshot().directoryRoomId).toBe("room");
+        await f.controller.watch({ roomId: "room", shareId: "real_source" });
+        f.peer.close();
+        const status = f.controller.getSnapshot();
+        expect(status.phase).toBe("disconnected");
+        expect(status.closedShare).toEqual({ roomId: "room", shareId: "real_source", displayName: "Workstation" });
+        expect(status.stream).toBeUndefined();
+        expect(status.watchingShare).toBeUndefined();
+        expect(status.directoryRoomId).toBeUndefined();
+        expect(status.shares).toEqual([]);
+        expect(status.candidates).toEqual([]);
+        expect(f.stream.getVideoTracks()[0].readyState).toBe("ended");
+        f.controller.reset();
+        expect(f.controller.getSnapshot().closedShare).toBeUndefined();
+    } finally { f.controller.stop(); }
+});
+
+test("preparation failure and revoked access do not retain an ended-stream card", async () => {
+    const preparing = fixture();
+    try {
+        await preparing.controller.prepareViewer();
+        preparing.peer.close();
+        expect(preparing.controller.getSnapshot().closedShare).toBeUndefined();
+    } finally { preparing.controller.stop(); }
+    const f = fixture();
+    try {
+        await f.controller.prepareViewer();
+        await f.controller.bind("https://dass.example", "room", "secret");
+        await f.controller.watch({ roomId: "room", shareId: "real_source" });
+        f.socket.dispatchEvent(new MessageEvent("message", { data: JSON.stringify({ protocol_version: 1, request_id: "server_close",
+            operation: { type: "closed", session_id: "viewer_session", reason: "revoked" } }) }));
+        expect(f.controller.getSnapshot().phase).toBe("unauthorized");
+        expect(f.controller.getSnapshot().closedShare).toBeUndefined();
+    } finally { f.controller.stop(); }
+});
+
+test("failed selected publisher setup retains only metadata for the error screen, never a normal ended screen", async () => {
+    const f = fixture();
+    try {
+        const result = await f.controller.watchListedShare("https://dass.example", { roomId: "room", shareId: "missing_source" }, "secret");
+        expect(result.ok).toBe(false);
+        expect(f.controller.getSnapshot().phase).toBe("failed");
+        expect(f.controller.getSnapshot().failedShare).toEqual({ roomId: "room", shareId: "missing_source", displayName: undefined });
+        expect(f.controller.getSnapshot().closedShare).toBeUndefined();
+        expect(f.controller.getSnapshot().stream).toBeUndefined();
+        expect(f.controller.getSnapshot().watchingShare).toBeUndefined();
+        f.controller.reset();
+        expect(f.controller.getSnapshot().failedShare).toBeUndefined();
+    } finally { f.controller.stop(); }
+});
+
+test("unannounced context loss clears retained stream metadata after the normal context check", async () => {
+    const f = fixture();
+    try {
+        await f.controller.prepareViewer();
+        await f.controller.bind("https://dass.example", "room", "secret");
+        await f.controller.watch({ roomId: "room", shareId: "real_source" });
+        f.peer.close();
+        expect(f.controller.getSnapshot().closedShare).toBeDefined();
+        f.loseContext();
+        await new Promise(resolve => setTimeout(resolve, 300));
+        expect(f.controller.getSnapshot().closedShare).toBeUndefined();
     } finally { f.controller.stop(); }
 });
 

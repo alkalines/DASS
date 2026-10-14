@@ -100,8 +100,11 @@ export function StreamOverlay(props: StreamOverlayProps) {
         event.stopPropagation();
         ContextMenuApi.openContextMenu(event, () => <SafeStreamActionsMenu {...props} />);
     }
-    return <div className="vc-dass-stream-overlay" style={{ bottom: props.controlsBottom }}>
-        <span className="vc-dass-stream-title"><StreamIcon name="screen" /><span>{props.title}</span></span>
+    return <>
+        <div className="vc-dass-stream-name-overlay">
+            <span className="vc-dass-stream-title"><StreamIcon name="screen" /><span>{props.title}</span></span>
+        </div>
+        <div className="vc-dass-stream-overlay" style={{ bottom: props.controlsBottom }}>
         <div className="vc-dass-stream-overlay-actions" onClick={event => event.stopPropagation()} onDoubleClick={event => event.stopPropagation()}>
             {props.audioControl}
             <Tooltip text={props.transportLabel ? `Options (${props.transportLabel})` : "Options"}>{tooltipProps => <Button {...tooltipProps} variant="none" size="small"
@@ -109,7 +112,8 @@ export function StreamOverlay(props: StreamOverlayProps) {
                 <StreamIcon name="options" />
             </Button>}</Tooltip>
         </div>
-    </div>;
+        </div>
+    </>;
 }
 
 export function StreamLiveBadge({ quality }: { quality?: StreamQuality; }) {

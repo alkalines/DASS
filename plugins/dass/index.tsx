@@ -13,13 +13,13 @@ import type { ComponentType } from "react";
 
 import { forgetRememberedAccount, readRememberedAccount, writeRememberedAccount } from "./accountStorage";
 import { createCallDiscovery } from "./callDiscovery";
-import { isDassParticipant, participantTitle, projectParticipants } from "./callPresentation";
+import { isDassParticipant, isFocusedDassWatch, participantTitle, projectParticipants } from "./callPresentation";
 import { type EquibopCaptureBridge, LocalCaptureCheck } from "./capture";
 import { DiscoveryController } from "./controller";
 import { logDiagnostic } from "../../clients/spike/diagnostics";
 import { DISCORD_PRESENTATION_PATCHES, DISCORD_SHARE_PATCHES, isLocalPublisherLive, type PublishIntent, routePublish, routeWatch, type WatchIntent } from "./discordAdapter";
 import { gridShares, gridTileKeyExtractor } from "./gridPresentation";
-import { CallAudioControl, callPresentation, type CallTileProps, type CallViewProps, type FocusedCallProps, type GridRuntime, type GridTileRenderer, NativeCallView, NativeGridTile, type TileAction, useFocusedCallProps, useGridTiles, useHasGridShares } from "./gridTile";
+import { CallAudioControl, callPresentation, type CallTileProps, type CallViewProps, type FocusedCallProps, type GridRuntime, type GridTileRenderer, NativeCallView, NativeGridTile, type TileAction, useFocusedCallProps, useFocusedWatchingState, useGridTiles, useHasGridShares } from "./gridTile";
 import { hasAcceptedPublishCapture, PublishController } from "./publishing";
 import type { DassShare } from "./routing";
 import { DassSession } from "./session";
@@ -252,6 +252,13 @@ export default definePlugin({
     },
     renderCallAudio(participant: unknown) {
         return isDassParticipant(participant) && participant.dassShare.kind === "remote" ? <CallAudioControl /> : null;
+    },
+    useFocusedWatchingState(channelId: string) {
+        return useFocusedWatchingState(gridRuntime, channelId);
+    },
+    stopFocusedWatching(channelId: string) {
+        if (pluginActive && currentCall() === channelId
+            && isFocusedDassWatch(callPresentation.getSelected(channelId, currentParticipants(channelId)), watching.getSnapshot(), channelId)) stopGridWatching();
     },
     useNativeSidebarProps<T extends Record<string, unknown>>(props: T) {
         const status = usePublisherStatus(publisher);

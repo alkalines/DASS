@@ -7,7 +7,10 @@
 import { Button } from "@components/Button";
 import { ContextMenuApi, useState } from "@webpack/common";
 
+import { StreamEndedScreen } from "../../plugins/dass/streamEnded";
+import { StreamErrorScreen } from "../../plugins/dass/streamError";
 import { StreamSidebarCard, StreamTileSurface } from "../../plugins/dass/streamUi";
+import { StreamVolumeControl } from "../../plugins/dass/volumeControl";
 
 declare const __DASS_UI_CSS__: string;
 declare const Vencord: {
@@ -47,6 +50,9 @@ function Preview() {
     const [showPreview, setShowPreview] = useState(true);
     const [pauseWhenUnfocused, setPauseWhenUnfocused] = useState(true);
     const [premiumQuality, setPremiumQuality] = useState(true);
+    const [ended, setEnded] = useState(false);
+    const [failed, setFailed] = useState(false);
+    const [audio, setAudio] = useState({ muted: false, sliderPercent: 100 });
     const [status, setStatus] = useState("Visual mock only. Your active share is untouched.");
     const mockAction = (action: string) => () => setStatus(`${action} clicked. Preview only, no media action.`);
     return <>
@@ -59,8 +65,16 @@ function Preview() {
                 <Button variant="secondary" size="xs" onClick={() => setLocal(!local)}>{local ? "Show viewer" : "Show publisher"}</Button>
                 <Button variant="secondary" size="xs" onClick={() => setFocused(!focused)}>{focused ? "Grid tile" : "Focused tile"}</Button>
                 <Button variant="secondary" size="xs" onClick={() => setPremiumQuality(!premiumQuality)}>{premiumQuality ? "Standard quality" : "Nitro styling"}</Button>
+                <Button variant="secondary" size="xs" onClick={() => setEnded(!ended)}>{ended ? "Show live tile" : "Stream ended"}</Button>
+                <Button variant="secondary" size="xs" onClick={() => { setEnded(false); setFailed(!failed); }}>{failed ? "Show live tile" : "Stream error"}</Button>
             </div>
-            <StreamTileSurface title="MegArthur" local={local} focused={focused}
+            {failed && !ended ? <div className="vc-dass-ui-preview-ended"><StreamErrorScreen started={false}
+                message="DASS setup failed. Check TLS, room access, LAN IP matching and the UDP path. No Discord fallback."
+                onClose={() => { setFailed(false); setStatus("Closed mock error only. Real viewing is untouched."); }} /></div>
+                : ended ? <div className="vc-dass-ui-preview-ended"><StreamEndedScreen onClose={() => {
+                setEnded(false);
+                setStatus("Close Stream clicked. Preview only, no media action.");
+            }} /></div> : <StreamTileSurface title="MegArthur" local={local} focused={focused}
                 quality={{ resolution: premiumQuality ? "1080p" : "720p", framesPerSecond: 30, premium: premiumQuality }}
                 className={focused ? "vc-dass-ui-preview-focused" : undefined}
                 stop={mockAction(local ? "Stop Streaming" : "Stop Watching")}
@@ -71,8 +85,12 @@ function Preview() {
                     setStatus(`Pause when unfocused: ${value ? "on" : "off"}. Preview preference only, no media action.`);
                 } }}>
                 <div className="vc-dass-ui-preview-placeholder"><span>Screen preview</span><small>No capture requested</small></div>
-            </StreamTileSurface>
+            </StreamTileSurface>}
             <StreamSidebarCard qualityLabel={premiumQuality ? "1080p 30FPS" : "720p 30FPS"} premiumQuality={premiumQuality} stop={mockAction("Stop Streaming")} />
+            <div style={{ display: "flex", justifyContent: "flex-end", padding: "12px" }}>
+                <StreamVolumeControl {...audio} onToggleMute={() => setAudio({ ...audio, muted: !audio.muted })}
+                    onVolumeChange={value => setAudio({ muted: value > 0 ? false : audio.muted, sliderPercent: value })} />
+            </div>
             <p className="vc-dass-ui-preview-status" role="status">{status}</p>
         </div>
     </>;

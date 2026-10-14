@@ -24,6 +24,7 @@ function patched(input = source) {
 }
 
 test("native card patches preserve native branches, frame, stop button and localized tooltip", () => {
+    expect(DISCORD_PRESENTATION_PATCHES[5].find).toBe("ActivityPanelGameCard");
     const result = patched();
     expect(() => new Function("$self", result)).not.toThrow();
     expect(result).not.toContain("setNativeSidebarBody");

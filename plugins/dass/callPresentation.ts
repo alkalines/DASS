@@ -6,6 +6,7 @@
 
 import type { GridShare } from "./gridPresentation";
 import type { PreviewPreferences } from "./streamPresentation";
+import type { WatchStatus } from "./watching";
 
 export interface DassParticipant {
     id: string;
@@ -28,6 +29,12 @@ export function participantTitle(participant: DassParticipant, localDisplayName?
 
 export function sliderPlaybackVolume(sliderPercent: number) {
     return (Math.max(0, Math.min(100, sliderPercent)) / 100) ** 2.8;
+}
+
+export function isFocusedDassWatch(participant: unknown, status: WatchStatus, channelId: string) {
+    return isDassParticipant(participant) && participant.dassShare.kind === "remote"
+        && participant.dassShare.share.roomId === channelId && status.phase === "watching" && !!status.stream
+        && status.watchingShare?.roomId === channelId && status.watchingShare.shareId === participant.dassShare.share.shareId;
 }
 
 export class CallPresentation {

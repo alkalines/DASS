@@ -30,8 +30,15 @@
 
 .vc-dass-ui-preview-toolbar {
     display: flex;
+    flex-wrap: wrap;
     gap: 8px;
     margin-bottom: 12px;
+}
+
+.vc-dass-ui-preview-ended {
+    height: 400px;
+    overflow: hidden;
+    border-radius: 8px;
 }
 
 .vc-dass-ui-preview-focused {
