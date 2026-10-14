@@ -13,6 +13,153 @@ provider/compatibility checks, focused/remote GUI/audio and security acceptance
 remain explicitly open. Sandbox results must get new evidence labels; mocks
 cannot certify DASS media, authorization or transport interoperability.
 
+## Video media-leaf experiment: scripts 65 and 66
+
+New user-authorized test following the source trace in
+[UI reuse evidence](../discord-ui-reuse-evidence.md). Script 65 prepares a private
+instance of the inspected original `51092` module with cached dependencies only.
+Scoped facades disable spinner telemetry, native incoming-video readiness timers
+and native ready/timeout dispatch. Registered factories, stores, socket methods,
+native media engines and global dependency exports remain unchanged.
+
+Script 66 mounts the actual video wrapper in a clearly labeled diagnostic root.
+A supplied media leaf plays generated canvas video, delayed 1.8 seconds to expose
+the actual native loading/spinner transition. No OS capture, audio, connection,
+streaming backend or thumbnail upload is started. Test selector stays private to
+the isolated renderer; it is not inserted into a native store. Pause/Resume and
+Remove are diagnostic controls, not the proposed production stream controls.
+
+Cleanup unmounts the owned root, stops generated tracks, cancels the animation
+and pending media attachment, removes owned listeners/container and deletes only
+the matching test registry. Re-preparation cleans a previous owned test after
+successful preparation. Missing dependencies/source signatures fail visibly.
+
+This experiment tests actual wrapper/media-leaf compatibility only, not original
+call-tree placement, zoom providers, full tile/footer/menu, remote audio or DASS
+interoperability. Its diagnostic root must not become the production replacement
+player. Source compilation is a temporary research tool, not a production loader.
+Local isolation/cleanup/missing-host fixtures and mount syntax passed with Bun;
+the user subsequently ran the shorter inline variant and explicitly confirmed
+the colorful generated video/timer and working Pause/Resume in the actual host.
+Spinner timing and Remove/cleanup remain unconfirmed. This does not accept the
+original call tree, zoom wrapper or DASS transport. Cleanup command:
+
+```js
+globalThis.__DASS_VIDEO_WRAPPER_TEST__?.cleanup();
+```
+
+### Actual call-grid media test: scripts 67–70
+
+After reported removal, the user supplied the live `renderContent` head/tail and
+idle-call flags: no video/selection/popout, with cached root/grid/frame and a
+renderable object tile export. Script 67 captures the controller and original
+descriptor without changing rendering. Script 68 prepares the same isolated
+actual video wrapper; script 69 defines the generated-video sample without
+creating media until React mounts it.
+
+Script 70 temporarily shadows only that mounted controller's `renderContent`,
+preserves the original call shell/control props, and replaces a verified central
+root with the actual host Flex/callback Grid. Genuine idle participant objects
+render through the native generic tile; the extra callback renders the actual
+frame/video wrapper with a DASS-private media selector and generated canvas leaf.
+There is no second root, floating overlay or fake native stream/participant store
+record. The diagnostic Pause/Restore controls are not the original stream footer.
+
+The central subtree may remount. Only test in idle non-Stage voice without real
+camera/share/activity/selection/popout. Context/shape/ownership guards pass the
+original render through on mismatch; sample unmount stops its canvas track,
+interval and pending attachment. Cleanup restores only the owned method and
+preserves later foreign changes, disconnects the connectivity observer and
+requests normal rendering. No socket/watch/start/preview actions are invoked.
+
+Local syntax and mocked shell/reference/callback/context-guard/descriptor/
+foreign-patch restoration fixtures passed. The user subsequently reported a card
+with working Pause/Resume, but explicitly rejected equivalence to a normal Discord
+stream. Full layout/voice/cleanup acceptance remains pending. This tests grid placement and
+media-leaf reuse, not complete connected-root semantics, original stream footer,
+zoom/focus/filmstrip/popout or DASS transport. Do not call it complete native UX.
+
+```js
+globalThis.__DASS_CALL_VIDEO_TEST__?.cleanup();
+```
+
+### Original normal-card parts: scripts 71 and 72
+
+The user rejected the partial frame/video grid as unlike a normal Discord stream.
+They then supplied the complete current original card return, footer and overlay.
+Script 71 collects the reviewed current source profile without mounting/capture.
+Script 72 prepares private original render/helper/footer functions, replacing the
+footer's connected identity/activity/auto-video/menu subscription prefix with
+owned presentation inputs. Original generic title lookup is bypassed. Scoped
+analytics/zoom/shake/confetti facades prevent native action/effect paths, leaving
+registered modules and dependencies unchanged.
+
+The actual overlay function receives owned simulated status rather than querying
+native stream state. Its native health consumer is skipped; connected quality/
+upsell child is replaced by the actual pure LIVE component. Quality text and
+health warnings are explicitly outside this test, not claimed as preserved.
+Focused native zoom/popout controls are disabled. The target is original
+non-focused card/hover/title/footer composition with generated media, not full
+focus/fullscreen/popout/quality/audio or DASS acceptance. No fake native records,
+keys, events or backend/preview actions are introduced.
+
+Private source compilation remains research-only. The production approach needs
+reviewed build-time guarded/exposure seams, not runtime source loading. Compiling
+parts is not GUI acceptance and creates no media. Do not stringify the parts
+registry/cache or collect native credential/identity values.
+
+```js
+globalThis.__DASS_NORMAL_CARD_TEST__?.cleanup();
+```
+
+### Restartable normal-card demo: `76-normal-card-demo.js`
+
+Discord restart removes console registries; these UI tests have no backend
+session to expire. The consolidated local script prepares all reviewed parts,
+captures an idle mounted call, defines generated media and installs the original
+non-focused card in the actual callback grid in one execution. It retains actual
+card/footer/overlay rendering with the explicitly limited scopes above. Menus
+use host primitives with diagnostic pause/mute-icon/restore actions; popout is
+disabled and mute is visual only (generated video has no audio).
+
+From the repository root, regenerate the checked-in artifact with:
+
+```sh
+bun scripts/build-ui-reuse-demo.mjs
+```
+
+In Equibop, join an idle non-Stage voice call, expand the call view, and select a
+connected native participant element in DevTools Elements. Copy the complete
+local `docs/ui-streaming-reverse-engineering/76-normal-card-demo.js` file into
+Console and execute it. No preparation snippets are needed. If the terminal
+supports OSC 52 clipboard writing, this optional repository-root command copies
+the script without clipboard packages:
+
+```sh
+printf '\033]52;c;%s\a' "$(base64 -w0 docs/ui-streaming-reverse-engineering/76-normal-card-demo.js)"
+```
+
+If clipboard writing is unsupported/blocked, use a text editor and copy the file
+manually. Do not install host clipboard packages or start an HTTP/helper server
+for this test. The script reads already-loaded original source, not remote code.
+
+The artifact checks each stage, restores owned state on preparation/install
+failure, preserves foreign registries/method changes, and captures the selected
+controller before cleaning previous owned tests. Generated producer cleanup is
+also explicit if a later foreign render patch prevents normal unmount. Missing
+cached dependencies or source-profile mismatches stop visibly without loading
+chunks, starting capture or falling back to native sharing.
+
+Card/footer/overlay fixture checks and consolidated syntax/selection/foreign
+ownership guards passed locally. The consolidated full-card GUI has not yet been
+accepted; prior grid Pause/Resume does not establish it. Source/typing/provider/
+menu/cleanup/voice regressions still need live testing. This remains a research
+artifact, not a plugin implementation or transport acceptance result.
+
+```js
+globalThis.__DASS_NORMAL_CARD_TEST__?.cleanup();
+```
+
 ## First step: `44-sandbox-preflight.js`
 
 Read-only check of loaded module exports, host React/root API availability and
