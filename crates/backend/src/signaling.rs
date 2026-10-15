@@ -338,11 +338,13 @@ fn publisher_authorized(
     now: u32,
 ) -> bool {
     state.publishers.lock().ok().is_some_and(|publishers| {
-        publishers.get(publisher_session_id).is_some_and(|publisher| {
-            publisher.room_id == room_id
-                && store.authorize(&publisher.invite_id, room_id, Permission::Access, now)
-                && store.authorize(&publisher.invite_id, room_id, Permission::Publish, now)
-        })
+        publishers
+            .get(publisher_session_id)
+            .is_some_and(|publisher| {
+                publisher.room_id == room_id
+                    && store.authorize(&publisher.invite_id, room_id, Permission::Access, now)
+                    && store.authorize(&publisher.invite_id, room_id, Permission::Publish, now)
+            })
     })
 }
 
@@ -373,10 +375,10 @@ fn register_viewer_subscription(
     if publisher.active_viewers.len() >= MAX_PRESENCE_VIEWERS {
         return Err(ErrorCode::Overloaded);
     }
-    let viewer_count = u8::try_from(publisher.active_viewers.len() + 1)
-        .map_err(|_| ErrorCode::Overloaded)?;
-    if publisher.presence_enabled {
-        if publisher
+    let viewer_count =
+        u8::try_from(publisher.active_viewers.len() + 1).map_err(|_| ErrorCode::Overloaded)?;
+    if publisher.presence_enabled
+        && publisher
             .presence_sender
             .try_send(ViewerPresenceUpdate {
                 publisher_session_id: publisher_session_id.into(),
@@ -384,10 +386,9 @@ fn register_viewer_subscription(
                 viewer_count,
             })
             .is_err()
-        {
-            publisher.presence_overloaded = true;
-            return Err(ErrorCode::Overloaded);
-        }
+    {
+        publisher.presence_overloaded = true;
+        return Err(ErrorCode::Overloaded);
     }
     publisher.active_viewers.insert(viewer_session_id.into());
     Ok(ViewerSubscriptionLease {
@@ -401,10 +402,10 @@ fn enable_viewer_presence(
     state: &SignalingState,
     joined: &mut JoinedSession,
 ) -> Result<(), ErrorCode> {
-    if !joined
+    if joined
         .receive_peer
         .as_ref()
-        .is_some_and(|peer| !peer.is_subscriber())
+        .is_none_or(|peer| peer.is_subscriber())
     {
         return Err(ErrorCode::InvalidState);
     }
@@ -1022,13 +1023,7 @@ async fn media_operation(
             if joined.receive_peer.is_some() {
                 return Ok(Some(rejected(ErrorCode::InvalidState)));
             }
-            if !publisher_authorized(
-                state,
-                store,
-                &joined.room.room_id,
-                publisher_id,
-                now,
-            ) {
+            if !publisher_authorized(state, store, &joined.room.room_id, publisher_id, now) {
                 return Ok(Some(rejected(ErrorCode::InvalidState)));
             }
             let peer = match SpikePeer::subscriber_for_session(
@@ -1442,14 +1437,16 @@ mod tests {
         assert_eq!(left.publisher_session_id, "publisher_session");
         assert!(matches!(left.change, ViewerPresenceChange::Left));
         assert_eq!(left.viewer_count, 0);
-        assert!(state
-            .publishers
-            .lock()
-            .unwrap()
-            .get("publisher_session")
-            .unwrap()
-            .active_viewers
-            .is_empty());
+        assert!(
+            state
+                .publishers
+                .lock()
+                .unwrap()
+                .get("publisher_session")
+                .unwrap()
+                .active_viewers
+                .is_empty()
+        );
         assert!(unrelated_updates.try_recv().is_err());
     }
 
@@ -1572,14 +1569,16 @@ mod tests {
             presence_receiver.try_recv().unwrap().change,
             ViewerPresenceChange::Joined
         ));
-        assert!(state
-            .publishers
-            .lock()
-            .unwrap()
-            .get("publisher_session")
-            .unwrap()
-            .active_viewers
-            .is_empty());
+        assert!(
+            state
+                .publishers
+                .lock()
+                .unwrap()
+                .get("publisher_session")
+                .unwrap()
+                .active_viewers
+                .is_empty()
+        );
     }
 
     #[test]

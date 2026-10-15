@@ -134,7 +134,7 @@ pub enum CloseReason {
     TransportFailed,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorCode {
     InvalidMessage,
@@ -190,9 +190,7 @@ impl ClientMessage {
             }
             ClientOperation::Publish { session_id }
             | ClientOperation::EnableViewerPresence { session_id }
-            | ClientOperation::Leave { session_id } => {
-                valid_id(session_id)
-            }
+            | ClientOperation::Leave { session_id } => valid_id(session_id),
             ClientOperation::Subscribe {
                 session_id,
                 publisher_id,
