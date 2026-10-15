@@ -62,7 +62,30 @@ or media bar with the documented popout listener risk, and installs no window
 listeners. This is a visual/interaction recreation, not the native component.
 Mock DevTools checks covered layout, mute restoration, keyboard changes and
 Escape without changing real stream audio. Real pointer dragging, playback and
-popout behavior still need runtime acceptance. Native sound cues are not added.
+popout behavior still need runtime acceptance. DASS now reuses Discord's native
+stream sound player for local publishing start/end and successful local watch/stop
+transitions. A previously playing viewer that disconnects uses the ended cue,
+not both ended and viewer-left. Picker cancellation and failed setup are silent;
+plugin disable stops owned cues without playing teardown sounds. Discord's sound
+toggles, sound pack, streamer-mode muting and native 40% cue volume are preserved.
+These hooks and the four MP3 assets were inspected through DevTools in the
+connected stable Discord window (release `a935e483c18dcf082c62ce19bc9e3560fce10581`);
+the numeric Discord build was not exposed by the inspected globals. Actual DASS
+transition playback still needs runtime acceptance.
+The publisher now opts into authenticated, publisher-scoped backend viewer
+presence before sending its offer. Accepted viewer subscriptions play the native
+joined cue for the broadcaster; viewer session cleanup plays the left cue.
+Presence means an accepted subscription, not proven RTC connectivity or playback.
+Events are checked against the publisher's session and count transitions, and
+cannot consume a pending signaling response. Stale events after teardown are
+ignored. No viewer identity is disclosed. Directory arrivals/removals do not generate cues.
+This plugin requires the matching updated backend for publisher presence; there
+is no feature negotiation or silent fallback on an older backend. Rebuild the
+backend with `docker compose build backend` from the repository root, then restart
+it with `docker compose up -d backend`. New Rust presence tests, formatting,
+Clippy and compilation remain unverified in this session because Docker socket
+access was denied; real publisher/viewer sound acceptance is also outstanding.
+Unexpected viewer disconnection is not proof that the publisher ended its stream.
 Browser video controls are removed. Call-level fullscreen/popout controls retain
 their native routes, but popout media/audio handoff still needs runtime testing;
 individual tile popouts and zoom are unavailable. Tile overlays use DASS-owned

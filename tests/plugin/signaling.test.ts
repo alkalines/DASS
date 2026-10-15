@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { BrowserSocket, isAuthenticationRejected, signalingFailureMessage, signalingUrl, SpikeSignaling, SpikeSignalingError } from "../../clients/spike/signaling";
+import { BrowserSocket, isAuthenticationRejected, signalingFailureMessage, signalingUrl, SpikeSignaling, SpikeSignalingError, type ViewerPresence } from "../../clients/spike/signaling";
 
 class Socket extends EventTarget implements BrowserSocket {
     protocol = "dass.v1";
@@ -122,4 +122,57 @@ test("directory snapshots are correlated and stale responses fail closed", async
     socket.reply({ type: "directory", room_id: "room", publisher_ids: ["stale"], publishers: [{ publisher_id: "stale", display_name: "Studio PC" }] }, "client_2");
     await expect(newer).rejects.toThrow("protocol");
     expect(connection.closed.aborted).toBe(true);
+});
+
+async function enablePresence(connection: SpikeSignaling, socket: Socket, updates: ViewerPresence[]) {
+    const enabling = connection.enableViewerPresence("publisher_session", update => updates.push(update));
+    expect(JSON.parse(socket.messages[socket.messages.length - 1]).operation).toEqual({ type: "enable_viewer_presence", session_id: "publisher_session" });
+    socket.reply({ type: "accepted", session_id: "publisher_session" });
+    await enabling;
+}
+
+test("scoped viewer presence interleaves with pending responses without consuming them", async () => {
+    const socket = new Socket();
+    const connection = await connect(socket);
+    const updates: ViewerPresence[] = [];
+    await enablePresence(connection, socket, updates);
+    const offer = connection.request({ type: "offer", session_id: "publisher_session", sdp: "v=0\r\n" }, "answer");
+    socket.reply({ type: "viewer_presence", session_id: "publisher_session", change: "joined", viewer_count: 1 }, "server_viewer_presence");
+    expect(connection.closed.aborted).toBe(false);
+    socket.reply({ type: "answer", session_id: "publisher_session", sdp: "v=0\r\n" });
+    expect((await offer).type).toBe("answer");
+    socket.reply({ type: "viewer_presence", session_id: "publisher_session", change: "left", viewer_count: 0 }, "server_viewer_presence");
+    expect(updates.map(update => update.change)).toEqual(["joined", "left"]);
+    connection.close();
+    socket.reply({ type: "viewer_presence", session_id: "publisher_session", change: "joined", viewer_count: 1 }, "server_viewer_presence");
+    expect(updates).toHaveLength(2);
+});
+
+test("unexpected, cross-session, duplicate and inconsistent presence fails closed", async () => {
+    for (const kind of ["not_enabled", "session", "request", "duplicate", "count", "underflow", "malformed"]) {
+        const socket = new Socket();
+        const connection = await connect(socket);
+        const updates: ViewerPresence[] = [];
+        if (kind !== "not_enabled") await enablePresence(connection, socket, updates);
+        const joined = { type: "viewer_presence", session_id: "publisher_session", change: "joined", viewer_count: 1 };
+        if (kind === "duplicate") socket.reply(joined, "server_viewer_presence");
+        const update = { ...joined, ...(kind === "session" ? { session_id: "other" } : {}),
+            ...(kind === "count" ? { viewer_count: 2 } : {}), ...(kind === "underflow" ? { change: "left", viewer_count: 0 } : {}),
+            ...(kind === "malformed" ? { viewer_count: 0.5 } : {}) };
+        socket.reply(update, kind === "request" ? "client_999" : "server_viewer_presence");
+        expect(connection.closed.aborted).toBe(true);
+        expect(connection.closed.reason.code).toBe("protocol");
+        expect(updates).toHaveLength(kind === "duplicate" ? 1 : 0);
+    }
+});
+
+test("presence opt-in validates its acknowledgement and rejects unsupported backends", async () => {
+    for (const unsupported of [false, true]) {
+        const socket = new Socket();
+        const connection = await connect(socket);
+        const enabling = connection.enableViewerPresence("publisher_session", () => {});
+        socket.reply(unsupported ? { type: "rejected", code: "invalid_message" } : { type: "accepted", session_id: "other" });
+        await expect(enabling).rejects.toThrow(unsupported ? "rejected:invalid_message" : "protocol");
+        expect(connection.closed.aborted).toBe(true);
+    }
 });

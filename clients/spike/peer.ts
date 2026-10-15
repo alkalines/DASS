@@ -184,7 +184,8 @@ export class SpikePeer {
         });
     }
 
-    async activate(options: DassAuthentication & { backendUrl: string; roomId: string; publisherId?: string; signaling?: SpikeSignaling; }): Promise<string> {
+    async activate(options: DassAuthentication & { backendUrl: string; roomId: string; publisherId?: string; signaling?: SpikeSignaling;
+        onViewerPresence?: Parameters<SpikeSignaling["enableViewerPresence"]>[1]; }): Promise<string> {
         this.checkActive();
         if (this.activated || !this.offer || (Boolean(this.capture) === Boolean(options.publisherId))) {
             throw new Error("Select the matching DASS publisher or viewer role once.");
@@ -208,6 +209,11 @@ export class SpikePeer {
                 : { type: "publish", session_id: joined.session_id }, "accepted");
             this.checkActive();
             if (accepted.type !== "accepted" || accepted.session_id !== joined.session_id) throw new Error("DASS role does not match the session.");
+            if (!options.publisherId && options.onViewerPresence) {
+                this.activationStage = "viewer_presence";
+                await this.signaling.enableViewerPresence(joined.session_id, options.onViewerPresence);
+                this.checkActive();
+            }
             this.activationStage = "offer";
             const answer = await this.signaling.request({ type: "offer", session_id: joined.session_id, sdp: this.offer }, "answer");
             this.checkActive();

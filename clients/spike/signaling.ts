@@ -22,6 +22,8 @@ export interface DassAuthentication {
     password?: string;
 }
 
+export type ViewerPresence = Extract<ServerOperation, { type: "viewer_presence"; }>;
+
 export function signalingUrl(baseUrl: string): string {
     let url: URL;
     try { url = new URL(baseUrl); } catch { throw new Error("Invalid DASS backend URL."); }
@@ -71,6 +73,7 @@ export class SpikeSignaling {
     private openWait?: Pending<void>;
     private pending?: Pending<ServerOperation> & { requestId: string; expectedType: ServerOperation["type"]; };
     private expiryTimer?: ReturnType<typeof setTimeout>;
+    private publisherPresence?: { sessionId: string; viewerCount: number; listener: (presence: ViewerPresence) => void; };
     private readonly closedController = new AbortController();
     readonly closed = this.closedController.signal;
 
@@ -138,6 +141,15 @@ export class SpikeSignaling {
         if (!(event instanceof MessageEvent) || typeof event.data !== "string") return this.close("protocol");
         try {
             const message = parseServerMessage(event.data);
+            if (message.operation.type === "viewer_presence") {
+                const presence = this.publisherPresence;
+                const update = message.operation;
+                if (!presence || message.request_id !== "server_viewer_presence" || update.session_id !== presence.sessionId
+                    || update.viewer_count !== presence.viewerCount + (update.change === "joined" ? 1 : -1)) return this.close("protocol");
+                presence.viewerCount = update.viewer_count;
+                presence.listener(update);
+                return;
+            }
             const { pending } = this;
             if (message.operation.type === "closed") {
                 if (pending?.requestId === message.request_id && pending.expectedType === "closed") {
@@ -158,6 +170,16 @@ export class SpikeSignaling {
             this.close("protocol");
         }
     };
+
+    async enableViewerPresence(sessionId: string, listener: (presence: ViewerPresence) => void) {
+        if (this.publisherPresence) throw new Error("DASS viewer presence is already enabled.");
+        this.publisherPresence = { sessionId, viewerCount: 0, listener };
+        const accepted = await this.request({ type: "enable_viewer_presence", session_id: sessionId }, "accepted");
+        if (accepted.type !== "accepted" || accepted.session_id !== sessionId) {
+            this.close("protocol");
+            throw new SpikeSignalingError("protocol");
+        }
+    }
 
     request(operation: ClientOperation, expectedType: ServerOperation["type"]): Promise<ServerOperation> {
         if (!this.active || this.signal.aborted || this.socket.readyState !== 1 || this.pending || this.sequence >= 256) {
@@ -186,6 +208,7 @@ export class SpikeSignaling {
         if (this.pending) { clearTimeout(this.pending.timer); this.pending.reject(error); this.pending = undefined; }
         if (!this.active) return;
         this.active = false;
+        this.publisherPresence = undefined;
         clearTimeout(this.expiryTimer);
         this.socket.removeEventListener("open", this.onOpen);
         this.socket.removeEventListener("message", this.onMessage);

@@ -1,4 +1,4 @@
-import { type ClientMessage, MAX_DIRECTORY_SHARES, MAX_LOGIN_PASSWORD_BYTES, MAX_MESSAGE_BYTES, MAX_PUBLISHER_DISPLAY_NAME_BYTES, PROTOCOL_VERSION, type ServerMessage } from "./signaling";
+import { type ClientMessage, MAX_DIRECTORY_SHARES, MAX_LOGIN_PASSWORD_BYTES, MAX_MESSAGE_BYTES, MAX_PUBLISHER_DISPLAY_NAME_BYTES, MAX_ROOM_MEMBERS, PROTOCOL_VERSION, type ServerMessage } from "./signaling";
 
 const encoder = new TextEncoder();
 const identifier = (value: unknown) => typeof value === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(value);
@@ -6,6 +6,7 @@ const text = (maximumBytes: number) => (value: unknown) => typeof value === "str
     && value.length > 0 && !value.includes("\0") && encoder.encode(value).byteLength <= maximumBytes;
 const boolean = (value: unknown) => typeof value === "boolean";
 const seconds = (value: unknown) => typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= 0xFFFFFFFF;
+const viewerCount = (value: unknown) => typeof value === "number" && Number.isInteger(value) && value >= 0 && value < MAX_ROOM_MEMBERS;
 const member = (values: string[]) => (value: unknown) => typeof value === "string" && values.includes(value);
 const displayName = (value: unknown) => typeof value === "string" && text(MAX_PUBLISHER_DISPLAY_NAME_BYTES)(value)
     && value.trim().length > 0 && ![...value].some(character => /\p{Cc}/u.test(character));
@@ -18,6 +19,7 @@ const clientShapes: Record<string, Shape> = {
     join: { room_id: identifier, require_e2ee: boolean },
     directory: { room_id: identifier },
     publish: { session_id: identifier },
+    enable_viewer_presence: { session_id: identifier },
     subscribe: { session_id: identifier, publisher_id: identifier },
     offer: { session_id: identifier, sdp: text(12288) },
     ice: { session_id: identifier, candidate: text(2048) },
@@ -36,6 +38,7 @@ const serverShapes: Record<string, Shape> = {
     accepted: { session_id: identifier },
     answer: { session_id: identifier, sdp: text(12288) },
     ice: { session_id: identifier, candidate: text(2048) },
+    viewer_presence: { session_id: identifier, change: member(["joined", "left"]), viewer_count: viewerCount },
     closed: { session_id: identifier, reason: member(["left", "expired", "revoked", "setup_timeout", "overloaded", "transport_failed"]) },
     rejected: { code: member(["invalid_message", "unsupported_version", "unauthorized", "replay", "e2ee_unavailable", "overloaded", "invalid_state", "transport_unavailable"]) }
 };
@@ -67,6 +70,9 @@ function parse(message: string, shapes: Record<string, Shape>): unknown {
                 const publishers = operation.publishers as Array<{ publisher_id: string; display_name: string; }>;
                 return ids.length === publishers.length
                     && ids.every((id, index) => id === publishers[index].publisher_id);
+            }
+            if (shapes === serverShapes && operation.type === "viewer_presence") {
+                return operation.change !== "joined" || (operation.viewer_count as number) > 0;
             }
             return true;
         }

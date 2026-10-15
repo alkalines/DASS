@@ -90,6 +90,7 @@ class Socket extends EventTarget {
     static instances: Socket[] = [];
     static failOffer = false;
     static rejectSubscribe = false;
+    static rejectPresence = false;
     protocol = "dass.v1";
     readyState = 1;
     bufferedAmount = 0;
@@ -104,6 +105,8 @@ class Socket extends EventTarget {
             case "login": operation = { type: "authenticated", expires_at_unix_seconds: Math.floor(Date.now() / 1000) + 60 }; break;
             case "join": operation = { type: "joined", session_id: "session" }; break;
             case "publish": operation = { type: "accepted", session_id: "session" }; break;
+            case "enable_viewer_presence": operation = Socket.rejectPresence ? { type: "rejected", code: "invalid_message" }
+                : { type: "accepted", session_id: "session" }; break;
             case "subscribe": operation = Socket.rejectSubscribe ? { type: "rejected", code: "invalid_state" }
                 : { type: "accepted", session_id: "session" }; break;
             case "offer": operation = Socket.failOffer
@@ -132,6 +135,7 @@ async function withBrowserDoubles(run: () => Promise<void>) {
     Socket.instances = [];
     Socket.failOffer = false;
     Socket.rejectSubscribe = false;
+    Socket.rejectPresence = false;
     for (const [name, value] of Object.entries(doubles)) Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
     try { await run(); } finally {
         for (const [name, descriptor] of originals) {
@@ -165,6 +169,37 @@ test("viewer reuses directory authentication without a second credential login",
         connection.close();
         expect(Socket.instances[0].closes).toBe(1);
     } finally { connection.close(); signaling.close(); }
+}));
+
+test("publisher opts into presence before its offer and receives scoped join/leave events", async () => withBrowserDoubles(async () => {
+    const source = capture();
+    const connection = await SpikePeer.prepare({ experimental: true, signal: new AbortController().signal, capture: source.lease });
+    const updates: number[] = [];
+    try {
+        await connection.activate({ backendUrl: "https://dass.example", credential: "separate_secret", roomId: "room",
+            onViewerPresence: presence => updates.push(presence.viewer_count) });
+        const socket = Socket.instances[0];
+        expect(socket.operations.map(operation => operation.type)).toEqual(["login", "join", "publish", "enable_viewer_presence", "offer"]);
+        for (const [change, viewer_count] of [["joined", 1], ["left", 0]]) {
+            socket.dispatchEvent(new MessageEvent("message", { data: JSON.stringify({ protocol_version: 1, request_id: "server_viewer_presence",
+                operation: { type: "viewer_presence", session_id: "session", change, viewer_count } }) }));
+        }
+        expect(updates).toEqual([1, 0]);
+        expect(connection.closed.aborted).toBe(false);
+    } finally { connection.close(); }
+}));
+
+test("unsupported presence backend closes publishing without offering or keeping capture", async () => withBrowserDoubles(async () => {
+    Socket.rejectPresence = true;
+    const source = capture();
+    const connection = await SpikePeer.prepare({ experimental: true, signal: new AbortController().signal, capture: source.lease });
+    try {
+        await expect(connection.activate({ backendUrl: "https://dass.example", credential: "separate_secret", roomId: "room",
+            onViewerPresence: () => {} })).rejects.toThrow("No Discord fallback");
+        expect(connection.closeMessage).toContain("viewer_presence:rejected:invalid_message");
+        expect(source.releases).toBe(1);
+        expect(Socket.instances[0].operations.map(operation => operation.type)).not.toContain("offer");
+    } finally { connection.close(); }
 }));
 
 test("preparation has a 180-second deadline and expiry releases capture", async () => withBrowserDoubles(async () => {

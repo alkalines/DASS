@@ -42,6 +42,9 @@ pub enum ClientOperation {
     Publish {
         session_id: String,
     },
+    EnableViewerPresence {
+        session_id: String,
+    },
     Subscribe {
         session_id: String,
         publisher_id: String,
@@ -75,6 +78,13 @@ pub struct PublisherMetadata {
 }
 
 #[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ViewerPresenceChange {
+    Joined,
+    Left,
+}
+
+#[derive(Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ServerOperation {
     Authenticated {
@@ -98,6 +108,11 @@ pub enum ServerOperation {
     Ice {
         session_id: String,
         candidate: String,
+    },
+    ViewerPresence {
+        session_id: String,
+        change: ViewerPresenceChange,
+        viewer_count: u8,
     },
     Closed {
         session_id: String,
@@ -173,7 +188,9 @@ impl ClientMessage {
             ClientOperation::Join { room_id, .. } | ClientOperation::Directory { room_id } => {
                 valid_id(room_id)
             }
-            ClientOperation::Publish { session_id } | ClientOperation::Leave { session_id } => {
+            ClientOperation::Publish { session_id }
+            | ClientOperation::EnableViewerPresence { session_id }
+            | ClientOperation::Leave { session_id } => {
                 valid_id(session_id)
             }
             ClientOperation::Subscribe {
@@ -265,9 +282,55 @@ mod tests {
     }
 
     #[test]
+    fn publisher_presence_opt_in_requires_a_valid_session_identifier() {
+        let message = ClientMessage {
+            protocol_version: crate::PROTOCOL_VERSION,
+            request_id: "enable_presence".into(),
+            operation: ClientOperation::EnableViewerPresence {
+                session_id: "publisher_session".into(),
+            },
+        };
+        assert!(message.is_valid());
+        let invalid = ClientMessage {
+            operation: ClientOperation::EnableViewerPresence {
+                session_id: "discord/channel".into(),
+            },
+            ..message
+        };
+        assert!(!invalid.is_valid());
+    }
+
+    #[test]
     fn parser_rejects_oversized_and_malformed_messages_without_details() {
         for bytes in [b"{".to_vec(), vec![b' '; MAX_MESSAGE_BYTES + 1]] {
             assert!(matches!(parse_client_message(&bytes), Err(InvalidMessage)));
         }
+    }
+
+    #[test]
+    fn viewer_presence_is_a_server_notification_scoped_to_a_publisher_session() {
+        let joined = serde_json::to_value(ServerMessage {
+            protocol_version: crate::PROTOCOL_VERSION,
+            request_id: "server_viewer_presence".into(),
+            operation: ServerOperation::ViewerPresence {
+                session_id: "publisher_session".into(),
+                change: ViewerPresenceChange::Joined,
+                viewer_count: 1,
+            },
+        })
+        .unwrap();
+        assert_eq!(
+            joined,
+            serde_json::json!({
+                "protocol_version": 1,
+                "request_id": "server_viewer_presence",
+                "operation": {
+                    "type": "viewer_presence",
+                    "session_id": "publisher_session",
+                    "change": "joined",
+                    "viewer_count": 1
+                }
+            })
+        );
     }
 }

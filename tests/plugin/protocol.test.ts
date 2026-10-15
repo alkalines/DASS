@@ -11,6 +11,7 @@ describe("proposed signaling protocol", () => {
             { type: "join", room_id: "room_1", require_e2ee: true },
             { type: "directory", room_id: "room_1" },
             { type: "publish", session_id: "session_1" },
+            { type: "enable_viewer_presence", session_id: "session_1" },
             { type: "subscribe", session_id: "session_1", publisher_id: "publisher_1" },
             { type: "offer", session_id: "session_1", sdp: "v=0\r\n" },
             { type: "ice", session_id: "session_1", candidate: "candidate:example" },
@@ -46,10 +47,20 @@ describe("proposed signaling protocol", () => {
             { type: "accepted", session_id: "s" },
             { type: "answer", session_id: "s", sdp: "v=0\r\n" },
             { type: "ice", session_id: "s", candidate: "candidate:example" },
+            { type: "viewer_presence", session_id: "publisher_session", change: "joined", viewer_count: 1 },
+            { type: "viewer_presence", session_id: "publisher_session", change: "left", viewer_count: 0 },
             { type: "closed", session_id: "s", reason: "revoked" },
             { type: "rejected", code: "e2ee_unavailable" }
         ]) expect(parseServerMessage(message(operation)).operation).toEqual(operation);
         expect(() => parseServerMessage(message({ type: "closed", session_id: "s", reason: "unknown" }))).toThrow();
+        for (const operation of [
+            { type: "viewer_presence", session_id: "s", change: "connected", viewer_count: 1 },
+            { type: "viewer_presence", session_id: "s", change: "joined", viewer_count: 0 },
+            { type: "viewer_presence", session_id: "s", change: "left", viewer_count: -1 },
+            { type: "viewer_presence", session_id: "s", change: "left", viewer_count: 16 },
+            { type: "viewer_presence", session_id: "s", change: "left", viewer_count: 17 },
+            { type: "viewer_presence", session_id: "s", change: "left", viewer_count: 0, viewer_id: "private" }
+        ]) expect(() => parseServerMessage(message(operation))).toThrow();
     });
 
     test("directory IDs and publisher metadata are bounded, exact and matched; client updates are forbidden", () => {

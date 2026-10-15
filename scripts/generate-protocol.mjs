@@ -5,7 +5,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 const source = readFileSync(new URL("../crates/protocol/src/signaling.rs", import.meta.url), "utf8");
 const destination = new URL("../crates/protocol/generated/signaling.ts", import.meta.url);
 const snakeCase = name => name.replace(/[A-Z]/g, (letter, index) => `${index ? "_" : ""}${letter.toLowerCase()}`);
-const types = new Map([["String", "string"], ["bool", "boolean"], ["u16", "number"], ["u32", "number"]]);
+const types = new Map([["String", "string"], ["bool", "boolean"], ["u8", "number"], ["u16", "number"], ["u32", "number"]]);
 const names = [...source.matchAll(/pub (?:struct|enum) (\w+)/g)].map(match => match[1]);
 for (const name of names) types.set(name, name);
 const fields = text => text.split(",").map(field => field.trim().replace(/^pub /, "")).filter(Boolean).map(field => {

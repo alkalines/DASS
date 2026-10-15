@@ -23,10 +23,15 @@ export type ClientOperation =
     | { type: "join"; room_id: string; require_e2ee: boolean }
     | { type: "directory"; room_id: string }
     | { type: "publish"; session_id: string }
+    | { type: "enable_viewer_presence"; session_id: string }
     | { type: "subscribe"; session_id: string; publisher_id: string }
     | { type: "offer"; session_id: string; sdp: string }
     | { type: "ice"; session_id: string; candidate: string }
     | { type: "leave"; session_id: string };
+
+export type ViewerPresenceChange =
+    | "joined"
+    | "left";
 
 export type ServerOperation =
     | { type: "authenticated"; expires_at_unix_seconds: number }
@@ -35,6 +40,7 @@ export type ServerOperation =
     | { type: "accepted"; session_id: string }
     | { type: "answer"; session_id: string; sdp: string }
     | { type: "ice"; session_id: string; candidate: string }
+    | { type: "viewer_presence"; session_id: string; change: ViewerPresenceChange; viewer_count: number }
     | { type: "closed"; session_id: string; reason: CloseReason }
     | { type: "rejected"; code: ErrorCode };
 

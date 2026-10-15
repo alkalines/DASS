@@ -15,6 +15,7 @@ export interface PublishStatus {
     phase: "idle" | "authenticating" | "capturing" | "preparing" | "prepared" | "activating" | "publishing" | "failed";
     message: string;
     candidates: readonly string[];
+    viewerCount?: number;
 }
 
 /** The picker (including quality/audio consent) has returned an owned capture. */
@@ -128,7 +129,9 @@ export class PublishController {
             const access = this.session.getAccess();
             if (!operation.signaling) operation.signaling = await this.dependencies.connect({ experimental: true, backendUrl, ...access, signal: operation.abort.signal });
             if (!this.current(operation)) { operation.signaling.close(); return; }
-            await operation.peer.activate({ backendUrl, ...access, signaling: operation.signaling });
+            await operation.peer.activate({ backendUrl, ...access, signaling: operation.signaling, onViewerPresence: presence => {
+                if (this.current(operation)) this.update({ ...this.status, viewerCount: presence.viewer_count });
+            } });
             if (this.current(operation)) this.update({ ...this.status, phase: "publishing", message: "DASS negotiation complete. The stream appears in the directory once media connects. Close this panel to keep sharing, or Stop sharing to end capture." });
         } catch (error) {
             logDiagnostic("publisher activation failed", { code: error instanceof SpikeSignalingError ? error.code : browserFailureCode(error),

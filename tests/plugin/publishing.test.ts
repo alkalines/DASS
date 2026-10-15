@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { SpikePeer } from "../../clients/spike/peer";
-import { SpikeSignaling, SpikeSignalingError } from "../../clients/spike/signaling";
+import { SpikeSignaling, SpikeSignalingError, type ViewerPresence } from "../../clients/spike/signaling";
 import { CaptureLease } from "../../plugins/dass/routing";
 import { hasAcceptedPublishCapture, PublishController } from "../../plugins/dass/publishing";
 import { DassSession } from "../../plugins/dass/session";
@@ -14,12 +14,14 @@ function fixture() {
     let releases = 0;
     let deny = false;
     let failure: SpikeSignalingError | undefined;
+    let presenceListener: ((presence: ViewerPresence) => void) | undefined;
     const signalingClosed = new AbortController();
     const signaling = { closed: signalingClosed.signal, close: () => signalingClosed.abort() } as unknown as SpikeSignaling;
     const peerClosed = new AbortController();
     const peer = { closed: peerClosed.signal, candidates: ["candidate:1 1 UDP 1 192.168.1.2 50000 typ host"],
         closeMessage: "Source ended.", close: () => peerClosed.abort(), activate: async (options: any) => {
-            events.push("activate");
+             events.push("activate");
+             presenceListener = options.onViewerPresence;
             expect(options.roomId).toBe("authorized_room");
             expect(options.credential).toBe("separate_secret");
             return "publisher_session";
@@ -38,6 +40,7 @@ function fixture() {
     });
     controller.start();
     return { session, controller, bridge, events, peer, lease, signalingClosed, releases: () => releases,
+        presence: (change: ViewerPresence["change"], viewerCount: number) => presenceListener?.({ type: "viewer_presence", session_id: "publisher_session", change, viewer_count: viewerCount }),
         deny: () => { deny = true; }, failConnection: (error: SpikeSignalingError) => { failure = error; }, exit: () => { context = undefined; controller.reset(); } };
 }
 
@@ -79,6 +82,21 @@ test("denied login prevents capture and invalidates session credentials", async 
         expect(f.events).toEqual(["authenticate"]);
         expect(f.controller.getSnapshot().phase).toBe("failed");
         expect(f.session.getSnapshot().configured).toBe(false);
+    } finally { f.controller.stop(); }
+});
+
+test("publisher receives viewer presence only for its current publishing operation", async () => {
+    const f = fixture();
+    try {
+        await f.controller.publish("https://dass.example", f.bridge);
+        f.presence("joined", 1);
+        expect(f.controller.getSnapshot().viewerCount).toBe(1);
+        f.presence("left", 0);
+        expect(f.controller.getSnapshot().viewerCount).toBe(0);
+        f.exit();
+        f.presence("joined", 1);
+        expect(f.controller.getSnapshot().phase).toBe("idle");
+        expect(f.controller.getSnapshot().viewerCount).toBeUndefined();
     } finally { f.controller.stop(); }
 });
 

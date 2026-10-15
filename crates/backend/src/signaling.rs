@@ -20,8 +20,9 @@ use dass_protocol::{
     PROTOCOL_VERSION,
     signaling::{
         ClientOperation, CloseReason, ErrorCode, LOGIN_DEADLINE_MS, MAX_DIRECTORY_SHARES,
-        MAX_MESSAGE_BYTES, MAX_ROOM_MEMBERS, MAX_SESSIONS, PublisherMetadata, SETUP_DEADLINE_MS,
-        ServerMessage, ServerOperation, parse_client_message,
+        MAX_MESSAGE_BYTES, MAX_QUEUED_MESSAGES, MAX_ROOM_MEMBERS, MAX_SESSIONS, PublisherMetadata,
+        SETUP_DEADLINE_MS, ServerMessage, ServerOperation, ViewerPresenceChange,
+        parse_client_message,
     },
 };
 use std::{
@@ -34,7 +35,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::{
-    sync::{OwnedSemaphorePermit, Semaphore, watch},
+    sync::{OwnedSemaphorePermit, Semaphore, mpsc, watch},
     time::Instant,
 };
 use tracing::Instrument;
@@ -46,6 +47,8 @@ const MAX_UNAUTHENTICATED_CONNECTIONS: usize = 16;
 const MAX_REQUEST_IDS: usize = 256;
 const MAX_MESSAGES_PER_SECOND: usize = 32;
 const SEND_TIMEOUT: Duration = Duration::from_secs(1);
+const PRESENCE_REQUEST_ID: &str = "server_viewer_presence";
+const MAX_PRESENCE_VIEWERS: usize = MAX_ROOM_MEMBERS - 1;
 
 #[derive(Clone)]
 pub struct SignalingState {
@@ -201,11 +204,23 @@ struct JoinedSession {
     observed_peer_ip: Option<Ipv4Addr>,
     receive_peer: Option<SpikePeer>,
     publisher: Option<PublisherLease>,
+    viewer_presence_enabled: bool,
+    viewer_subscription: Option<ViewerSubscriptionLease>,
 }
 
 struct PublisherEntry {
     room_id: String,
     invite_id: String,
+    active_viewers: HashSet<String>,
+    presence_sender: mpsc::Sender<ViewerPresenceUpdate>,
+    presence_enabled: bool,
+    presence_overloaded: bool,
+}
+
+struct ViewerPresenceUpdate {
+    publisher_session_id: String,
+    change: ViewerPresenceChange,
+    viewer_count: u8,
 }
 
 // Only the authenticated RTC owner can register a connected publisher. No client
@@ -223,10 +238,66 @@ impl Drop for PublisherLease {
     }
 }
 
+impl PublisherLease {
+    fn presence_overloaded(&self) -> bool {
+        self.publishers
+            .lock()
+            .map(|publishers| {
+                publishers
+                    .get(&self.session_id)
+                    .is_none_or(|publisher| publisher.presence_overloaded)
+            })
+            .unwrap_or(true)
+    }
+}
+
+struct ViewerSubscriptionLease {
+    publisher_session_id: String,
+    viewer_session_id: String,
+    publishers: Arc<Mutex<HashMap<String, PublisherEntry>>>,
+}
+
+impl Drop for ViewerSubscriptionLease {
+    fn drop(&mut self) {
+        let Ok(mut publishers) = self.publishers.lock() else {
+            return;
+        };
+        let Some(publisher) = publishers.get_mut(&self.publisher_session_id) else {
+            // The publisher's own session already ended; never route a departure
+            // to a replacement publisher or another share.
+            return;
+        };
+        if !publisher.active_viewers.remove(&self.viewer_session_id) {
+            return;
+        }
+        let Ok(viewer_count) = u8::try_from(publisher.active_viewers.len()) else {
+            publisher.presence_overloaded = true;
+            return;
+        };
+        if !publisher.presence_enabled {
+            return;
+        }
+        if publisher
+            .presence_sender
+            .try_send(ViewerPresenceUpdate {
+                publisher_session_id: self.publisher_session_id.clone(),
+                change: ViewerPresenceChange::Left,
+                viewer_count,
+            })
+            .is_err()
+        {
+            // A publisher that cannot drain its bounded event queue is closed by
+            // its owning connection loop rather than silently losing presence.
+            publisher.presence_overloaded = true;
+        }
+    }
+}
+
 fn register_publisher(
     state: &SignalingState,
     joined: &mut JoinedSession,
     invite_id: &str,
+    presence_sender: &mpsc::Sender<ViewerPresenceUpdate>,
 ) -> Result<(), ()> {
     if joined.publisher.is_some()
         || !joined
@@ -245,6 +316,10 @@ fn register_publisher(
         PublisherEntry {
             room_id: joined.room.room_id.clone(),
             invite_id: invite_id.into(),
+            active_viewers: HashSet::new(),
+            presence_sender: presence_sender.clone(),
+            presence_enabled: joined.viewer_presence_enabled,
+            presence_overloaded: false,
         },
     );
     joined.publisher = Some(PublisherLease {
@@ -252,6 +327,101 @@ fn register_publisher(
         publishers: state.publishers.clone(),
     });
     tracing::info!("connected publisher registered in directory");
+    Ok(())
+}
+
+fn publisher_authorized(
+    state: &SignalingState,
+    store: &InviteStore,
+    room_id: &str,
+    publisher_session_id: &str,
+    now: u32,
+) -> bool {
+    state.publishers.lock().ok().is_some_and(|publishers| {
+        publishers.get(publisher_session_id).is_some_and(|publisher| {
+            publisher.room_id == room_id
+                && store.authorize(&publisher.invite_id, room_id, Permission::Access, now)
+                && store.authorize(&publisher.invite_id, room_id, Permission::Publish, now)
+        })
+    })
+}
+
+fn register_viewer_subscription(
+    state: &SignalingState,
+    store: &InviteStore,
+    room_id: &str,
+    publisher_session_id: &str,
+    viewer_session_id: &str,
+    now: u32,
+) -> Result<ViewerSubscriptionLease, ErrorCode> {
+    if publisher_session_id == viewer_session_id {
+        return Err(ErrorCode::InvalidState);
+    }
+    let mut publishers = state.publishers.lock().map_err(|_| ErrorCode::Overloaded)?;
+    let Some(publisher) = publishers.get_mut(publisher_session_id) else {
+        return Err(ErrorCode::InvalidState);
+    };
+    if publisher.room_id != room_id
+        || !store.authorize(&publisher.invite_id, room_id, Permission::Access, now)
+        || !store.authorize(&publisher.invite_id, room_id, Permission::Publish, now)
+    {
+        return Err(ErrorCode::InvalidState);
+    }
+    if publisher.active_viewers.contains(viewer_session_id) {
+        return Err(ErrorCode::InvalidState);
+    }
+    if publisher.active_viewers.len() >= MAX_PRESENCE_VIEWERS {
+        return Err(ErrorCode::Overloaded);
+    }
+    let viewer_count = u8::try_from(publisher.active_viewers.len() + 1)
+        .map_err(|_| ErrorCode::Overloaded)?;
+    if publisher.presence_enabled {
+        if publisher
+            .presence_sender
+            .try_send(ViewerPresenceUpdate {
+                publisher_session_id: publisher_session_id.into(),
+                change: ViewerPresenceChange::Joined,
+                viewer_count,
+            })
+            .is_err()
+        {
+            publisher.presence_overloaded = true;
+            return Err(ErrorCode::Overloaded);
+        }
+    }
+    publisher.active_viewers.insert(viewer_session_id.into());
+    Ok(ViewerSubscriptionLease {
+        publisher_session_id: publisher_session_id.into(),
+        viewer_session_id: viewer_session_id.into(),
+        publishers: state.publishers.clone(),
+    })
+}
+
+fn enable_viewer_presence(
+    state: &SignalingState,
+    joined: &mut JoinedSession,
+) -> Result<(), ErrorCode> {
+    if !joined
+        .receive_peer
+        .as_ref()
+        .is_some_and(|peer| !peer.is_subscriber())
+    {
+        return Err(ErrorCode::InvalidState);
+    }
+    if joined.viewer_presence_enabled {
+        return Ok(());
+    }
+    if let Some(publisher_lease) = &joined.publisher {
+        let mut publishers = state.publishers.lock().map_err(|_| ErrorCode::Overloaded)?;
+        let Some(publisher) = publishers.get_mut(&publisher_lease.session_id) else {
+            return Err(ErrorCode::InvalidState);
+        };
+        if !publisher.active_viewers.is_empty() {
+            return Err(ErrorCode::InvalidState);
+        }
+        publisher.presence_enabled = true;
+    }
+    joined.viewer_presence_enabled = true;
     Ok(())
 }
 
@@ -606,6 +776,8 @@ async fn run(
     }
     let mut session: Option<JoinedSession> = None;
     let mut last_left: Option<String> = None;
+    let (publisher_presence_sender, mut publisher_presence_receiver) =
+        mpsc::channel(MAX_QUEUED_MESSAGES);
     let tick_ms = if state.rtc_spike.is_some() { 10 } else { 250 };
     let mut tick = tokio::time::interval(Duration::from_millis(tick_ms));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -636,10 +808,47 @@ async fn run(
                     break;
                 }
                 if let Some(joined) = session.as_mut()
-                    && register_publisher(&state, joined, &identity.invite_id).is_err() {
+                    && register_publisher(
+                        &state,
+                        joined,
+                        &identity.invite_id,
+                        &publisher_presence_sender,
+                    )
+                    .is_err()
+                {
                     close(&mut socket, session.as_ref(), CloseReason::Overloaded).await;
                     break;
                 }
+                if session.as_ref().is_some_and(|joined| {
+                    joined
+                        .publisher
+                        .as_ref()
+                        .is_some_and(PublisherLease::presence_overloaded)
+                }) {
+                    close(&mut socket, session.as_ref(), CloseReason::Overloaded).await;
+                    break;
+                }
+            }
+            presence = publisher_presence_receiver.recv() => {
+                let Some(presence) = presence else { break; };
+                if !session.as_ref().is_some_and(|joined| {
+                    joined.publisher.as_ref().is_some_and(|publisher| {
+                        publisher.session_id == presence.publisher_session_id
+                    })
+                }) {
+                    // A prior publish session may have queued an event before this
+                    // connection left and joined again. Never deliver it in the new scope.
+                    continue;
+                }
+                if !send(
+                    &mut socket,
+                    PRESENCE_REQUEST_ID.into(),
+                    ServerOperation::ViewerPresence {
+                        session_id: presence.publisher_session_id,
+                        change: presence.change,
+                        viewer_count: presence.viewer_count,
+                    },
+                ).await { break; }
             }
             received = socket.recv() => {
                 if !rate.admit(MAX_MESSAGES_PER_SECOND) { close(&mut socket, session.as_ref(), CloseReason::Overloaded).await; break; }
@@ -702,6 +911,10 @@ async fn run(
         }
     }
     // RAII releases membership and the exclusive credential lease on every exit.
+    if let Some(joined) = session.as_mut() {
+        drop(joined.receive_peer.take());
+        drop(joined.viewer_subscription.take());
+    }
     tracing::info!("signaling socket ended; releasing session resources");
 }
 
@@ -726,6 +939,7 @@ fn operation_name(operation: &ClientOperation) -> &'static str {
         ClientOperation::Join { .. } => "join",
         ClientOperation::Leave { .. } => "leave",
         ClientOperation::Publish { .. } => "publish",
+        ClientOperation::EnableViewerPresence { .. } => "enable_viewer_presence",
         ClientOperation::Subscribe { .. } => "subscribe",
         ClientOperation::Offer { .. } => "offer",
         ClientOperation::Ice { .. } => "ice",
@@ -808,7 +1022,16 @@ async fn media_operation(
             if joined.receive_peer.is_some() {
                 return Ok(Some(rejected(ErrorCode::InvalidState)));
             }
-            match SpikePeer::subscriber_for_session(
+            if !publisher_authorized(
+                state,
+                store,
+                &joined.room.room_id,
+                publisher_id,
+                now,
+            ) {
+                return Ok(Some(rejected(ErrorCode::InvalidState)));
+            }
+            let peer = match SpikePeer::subscriber_for_session(
                 config,
                 &joined.room.room_id,
                 publisher_id,
@@ -817,10 +1040,23 @@ async fn media_operation(
             )
             .await
             {
-                Ok(peer) => joined.receive_peer = Some(peer),
+                Ok(peer) => peer,
                 // Deliberately do not disclose whether a publisher exists in another room.
                 Err(_) => return Ok(Some(rejected(ErrorCode::InvalidState))),
-            }
+            };
+            let subscription = match register_viewer_subscription(
+                state,
+                store,
+                &joined.room.room_id,
+                publisher_id,
+                session_id,
+                now,
+            ) {
+                Ok(subscription) => subscription,
+                Err(code) => return Ok(Some(rejected(code))),
+            };
+            joined.receive_peer = Some(peer);
+            joined.viewer_subscription = Some(subscription);
             ServerOperation::Accepted {
                 session_id: session_id.clone(),
             }
@@ -915,6 +1151,8 @@ fn operate_for_peer(
                 observed_peer_ip,
                 receive_peer: None,
                 publisher: None,
+                viewer_presence_enabled: false,
+                viewer_subscription: None,
             });
             *last_left = None;
             ServerOperation::Joined { session_id }
@@ -945,6 +1183,9 @@ fn operate_for_peer(
         operation => {
             let (session_id, permission) = match &operation {
                 ClientOperation::Publish { session_id } => (session_id, Permission::Publish),
+                ClientOperation::EnableViewerPresence { session_id } => {
+                    (session_id, Permission::Publish)
+                }
                 ClientOperation::Subscribe { session_id, .. } => {
                     (session_id, Permission::Subscribe)
                 }
@@ -953,13 +1194,21 @@ fn operate_for_peer(
                 _ => return rejected(ErrorCode::InvalidState),
             };
             let Some(joined) = session
-                .as_ref()
+                .as_mut()
                 .filter(|joined| &joined.session_id == session_id)
             else {
                 return rejected(ErrorCode::InvalidState);
             };
             if !store.authorize(invite_id, &joined.room.room_id, permission, now) {
                 return rejected(ErrorCode::Unauthorized);
+            }
+            if matches!(&operation, ClientOperation::EnableViewerPresence { .. }) {
+                if let Err(code) = enable_viewer_presence(state, joined) {
+                    return rejected(code);
+                }
+                return ServerOperation::Accepted {
+                    session_id: session_id.clone(),
+                };
             }
             // Never return Accepted or process SDP/ICE before a media owner exists.
             rejected(ErrorCode::TransportUnavailable)
@@ -1009,11 +1258,16 @@ mod tests {
         );
         let (_sender, receiver) = watch::channel(store.clone());
         let state = SignalingState::new(receiver);
+        let (presence_sender, _presence_receiver) = mpsc::channel(MAX_QUEUED_MESSAGES);
         state.publishers.lock().unwrap().insert(
             "source".into(),
             PublisherEntry {
                 room_id: "room".into(),
                 invite_id: "publisher".into(),
+                active_viewers: HashSet::new(),
+                presence_sender: presence_sender.clone(),
+                presence_enabled: false,
+                presence_overloaded: false,
             },
         );
         let lease = PublisherLease {
@@ -1041,6 +1295,10 @@ mod tests {
             PublisherEntry {
                 room_id: "room".into(),
                 invite_id: "unnamed_publisher".into(),
+                active_viewers: HashSet::new(),
+                presence_sender: presence_sender.clone(),
+                presence_enabled: false,
+                presence_overloaded: false,
             },
         );
         let ServerOperation::Directory {
@@ -1074,6 +1332,10 @@ mod tests {
                 PublisherEntry {
                     room_id: "room".into(),
                     invite_id: "publisher".into(),
+                    active_viewers: HashSet::new(),
+                    presence_sender: presence_sender.clone(),
+                    presence_enabled: false,
+                    presence_overloaded: false,
                 },
             );
         }
@@ -1081,6 +1343,243 @@ mod tests {
             directory(&state, &store, "viewer", "room".into(), 99),
             ServerOperation::Directory { publisher_ids, .. } if publisher_ids.len() == MAX_DIRECTORY_SHARES
         ));
+    }
+
+    #[tokio::test]
+    async fn viewer_presence_is_publisher_scoped_and_subscription_drop_emits_departure() {
+        let (publisher_invite, _) = create_invite(
+            "presence_publisher".into(),
+            vec![RoomGrant {
+                room_id: "room".into(),
+                access: true,
+                publish: true,
+                subscribe: false,
+            }],
+            100,
+        )
+        .unwrap();
+        let (viewer_invite, _) = create_invite(
+            "presence_viewer".into(),
+            vec![RoomGrant {
+                room_id: "room".into(),
+                access: true,
+                publish: false,
+                subscribe: true,
+            }],
+            100,
+        )
+        .unwrap();
+        let store = Arc::new(
+            InviteStore::from_bytes(
+                &serde_json::to_vec(&InviteFile {
+                    version: 1,
+                    invites: vec![publisher_invite, viewer_invite],
+                })
+                .unwrap(),
+            )
+            .unwrap(),
+        );
+        let (_sender, receiver) = watch::channel(store.clone());
+        let state = SignalingState::new(receiver);
+        let (publisher_presence, mut publisher_updates) = mpsc::channel(MAX_QUEUED_MESSAGES);
+        let (_unrelated_presence, mut unrelated_updates) = mpsc::channel(MAX_QUEUED_MESSAGES);
+        for (session_id, invite_id, presence_sender, presence_enabled) in [
+            (
+                "publisher_session",
+                "presence_publisher",
+                publisher_presence.clone(),
+                true,
+            ),
+            (
+                "unrelated_session",
+                "presence_publisher",
+                _unrelated_presence,
+                false,
+            ),
+        ] {
+            state.publishers.lock().unwrap().insert(
+                session_id.into(),
+                PublisherEntry {
+                    room_id: "room".into(),
+                    invite_id: invite_id.into(),
+                    active_viewers: HashSet::new(),
+                    presence_sender,
+                    presence_enabled,
+                    presence_overloaded: false,
+                },
+            );
+        }
+
+        let subscription = register_viewer_subscription(
+            &state,
+            &store,
+            "room",
+            "publisher_session",
+            "viewer_session",
+            99,
+        )
+        .unwrap();
+        let joined = publisher_updates.try_recv().unwrap();
+        assert_eq!(joined.publisher_session_id, "publisher_session");
+        assert!(matches!(joined.change, ViewerPresenceChange::Joined));
+        assert_eq!(joined.viewer_count, 1);
+        assert!(unrelated_updates.try_recv().is_err());
+        assert!(matches!(
+            register_viewer_subscription(
+                &state,
+                &store,
+                "other_room",
+                "publisher_session",
+                "other_viewer",
+                99
+            ),
+            Err(ErrorCode::InvalidState)
+        ));
+        assert!(unrelated_updates.try_recv().is_err());
+
+        drop(subscription);
+        let left = publisher_updates.try_recv().unwrap();
+        assert_eq!(left.publisher_session_id, "publisher_session");
+        assert!(matches!(left.change, ViewerPresenceChange::Left));
+        assert_eq!(left.viewer_count, 0);
+        assert!(state
+            .publishers
+            .lock()
+            .unwrap()
+            .get("publisher_session")
+            .unwrap()
+            .active_viewers
+            .is_empty());
+        assert!(unrelated_updates.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn presence_is_not_sent_until_the_publisher_opts_in() {
+        let (publisher_invite, _) = create_invite(
+            "presence_publisher".into(),
+            vec![RoomGrant {
+                room_id: "room".into(),
+                access: true,
+                publish: true,
+                subscribe: false,
+            }],
+            100,
+        )
+        .unwrap();
+        let store = Arc::new(
+            InviteStore::from_bytes(
+                &serde_json::to_vec(&InviteFile {
+                    version: 1,
+                    invites: vec![publisher_invite],
+                })
+                .unwrap(),
+            )
+            .unwrap(),
+        );
+        let (_sender, receiver) = watch::channel(store.clone());
+        let state = SignalingState::new(receiver);
+        let (presence_sender, mut presence_receiver) = mpsc::channel(MAX_QUEUED_MESSAGES);
+        state.publishers.lock().unwrap().insert(
+            "publisher_session".into(),
+            PublisherEntry {
+                room_id: "room".into(),
+                invite_id: "presence_publisher".into(),
+                active_viewers: HashSet::new(),
+                presence_sender,
+                presence_enabled: false,
+                presence_overloaded: false,
+            },
+        );
+
+        let subscription = register_viewer_subscription(
+            &state,
+            &store,
+            "room",
+            "publisher_session",
+            "viewer_session",
+            99,
+        )
+        .unwrap();
+        assert!(presence_receiver.try_recv().is_err());
+        assert_eq!(
+            state
+                .publishers
+                .lock()
+                .unwrap()
+                .get("publisher_session")
+                .unwrap()
+                .active_viewers
+                .len(),
+            1
+        );
+        drop(subscription);
+        assert!(presence_receiver.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn full_presence_queue_marks_its_publisher_overloaded_without_leaking_viewers() {
+        let (publisher_invite, _) = create_invite(
+            "presence_publisher".into(),
+            vec![RoomGrant {
+                room_id: "room".into(),
+                access: true,
+                publish: true,
+                subscribe: false,
+            }],
+            100,
+        )
+        .unwrap();
+        let store = Arc::new(
+            InviteStore::from_bytes(
+                &serde_json::to_vec(&InviteFile {
+                    version: 1,
+                    invites: vec![publisher_invite],
+                })
+                .unwrap(),
+            )
+            .unwrap(),
+        );
+        let (_sender, receiver) = watch::channel(store.clone());
+        let state = SignalingState::new(receiver);
+        let (presence_sender, mut presence_receiver) = mpsc::channel(1);
+        state.publishers.lock().unwrap().insert(
+            "publisher_session".into(),
+            PublisherEntry {
+                room_id: "room".into(),
+                invite_id: "presence_publisher".into(),
+                active_viewers: HashSet::new(),
+                presence_sender,
+                presence_enabled: true,
+                presence_overloaded: false,
+            },
+        );
+        let publisher_lease = PublisherLease {
+            session_id: "publisher_session".into(),
+            publishers: state.publishers.clone(),
+        };
+        let subscription = register_viewer_subscription(
+            &state,
+            &store,
+            "room",
+            "publisher_session",
+            "viewer_session",
+            99,
+        )
+        .unwrap();
+        drop(subscription);
+        assert!(publisher_lease.presence_overloaded());
+        assert!(matches!(
+            presence_receiver.try_recv().unwrap().change,
+            ViewerPresenceChange::Joined
+        ));
+        assert!(state
+            .publishers
+            .lock()
+            .unwrap()
+            .get("publisher_session")
+            .unwrap()
+            .active_viewers
+            .is_empty());
     }
 
     #[test]
@@ -1470,6 +1969,18 @@ mod tests {
             .await,
             Ok(Some(ServerOperation::Accepted { .. }))
         ));
+        let (presence_sender, _presence_receiver) = mpsc::channel(MAX_QUEUED_MESSAGES);
+        state.publishers.lock().unwrap().insert(
+            source_id.clone(),
+            PublisherEntry {
+                room_id: "room".into(),
+                invite_id: "source_invite".into(),
+                active_viewers: HashSet::new(),
+                presence_sender,
+                presence_enabled: true,
+                presence_overloaded: false,
+            },
+        );
         let ServerOperation::Joined {
             session_id: wrong_room_id,
         } = operate(
@@ -1915,6 +2426,15 @@ mod network_tests {
         )
         .await;
         assert_eq!(result["operation"]["type"], "accepted");
+        let result = request(
+            &mut client,
+            "presence_enable",
+            serde_json::json!({
+                "type": "enable_viewer_presence", "session_id": session_id,
+            }),
+        )
+        .await;
+        assert_eq!(result["operation"]["type"], "accepted");
 
         let mut viewer = connect(&server, "https://discord.com", "").await.unwrap();
         let result = request(
@@ -2051,6 +2571,101 @@ mod network_tests {
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
         assert!(discovered, "connected RTC publisher was not discoverable");
+
+        let joined = request(
+            &mut viewer,
+            "presence_join",
+            serde_json::json!({
+                "type": "join", "room_id": "room_1", "require_e2ee": false,
+            }),
+        )
+        .await;
+        let viewer_session_id = joined["operation"]["session_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let unauthorized_opt_in = request(
+            &mut viewer,
+            "viewer_presence_opt_in",
+            serde_json::json!({
+                "type": "enable_viewer_presence", "session_id": viewer_session_id,
+            }),
+        )
+        .await;
+        assert_eq!(unauthorized_opt_in["operation"]["code"], "unauthorized");
+        let accepted = request(
+            &mut viewer,
+            "presence_subscribe",
+            serde_json::json!({
+                "type": "subscribe",
+                "session_id": viewer_session_id,
+                "publisher_id": session_id,
+            }),
+        )
+        .await;
+        assert_eq!(accepted["operation"]["type"], "accepted");
+        let presence = response(&mut client).await;
+        assert_eq!(
+            presence,
+            serde_json::json!({
+                "protocol_version": 1,
+                "request_id": PRESENCE_REQUEST_ID,
+                "operation": {
+                    "type": "viewer_presence",
+                    "session_id": session_id,
+                    "change": "joined",
+                    "viewer_count": 1,
+                }
+            })
+        );
+
+        let left = request(
+            &mut viewer,
+            "presence_leave",
+            serde_json::json!({ "type": "leave", "session_id": viewer_session_id }),
+        )
+        .await;
+        assert_eq!(left["operation"]["reason"], "left");
+        let presence = response(&mut client).await;
+        assert_eq!(presence["request_id"], PRESENCE_REQUEST_ID);
+        assert_eq!(presence["operation"]["type"], "viewer_presence");
+        assert_eq!(presence["operation"]["session_id"], session_id);
+        assert_eq!(presence["operation"]["change"], "left");
+        assert_eq!(presence["operation"]["viewer_count"], 0);
+
+        let joined = request(
+            &mut viewer,
+            "presence_rejoin",
+            serde_json::json!({
+                "type": "join", "room_id": "room_1", "require_e2ee": false,
+            }),
+        )
+        .await;
+        let viewer_session_id = joined["operation"]["session_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let accepted = request(
+            &mut viewer,
+            "presence_resubscribe",
+            serde_json::json!({
+                "type": "subscribe",
+                "session_id": viewer_session_id,
+                "publisher_id": session_id,
+            }),
+        )
+        .await;
+        assert_eq!(accepted["operation"]["type"], "accepted");
+        let presence = response(&mut client).await;
+        assert_eq!(presence["operation"]["change"], "joined");
+        assert_eq!(presence["operation"]["viewer_count"], 1);
+        drop(viewer);
+        let presence = response(&mut client).await;
+        assert_eq!(presence["request_id"], PRESENCE_REQUEST_ID);
+        assert_eq!(presence["operation"]["type"], "viewer_presence");
+        assert_eq!(presence["operation"]["session_id"], session_id);
+        assert_eq!(presence["operation"]["change"], "left");
+        assert_eq!(presence["operation"]["viewer_count"], 0);
 
         // The tested control-policy watch reload must tear down actual RTC ownership,
         // not merely invalidate a control-only room reservation.

@@ -4,7 +4,9 @@ Discord Alternative ScreenShare (DASS) defines its proposed control-plane wire
 types in `crates/protocol/src/signaling.rs`. An optional invite-backed control-plane
 endpoint is implemented and passes user-run Docker control-plane tests; see
 [control-plane.md](control-plane.md). An opt-in authenticated RTC experiment now
-exists; its new directory/viewer increment is described in [watching.md](watching.md).
+exists; its directory/viewer increment is described in [watching.md](watching.md).
+The control contract also defines an authenticated, publisher-scoped
+`viewer_presence` notification for accepted subscriptions and their cleanup.
 These types alone do not enable capture, authorize clients or establish
 readiness.
 
@@ -30,6 +32,9 @@ protocol foundation in Docker (formatting, Clippy, 17 Rust tests, locked builds 
 runtime image build). The subsequent auth/TLS/WSS increment and additive capability
 fields/new `transport_unavailable` code passed user-run Docker validation with 33
 Rust tests, Clippy and locked builds. No media interoperability is established.
+The viewer-presence increment adds Rust serialization, scoped lease/queue and WSS
+join/leave/disconnect tests. Those new Rust tests were not run in this agent session:
+Docker API access was denied. No DASS client runtime acceptance is claimed.
 
 ## Contract and intended lifecycle
 
@@ -37,8 +42,10 @@ Each message contains `protocol_version: 1`, a `request_id`, and a tagged
 `operation`. IDs are opaque, case-sensitive DASS identifiers: 1–64 ASCII letters,
 digits, underscores or hyphens. Discord identifiers confer no authorization.
 Server responses echo the request ID; unsolicited close/ICE notifications use a
-server-generated ID. Never include credentials, full SDP or message bodies in
-logs or error text.
+server-generated ID. `viewer_presence` uses the stable request ID
+`server_viewer_presence`; clients route it by operation type and must not treat
+that ID as a response to a client request. Never include credentials, full SDP
+or message bodies in logs or error text.
 
 The intended connection sequence is:
 
@@ -56,7 +63,42 @@ The intended connection sequence is:
 3. After `joined`, use its session ID for `publish` or `subscribe`. A subscription
    targets a server-issued publisher ID in the authorized room. Recheck credential
    validity and the specific permission on **every** operation. No client-provided
-   Discord/channel identity participates in permission decisions.
+   Discord/channel identity participates in permission decisions. A publisher
+   opts in on its authenticated connection after `publish` is accepted:
+
+   ```json
+   {"type":"enable_viewer_presence","session_id":"publisher_session"}
+   ```
+
+   This requires publish scope and the publisher's own session and returns
+   correlated `accepted`. It is accepted before RTC connectivity is established.
+   Enable it before viewers subscribe; a first-time opt-in is rejected if a viewer
+   is already subscribed, and repeated
+   opt-in is idempotent. Older publishers that do not send this operation receive
+   no new event and continue to work with strict parsers. When opted in, each
+   subsequently accepted `subscribe` causes the authenticated RTC backend to send
+   the target publisher an unsolicited `viewer_presence` event, for example:
+
+   ```json
+   {"protocol_version":1,"request_id":"server_viewer_presence","operation":{"type":"viewer_presence","session_id":"publisher_session","change":"joined","viewer_count":1}}
+   ```
+
+   `session_id` is the publisher's own session ID; no viewer ID or Discord
+   identity is disclosed. `viewer_count` is the number of accepted subscriptions
+   after the change. `joined` is emitted only after the backend accepts and
+   allocates the subscription, before offer/answer/ICE setup; it does **not** mean
+   that the viewer's RTC transport or media is connected. A matching `left` event
+   follows the viewer's explicit leave, control-session disconnect, expiry,
+   revocation, timeout or transport cleanup. No event is emitted for
+   rejected/unavailable subscriptions, and events are never broadcast to other
+   publishers. The current RTC experiment
+   is limited to one publisher and one viewer backend-wide, so its count is at most
+   one.
+
+   This is an additive operation in protocol v1: old request/response operations
+   and fields are unchanged. A new opt-in client must use a backend that supports
+   `enable_viewer_presence`, and an opted-in publisher needs an updated strict
+   server-message parser. There is no feature negotiation for this operation.
 4. After `accepted`, exchange `offer`/`answer` and trickled `ice` within the setup
    deadline. Candidate syntax validation is not ICE destination safety; the RTC
    implementation must enforce address policy before any outbound packet.
@@ -82,15 +124,17 @@ structural parsers.
 | Sessions per backend | 128 |
 | Members per room | 16 |
 | Directory entries | 64 (one live publisher in the current RTC experiment) |
-| Outbound messages per connection | 32 |
+| Queued presence messages per publisher | 32 |
 | Login deadline | 5,000 ms |
 | RTC setup deadline after acceptance | 15,000 ms |
 
 Strings must be nonempty and contain no NUL. The parsers enforce message and field
 bounds only. The new server owner implements session/room admission, bounded
 replay storage, login/reservation deadlines and lease cleanup, covered by passing
-Docker control-plane tests. It sends synchronously with bounded buffering rather than using an
-application outbound queue. RTC queues/setup remain unimplemented. Connection
+Docker control-plane tests. Request responses are sent synchronously with a
+one-second send bound; publisher presence uses the bounded queue above. If that
+queue fills, the owning publisher connection is closed as overloaded rather than
+silently losing count changes. RTC queues/setup remain experimental. Connection
 admission counts unauthenticated connections and bounds socket/handshake lifetime;
 see [control-plane.md](control-plane.md) for the exact current limits.
 

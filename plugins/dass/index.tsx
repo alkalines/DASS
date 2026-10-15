@@ -30,6 +30,7 @@ import { sidebarActionProps, type SidebarState, stopSidebarStream } from "./side
 import { SpikePeer } from "../../clients/spike/peer";
 import { stopSpikeTest } from "./spikeTest";
 import { streamQualityLabel, streamTrackQuality } from "./streamPresentation";
+import { startStreamSounds } from "./streamSounds";
 import { StreamSidebarBody } from "./streamUi";
 import { WatchController } from "./watching";
 
@@ -47,6 +48,7 @@ let unsubscribeWatchStatus: (() => void) | undefined;
 let unsubscribePublishStatus: (() => void) | undefined;
 let unsubscribeAccountStatus: (() => void) | undefined;
 let unsubscribeDirectoryStatus: (() => void) | undefined;
+let stopStreamSounds: (() => void) | undefined;
 let gridWatchEpoch = 0;
 
 function stopGridWatching() {
@@ -144,6 +146,7 @@ function startRuntime() {
     discovery.start();
     watching.start();
     publisher.start();
+    stopStreamSounds = startStreamSounds(publisher, watching, currentCall);
     callDiscovery.start();
     unsubscribeAccountStatus = session.subscribe(() => {
         if (!session.getSnapshot().configured) stopMedia();
@@ -173,6 +176,8 @@ function startRuntime() {
 function stopRuntime() {
     logDiagnostic("plugin stopped");
     pluginActive = false;
+    stopStreamSounds?.();
+    stopStreamSounds = undefined;
     unsubscribeWatchStatus?.();
     unsubscribePublishStatus?.();
     unsubscribeAccountStatus?.();
