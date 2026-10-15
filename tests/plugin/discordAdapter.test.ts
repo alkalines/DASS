@@ -29,8 +29,6 @@ describe("build 634304 share button patch", () => {
         expect(() => new Function("i", "ee", "$self", source)).not.toThrow();
     });
     test("matches the supplied button source once and preserves stop", () => {
-        expect(patch.fromBuild).toBe(634304);
-        expect(patch.toBuild).toBe(634304);
         expect(find.test(OBSERVED_BUTTON_SOURCE)).toBe(true);
         expect([...OBSERVED_BUTTON_SOURCE.matchAll(new RegExp(match.source, "g"))]).toHaveLength(1);
         const patched = OBSERVED_BUTTON_SOURCE.replace(match, clickReplacement.replace);
@@ -82,8 +80,6 @@ describe("build 634304 Voice Connected panel patch", () => {
     const panelMatch = new RegExp(startReplacement.match.source.replaceAll("\\i", "(?:[A-Za-z_$][\\w$]*)"));
 
     test("matches the observed start callback, not generic stream or voice controls", () => {
-        expect(panelPatch.fromBuild).toBe(634304);
-        expect(panelPatch.toBuild).toBe(634304);
         expect(new RegExp(panelPatch.find.source.replaceAll("\\i", "(?:[A-Za-z_$][\\w$]*)")).test(OBSERVED_VOICE_PANEL_CALLBACK)).toBe(true);
         expect([...OBSERVED_VOICE_PANEL_CALLBACK.matchAll(new RegExp(panelMatch.source, "g"))]).toHaveLength(1);
         expect(OBSERVED_VOICE_PANEL_CALLBACK.replace(panelMatch, startReplacement.replace))

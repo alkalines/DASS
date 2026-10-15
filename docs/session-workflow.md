@@ -62,7 +62,7 @@ backend and clients together for the updated directory metadata contract.
 
 ## Normal sharing and watching
 
-On supported Discord builds **634304** and **637268**, the center call Share button
+On reviewed Discord builds **634304**, **637268** and **638651**, the center call Share button
 and the left Voice Connected Share callback open an explicit **Discord / DASS**
 transport chooser. Cancel, Escape, outside dismissal, logout, disable or leaving
 the call starts neither transport. Repeated clicks replace the pending chooser;

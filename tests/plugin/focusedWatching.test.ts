@@ -31,7 +31,7 @@ test("only the focused, actually received remote share owns Stop Watching", () =
 const controlSource = `function control(e){let{currentUser:n,onDisconnectCall:t,channel:s,connectedEmbeddedActivity:a}=e,o=e.nativeParticipant,j=e.nativeWatching,y=false,O=null,E=e.nativeStream,N=e.nativeStreams,r=null,M=l.useCallback(()=>o?.type===ep.lp.ACTIVITY&&o.applicationId===a?.applicationId?"ACTIVITY":j||y?"STREAM":null!=O?"EVENT":"CALL",[o,a?.applicationId,j,y,O]),[D,V]=l.useState(M()),w=l.useCallback(()=>{if(null!=E)(0,C.vN)((0,L._z)(E));else for(let e of N)(0,C.vN)((0,L._z)(e))},[N,E]);return(0,i.jsx)(A.Y,{targetElementRef:r,renderPopout:()=>null,children:D==="STREAM"?(0,i.jsx)(ee.h,{onClick:()=>w(),onPopoutClick:N.length>1?nativePopover:null,isSelfStream:!1}):D==="CALL"?(0,i.jsx)(J.A,{onClick:()=>t?.()}):{component:D}})}`;
 
 function patchedControl() {
-    const patch = DISCORD_PRESENTATION_PATCHES.find(p => p.fromBuild === 637268 && p.find === "CenterControlTray: currentUser cannot be undefined");
+    const patch = DISCORD_PRESENTATION_PATCHES.find(p => p.find === "CenterControlTray: currentUser cannot be undefined");
     if (!patch) throw new Error("Missing focused watch patch");
     let source = controlSource;
     for (const replacement of patch.replacement) {

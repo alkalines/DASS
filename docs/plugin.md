@@ -163,8 +163,23 @@ loss, logout, disable and revoked access clear retained entries. DevTools mock
 checks verified typography, help expansion and close behavior; real failure
 timing still needs runtime acceptance.
 
-The adapter is gated to exact Discord builds **634304** and **637268**, not the
-intermediate build range. On October 14, 2026, all 46 replacements across 11 patch
+The reviewed Discord builds are **634304**, **637268** and **638651**. This list is
+informational, not a patch gate: DASS attempts its hooks on every build. On an
+unapproved or unidentifiable build, plugin startup shows a **DASS compatibility
+warning** once per client session: “The current plugin version is not yet approved
+for this Discord build. This could cause the UI to break.” Enabling the plugin
+later in the session also performs this check. Source-match and grouped-patch
+rollback checks remain in place, but cannot guarantee compatibility or interception
+on future builds. If the chooser is missing, do not continue sharing expecting DASS.
+On October 15, 2026, the running stable client
+reported build 638651 (hash `5622b31c0cab24812146307b2dd36712a87d7174`). DASS was
+enabled, but the previous exact-build gates skipped its share-button hooks,
+leaving the native Discord-only action. A read-only DevTools check found all 55
+replacements across 13 patch groups matching once, with every intermediate source
+compiling. Build 638651 is now included in the reviewed-build list. No live module
+factories were modified, and no capture or share was started. The chooser and
+media behavior still require runtime acceptance after rebuilding and restarting.
+On October 14, 2026, all 46 replacements across 11 patch
 groups matched once in a read-only check of build 637268 (hash
 `a935e483c18dcf082c62ce19bc9e3560fce10581`). No live module factories were replaced
 by that check. Build success and source matching do not establish real media,

@@ -65,7 +65,7 @@ const OBSERVED_ROOT = 'e=>{let{participants:t,filteredParticipants:n,selectedPar
 
 function applyPatch(source: string, index: number) {
     const patch = DISCORD_SHARE_PATCHES[index];
-    expect(patch.fromBuild).toBe(634304); expect(patch.toBuild).toBe(634304); expect(patch.group).toBe(true);
+    expect(patch.group).toBe(true);
     for (const replacement of patch.replacement) {
         const regex = new RegExp(replacement.match.source.replaceAll("\\i", "(?:[A-Za-z_$][\\w$]*)"));
         expect([...source.matchAll(new RegExp(regex.source, "g"))]).toHaveLength(1);

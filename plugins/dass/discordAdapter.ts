@@ -14,8 +14,6 @@ export const NATIVE_STREAM_ENDED_ART_STYLE_KEYS = ["artContainer", "art", "cta",
 
 const SHARE_PATCHES = [{
     find: /renderNUXHighlight:\i,buttonRef:\i,onClick:null!=\i\?\i:\i(?=\}\))/,
-    fromBuild: 634304,
-    toBuild: 634304,
     group: true,
     replacement: [{
         match: /(?<=\(0,\i\.jsx\)\()(\i\.\i),\{\.\.\.(\i)(?=,centerButton:!0,disabled:\i\|\|!\i,className:\i\.\i,hasPermission:\i,streamActive:)/,
@@ -26,8 +24,6 @@ const SHARE_PATCHES = [{
     }]
 }, {
     find: VOICE_PANEL_SHARE_START_MATCH,
-    fromBuild: 634304,
-    toBuild: 634304,
     group: true,
     replacement: [{
         match: /(\i=\i\.useCallback\(\(\)=>\{)(\(0,\i\.A\)\(\i,(\i)\.id,\i\))(\},\[\i,\i\.id,\i\]\),\i=\i\.find\((\i)=>\5\.ownerId===\i\?\.id\))/,
@@ -59,8 +55,6 @@ const SHARE_PATCHES = [{
     }]
 }, {
     find: "VoiceUserIcons",
-    fromBuild: 634304,
-    toBuild: 634304,
     group: true,
     replacement: [{
         match: /(guildId:\i,channelId:(\i),user:(\i),disconnected:\i,isHovered:\i\}=\i)(?=,\i=\i\|\|\i,\{enabled:\i\}=\i\.useConfig\(\{guildId:\i\?\?"",location:"VoiceUserIcons"\}\))/,
@@ -71,8 +65,6 @@ const SHARE_PATCHES = [{
     }]
 }, {
     find: "ImpressionNames.CHANNEL_CALL_VIDEO_GRID_VIEW",
-    fromBuild: 634304,
-    toBuild: 634304,
     group: true,
     replacement: [{
         match: /(\i=)(\i\.map\((\i)=>(\i)=>\(0,\i\.jsx\)\(\i\.Ay,\{participant:\3,channel:(\i),className:(\i\.\i),onClick:(\i),onDoubleClick:(\i),onContextMenu:\i,inCall:\i,width:\4,popoutType:\i\},\3\.id\)\))(?=;\(0,\i\.A\)\(\{type:\i\.ImpressionTypes.VIEW,name:\i\.ImpressionNames.CHANNEL_CALL_VIDEO_GRID_VIEW)/,
@@ -83,8 +75,6 @@ const SHARE_PATCHES = [{
     }]
 }, {
     find: CALL_GRID_ROOT_MATCH,
-    fromBuild: 634304,
-    toBuild: 634304,
     group: true,
     replacement: [{
         match: CALL_GRID_ROOT_MATCH,
@@ -103,8 +93,6 @@ const SHARE_PATCHES = [{
 
 const PRESENTATION_PATCHES = [{
     find: "handleFullscreenParticipant=",
-    fromBuild: 634304,
-    toBuild: 634304,
     group: true,
     replacement: [{
         match: /(\(0,\i\.jsx\)\()(\i)(,\{)(?=channel:\i,guild:\i,hasConnectPermission:\i,participantsOpen:)/,
@@ -151,8 +139,6 @@ const PRESENTATION_PATCHES = [{
     }]
 }, {
     find: /\i=\i\.Ay\.getVideoComponent\(\),\i=\i\.default\.getId\(\),\[\i,\i\]=\i\.useState\(null\)/,
-    fromBuild: 634304,
-    toBuild: 634304,
     group: true,
     replacement: [{
         match: /(selectedParticipant:\i,showParticipants:\i=!0,className:\i,width:\i,height:\i,layout:\i,idle:\i\}=)(\i)(,\i=\i\.Ay\.getVideoComponent\(\))/,
@@ -163,16 +149,12 @@ const PRESENTATION_PATCHES = [{
     }]
 }, {
     find: '.displayName="CallTile"',
-    fromBuild: 634304,
-    toBuild: 634304,
     replacement: [{
         match: /(,)(\i=)(\i)(?=\}$)/,
         replace: "$1$2$self.wrapCallTile($3)"
     }]
 }, {
     find: "cropSelfVideo:!1",
-    fromBuild: 634304,
-    toBuild: 634304,
     group: true,
     replacement: [{
         match: /(switch\((\i)\.type\)\{case \i\.lp\.ACTIVITY:return)/,
@@ -183,16 +165,12 @@ const PRESENTATION_PATCHES = [{
     }]
 }, {
     find: /\i\.type===\i\.lp\.STREAM\?\i\.find\(\i=>\i\.type===\i\.lp\.USER/,
-    fromBuild: 634304,
-    toBuild: 634304,
     replacement: [{
         match: /(function \i\(\i,(\i),\i\)\{return)/,
         replace: "$1 $self.isDassParticipant($2)?[]:"
     }]
 }, {
     find: "ActivityPanelGameCard",
-    fromBuild: 634304,
-    toBuild: 634304,
     group: true,
     replacement: [{
         match: /let\{guildId:(\i),analyticsContext:(\i),className:(\i)\}=(\i)(?=,\i=\i\.useRef\(null\),\i=\i\.useRef\(null\),\i=\i\.useRef\(null\))/,
@@ -224,8 +202,6 @@ const PRESENTATION_PATCHES = [{
     }]
 }, {
     find: "CHANNEL_RTC_UPDATE_LAYOUT:function",
-    fromBuild: 634304,
-    toBuild: 634304,
     group: true,
     replacement: [{
         match: /(\i===\i\._Of\.VOICE\?\(delete \i\[(\i)\],)(delete \i\[\2\])(?=\):\i\[\2\]=\i)/,
@@ -233,8 +209,6 @@ const PRESENTATION_PATCHES = [{
     }]
 }, {
     find: "CenterControlTray: currentUser cannot be undefined",
-    fromBuild: 634304,
-    toBuild: 634304,
     group: true,
     replacement: [{
         match: /(let\{currentUser:\i,onDisconnectCall:\i,channel:(\i),connectedEmbeddedActivity:\i\}=\i,)/,
@@ -257,11 +231,14 @@ const PRESENTATION_PATCHES = [{
     }]
 }];
 
-export const SUPPORTED_DISCORD_BUILDS = [634304, 637268] as const;
-export const DISCORD_SHARE_PATCHES = SUPPORTED_DISCORD_BUILDS.flatMap(build =>
-    SHARE_PATCHES.map(patch => ({ ...patch, fromBuild: build, toBuild: build })));
-export const DISCORD_PRESENTATION_PATCHES = SUPPORTED_DISCORD_BUILDS.flatMap(build =>
-    PRESENTATION_PATCHES.map(patch => ({ ...patch, fromBuild: build, toBuild: build })));
+export const APPROVED_DISCORD_BUILDS: readonly number[] = [634304, 637268, 638651];
+export const DISCORD_SHARE_PATCHES = SHARE_PATCHES;
+export const DISCORD_PRESENTATION_PATCHES = PRESENTATION_PATCHES;
+
+export function getDiscordBuildWarning(build: number): string | undefined {
+    if (!APPROVED_DISCORD_BUILDS.includes(build))
+        return "The current plugin version is not yet approved for this Discord build. This could cause the UI to break.";
+}
 
 export interface LocalLiveContext {
     pluginActive: boolean;

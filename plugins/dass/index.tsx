@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
+import { showNotification } from "@api/Notifications";
 import { definePluginSettings } from "@api/Settings";
 import ErrorBoundary from "@components/ErrorBoundary";
 import { Paragraph } from "@components/Paragraph";
@@ -17,7 +18,7 @@ import { isDassParticipant, isFocusedDassWatch, participantTitle, projectPartici
 import { type EquibopCaptureBridge, LocalCaptureCheck } from "./capture";
 import { DiscoveryController } from "./controller";
 import { logDiagnostic } from "../../clients/spike/diagnostics";
-import { DISCORD_PRESENTATION_PATCHES, DISCORD_SHARE_PATCHES, isLocalPublisherLive, type PublishIntent, routePublish, routeWatch, type WatchIntent } from "./discordAdapter";
+import { DISCORD_PRESENTATION_PATCHES, DISCORD_SHARE_PATCHES, getDiscordBuildWarning, isLocalPublisherLive, type PublishIntent, routePublish, routeWatch, type WatchIntent } from "./discordAdapter";
 import { gridShares, gridTileKeyExtractor } from "./gridPresentation";
 import { CallAudioControl, callPresentation, type CallTileProps, type CallViewProps, type FocusedCallProps, type GridRuntime, type GridTileRenderer, NativeCallView, NativeGridTile, type TileAction, useFocusedCallProps, useFocusedWatchingState, useGridTiles, useHasGridShares } from "./gridTile";
 import { hasAcceptedPublishCapture, PublishController } from "./publishing";
@@ -44,6 +45,7 @@ const callDiscovery = createCallDiscovery(session, directory, () => settings.sto
     () => !["idle", "failed"].includes(publisher.getSnapshot().phase) || ["loading", "ready", "watching"].includes(watching.getSnapshot().phase));
 const localCapture = new LocalCaptureCheck();
 let pluginActive = false;
+let buildWarningShown = false;
 let unsubscribeWatchStatus: (() => void) | undefined;
 let unsubscribePublishStatus: (() => void) | undefined;
 let unsubscribeAccountStatus: (() => void) | undefined;
@@ -142,6 +144,11 @@ const settings = definePluginSettings({
 function startRuntime() {
     if (pluginActive) return;
     pluginActive = true;
+    const buildWarning = getDiscordBuildWarning(Number(window.GLOBAL_ENV.BUILD_NUMBER));
+    if (buildWarning && !buildWarningShown) {
+        buildWarningShown = true;
+        void showNotification({ title: "DASS compatibility warning", body: buildWarning });
+    }
     logDiagnostic("plugin started", { defaultDass: settings.store.defaultDass });
     discovery.start();
     watching.start();

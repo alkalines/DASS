@@ -15,8 +15,6 @@ const fixtureSource = OBSERVED_ICON_PREFIX + 'let Q=[],el=null;' + OBSERVED_BADG
 function patchedIcons(source = fixtureSource) {
     const patch = DISCORD_SHARE_PATCHES[2];
     expect(patch.find).toBe("VoiceUserIcons");
-    expect(patch.fromBuild).toBe(634304);
-    expect(patch.toBuild).toBe(634304);
     expect(patch.group).toBe(true);
     for (const replacement of patch.replacement) {
         const regex = new RegExp(replacement.match.source.replaceAll("\\i", "(?:[A-Za-z_$][\\w$]*)"));

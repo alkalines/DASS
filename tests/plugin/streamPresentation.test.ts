@@ -8,7 +8,7 @@ import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 
 import { CallPresentation, participantTitle, projectParticipants } from "../../plugins/dass/callPresentation";
-import { DISCORD_PRESENTATION_PATCHES, DISCORD_SHARE_PATCHES, SUPPORTED_DISCORD_BUILDS } from "../../plugins/dass/discordAdapter";
+import { APPROVED_DISCORD_BUILDS, DISCORD_PRESENTATION_PATCHES, DISCORD_SHARE_PATCHES, getDiscordBuildWarning } from "../../plugins/dass/discordAdapter";
 import { shouldPauseLocalPreview, streamQualityLabel, streamTrackQuality } from "../../plugins/dass/streamPresentation";
 
 test("real quality labels require valid observed track settings", () => {
@@ -69,14 +69,18 @@ test("publisher name uses the current display name without changing remote DASS 
     expect(participantTitle(remote, "Publisher name")).toBe("DASS account");
 });
 
-test("presentation and capture hooks are gated to reviewed exact builds, not an untested range", () => {
-    expect(SUPPORTED_DISCORD_BUILDS).toEqual([634304, 637268]);
+test("unapproved builds warn without gating or duplicating presentation and capture hooks", () => {
+    expect(APPROVED_DISCORD_BUILDS).toEqual([634304, 637268, 638651]);
+    for (const build of APPROVED_DISCORD_BUILDS) expect(getDiscordBuildWarning(build)).toBeUndefined();
+    for (const build of [638652, 999999, 0, NaN]) {
+        expect(getDiscordBuildWarning(build)).toBe("The current plugin version is not yet approved for this Discord build. This could cause the UI to break.");
+    }
+    expect(DISCORD_SHARE_PATCHES).toHaveLength(5);
+    expect(DISCORD_PRESENTATION_PATCHES).toHaveLength(8);
     for (const patches of [DISCORD_SHARE_PATCHES, DISCORD_PRESENTATION_PATCHES]) {
-        const baseline = patches.filter(patch => patch.fromBuild === 634304);
-        const current = patches.filter(patch => patch.fromBuild === 637268);
-        expect(current).toHaveLength(baseline.length);
-        expect(current.map(patch => patch.find)).toEqual(baseline.map(patch => patch.find));
-        expect(current.map(patch => patch.replacement)).toEqual(baseline.map(patch => patch.replacement));
-        for (const patch of patches) expect(patch.toBuild).toBe(patch.fromBuild);
+        for (const patch of patches) {
+            expect(patch).not.toHaveProperty("fromBuild");
+            expect(patch).not.toHaveProperty("toBuild");
+        }
     }
 });
