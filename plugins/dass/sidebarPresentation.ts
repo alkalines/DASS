@@ -5,7 +5,7 @@
  */
 
 export interface SidebarState {
-    metadata: { sourceName?: string; qualityLabel?: string; };
+    metadata: { sourceName?: string; qualityLabel?: string; premiumQuality?: boolean; };
     stop(): void;
 }
 

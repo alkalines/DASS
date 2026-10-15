@@ -19,6 +19,7 @@ function patched(input = source) {
         const regex = new RegExp(replacement.match.source.replaceAll("\\i", "(?:[A-Za-z_$][\\w$]*)"));
         expect([...input.matchAll(new RegExp(regex.source, "g"))]).toHaveLength(1);
         input = input.replace(regex, replacement.replace);
+        expect(() => new Function("$self", input)).not.toThrow();
     }
     return input;
 }

@@ -41,8 +41,10 @@ Tiles reuse Discord's actual frame rather than the generic Card. Their LIVE badg
 publisher name and Options overlay now use the approved DASS-owned components.
 The quality segment uses measured width and a sliding reveal instead of the
 earlier grid-track animation. Quality labels come from track settings; unavailable
-resolution/FPS is omitted instead of invented. DASS does not display a Nitro
-entitlement badge for real shares or require a Discord subscription.
+resolution/FPS is omitted instead of invented. At the user's request, quality
+above 720p or 30FPS uses the Nitro-style icon and purple sidebar text; 720p 30FPS
+and below stays standard. This is quality styling, not an entitlement check or a
+Discord subscription requirement. The tile quality segment uses the same rule.
 Their DASS video and watch content remain independent of Discord's media engine.
 All tile videos are muted, including filmstrip previews; the connected call owns
 separate audible playback of the receiver stream. Share mute/volume is independent
@@ -95,6 +97,15 @@ and Pause Preview When Discord Isn’t Focused preferences across grid/focused
 tiles. These are session-only presentation preferences. They detach local preview
 playback without disabling/stopping capture tracks or interrupting publishing.
 Receiver video/audio and ordinary Discord voice are unaffected by those preferences.
+
+The sidebar patch follow-up fixes a grouped-patch rollback: the action-props
+wrapper previously opened and closed its call in separate replacements. Equicord
+compiles after each replacement, so the incomplete call rejected the whole group
+even though the final combined source compiled. The wrapper now uses a single
+replacement. Tests compile every intermediate step; a read-only build 637268
+check matched all nine replacements once and compiled each step. Lint, typecheck
+and desktop/Equibop builds passed. The rebuilt sidebar still needs runtime
+acceptance after a full restart; the live client was not patched or reloaded.
 
 The viewer now retains one closed share's room/ID/display-name metadata after an
 unexpected closure of actual received media. Peer, signaling, room binding,

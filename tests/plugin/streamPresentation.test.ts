@@ -11,13 +11,20 @@ import { CallPresentation, participantTitle, projectParticipants } from "../../p
 import { DISCORD_PRESENTATION_PATCHES, DISCORD_SHARE_PATCHES, SUPPORTED_DISCORD_BUILDS } from "../../plugins/dass/discordAdapter";
 import { shouldPauseLocalPreview, streamQualityLabel, streamTrackQuality } from "../../plugins/dass/streamPresentation";
 
-test("real quality labels require valid observed track settings and never imply Nitro", () => {
-    expect(streamTrackQuality({ height: 1080, frameRate: 29.97 })).toEqual({ resolution: "1080p", framesPerSecond: 30 });
+test("real quality labels require valid observed track settings", () => {
+    expect(streamTrackQuality({ height: 1080, frameRate: 29.97 })).toEqual({ resolution: "1080p", framesPerSecond: 30, premium: true });
     expect(streamQualityLabel(streamTrackQuality({ height: 1440, frameRate: 60 }))).toBe("1440p 60FPS");
     expect(streamQualityLabel(undefined)).toBeUndefined();
     for (const settings of [undefined, {}, { height: 1080 }, { frameRate: 30 }, { height: NaN, frameRate: 30 },
         { height: 1080, frameRate: Infinity }, { height: -1, frameRate: 30 }, { height: 1080, frameRate: 0 }]) {
         expect(streamTrackQuality(settings)).toBeUndefined();
+    }
+});
+
+test("quality styling is standard through 720p 30FPS and premium above either limit", () => {
+    for (const [height, frameRate, premium] of [[480, 30, false], [720, 30, false], [720, 29.97, false],
+        [720, 60, true], [720, 59.94, true], [1080, 30, true], [2160, 30, true], [2160, 120, true]] as const) {
+        expect(streamTrackQuality({ height, frameRate })?.premium).toBe(premium);
     }
 });
 

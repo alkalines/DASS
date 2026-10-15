@@ -18,7 +18,9 @@ export function shouldPauseLocalPreview(preferences: PreviewPreferences, windowF
 export function streamTrackQuality(settings?: Pick<MediaTrackSettings, "height" | "frameRate">): StreamQuality | undefined {
     if (!settings?.height || !settings.frameRate || !Number.isFinite(settings.height) || !Number.isFinite(settings.frameRate)
         || settings.height < 1 || settings.frameRate < 1) return;
-    return { resolution: `${Math.round(settings.height)}p`, framesPerSecond: Math.round(settings.frameRate) };
+    const height = Math.round(settings.height);
+    const framesPerSecond = Math.round(settings.frameRate);
+    return { resolution: `${height}p`, framesPerSecond, premium: height > 720 || framesPerSecond > 30 };
 }
 
 export function streamQualityLabel(quality: StreamQuality | undefined) {

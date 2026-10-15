@@ -264,8 +264,9 @@ export default definePlugin({
         const status = usePublisherStatus(publisher);
         const preview = publisher.getPreviewStream();
         const track = preview?.getVideoTracks()[0];
+        const quality = streamTrackQuality(track?.getSettings());
         const dassSidebar: SidebarState | undefined = pluginActive && hasAcceptedPublishCapture(status.phase) && preview
-            ? { metadata: { sourceName: track?.label || undefined, qualityLabel: streamQualityLabel(streamTrackQuality(track?.getSettings())) },
+            ? { metadata: { sourceName: track?.label || undefined, qualityLabel: streamQualityLabel(quality), premiumQuality: quality?.premium },
                 stop: gridRuntime.stopPublishing } : undefined;
         return { ...props, dassSidebar };
     },

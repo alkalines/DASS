@@ -204,11 +204,8 @@ const PRESENTATION_PATCHES = [{
         match: /(children:\[)(\i)(,\(0,\i\.jsx\)\(\i,\{stream:\i,canGoLive:\i,canGoLiveActivity:)/,
         replace: "$1dassSidebar?$self.renderNativeSidebarBody(dassSidebar.metadata):$2$3"
     }, {
-        match: /(\(0,\i\.jsx\)\(\i,)(\{stream:\i,canGoLive:\i,canGoLiveActivity:)/,
-        replace: "$1$self.sidebarActionProps($2"
-    }, {
-        match: /(connectionApp:\i\})(\))(?=,\(0,\i\.jsx\)\(\i,\{popover:)/,
-        replace: "$1,dassSidebar)$2"
+        match: /(\(0,\i\.jsx\)\(\i,)(\{stream:\i,canGoLive:\i,canGoLiveActivity:\i(?:,\i:\i){1,24},connectionApp:\i\})(?=\),\(0,\i\.jsx\)\(\i,\{popover:)/,
+        replace: "$1$self.sidebarActionProps($2,dassSidebar)"
     }, {
         match: /(?<=,)(\(0,\i\.jsx\)\(\i,\{popover:\i,dismissPopover:)/,
         replace: "dassSidebar?null:$1"

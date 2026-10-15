@@ -75,8 +75,9 @@ native video element remained present throughout. Matching dimensions is not
 pixel-perfect visual acceptance. After user feedback, filled vector geometry,
 the publisher-name overlay's 16px text, the camera source badge and Nitro gradient were
 matched against the live DOM. The attached native stream showed the premium
-emblem even at 1080p/30FPS; premium styling therefore uses explicit metadata, not
-a hardcoded resolution/FPS threshold. This mock does not claim DASS requires
+emblem even at 1080p/30FPS. The mock uses explicit premium metadata; production
+quality styling now follows the user-requested threshold above 720p or 30FPS.
+This mock does not claim DASS requires
 Nitro, checks Nitro membership or unlocks Discord entitlements. Live checks also
 confirmed both checkmarks update while the submenu stays open, the visibility
 toggle affects only the mock area, and the quality segment expands on tile focus.
