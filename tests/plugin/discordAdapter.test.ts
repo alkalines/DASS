@@ -128,7 +128,7 @@ describe("build 634304 Voice Connected panel patch", () => {
         const source = patchSidebar();
         expect(source).toContain("dassSidebarPublishing=$self.usePublishingState(n.id)");
         expect(source).toContain('"aria-pressed":dassSidebarPublishing||null!=I');
-        expect(source).toContain("T=!dassSidebarPublishing&&(null!=I||p.length>0)");
+        expect(source).toContain("T=dassSidebarPublishing||(null!=I||p.length>0)");
         expect(() => new Function("$self", `let t; let ${source};`)).not.toThrow();
     });
 
@@ -170,16 +170,16 @@ describe("build 634304 Voice Connected panel patch", () => {
         return { calls, tooltip: tooltip.props.text, button: tooltip.props.children.props };
     }
 
-    test("DASS sidebar uses native pressed/icon styling and stops directly, even with activity or permission loss", () => {
+    test("DASS sidebar uses native pressed/icon styling and opens stream options, even with activity or permission loss", () => {
         const rendered = renderSidebar(true, false, true, true);
         expect(rendered.tooltip).toBe("Stop Streaming");
         expect(rendered.button["aria-pressed"]).toBe(true);
         expect(rendered.button.disabled).toBe(false);
         expect(rendered.button.className[2]).toEqual({ selected: true, disabled: false });
         expect(rendered.button.children.props.children[1]).toBe("Stop Streaming");
-        expect(rendered.button.popoutHandler).toBeUndefined();
+        expect(rendered.button.popoutHandler).toBe(true);
         rendered.button.onClick({});
-        expect(rendered.calls).toEqual(["disable", "stop intent", "DASS stop"]);
+        expect(rendered.calls).toEqual(["disable", "stop intent", "popout"]);
     });
 
     test("inactive DASS preserves native stop/popout and intercepted start", () => {
@@ -193,6 +193,21 @@ describe("build 634304 Voice Connected panel patch", () => {
         idle.button.onClick({});
         expect(idle.calls).toEqual(["enable", "start intent", "DASS start"]);
     });
+});
+
+test("native stream menu wrapper keeps hooks in a child and forwards native props", () => {
+    const patch = DISCORD_SHARE_PATCHES[5];
+    const source = 'function _(e){let{channel:t,currentUser:n,activeStreams:r,hideSelfOptions:l=!1}=e;return t}';
+    const replacement = patch.replacement[0];
+    const regex = new RegExp(replacement.match.source.replaceAll("\\i", "(?:[A-Za-z_$][\\w$]*)"));
+    expect([...source.matchAll(new RegExp(regex.source, "g"))]).toHaveLength(1);
+    const patched = source.replace(regex, replacement.replace);
+    const render = new Function("$self", `${patched};return _;`)({ StreamMenu: (props: unknown) => props });
+    const channel = { id: "call" };
+    const props = render({ channel, hideSelfOptions: false, onClose: () => {} });
+    expect(props.channel).toBe(channel);
+    expect(props.dassNativeComponent(props)).toBe(channel);
+    expect(props.onClose).toBeFunction();
 });
 
 describe("explicit transport selection", () => {

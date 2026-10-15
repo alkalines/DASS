@@ -37,9 +37,15 @@ test("native grid keys and callbacks are untouched; only owned render callbacks 
     const owned = Object.assign(() => { throw new Error("Key lookup must not render a tile"); }, { dassTileKey: "dass-remote:call:publisher" });
     const tiles = [render, owned, render];
     const key = gridTileKeyExtractor(nativeKey, tiles);
-    expect(key(0)).toBe("native-0"); expect(key(1)).toBe("dass-remote:call:publisher"); expect(key(2)).toBe("native-2");
-    expect(calls).toEqual([0, 2]);
+    expect(key(0)).toBe("native-0"); expect(key(1)).toBe("dass-remote:call:publisher"); expect(key(2)).toBe("native-1");
+    expect(calls).toEqual([0, 1]);
     expect(tiles[0]).toBe(render);
+});
+
+test("leftmost stream tiles do not shift native participant keys", () => {
+    const owned = Object.assign(() => null, { dassTileKey: "dass-local:call" });
+    const keys = gridTileKeyExtractor(index => ["alice", "bob"][index], [owned, () => null, () => null]);
+    expect([keys(0), keys(1), keys(2)]).toEqual(["dass-local:call", "alice", "bob"]);
 });
 
 test("a previously watched share ends only after matching authenticated directory confirmation", () => {

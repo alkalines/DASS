@@ -21,6 +21,9 @@ const SHARE_PATCHES = [{
     }, {
         match: /onClick:null!=(\i)\?(\i):(\i)(?=\}\))/,
         replace: "onClick:null!=$1?$2:()=>$self.chooseShareTransport($3)"
+    }, {
+        match: /onPopoutClick:(\i)\?function\(\i\)\{(\i)\?\.\(\i\)\}:null/,
+        replace: "dassPopoutClick:$2,$&"
     }]
 }, {
     find: VOICE_PANEL_SHARE_START_MATCH,
@@ -33,7 +36,7 @@ const SHARE_PATCHES = [{
         replace: "$1dassSidebarPublishing?()=>$self.stopPublishing():$2"
     }, {
         match: /(\i=)(null!=\i\|\|\i\.length>0)(?=,\i=\i\?\i\.intl\.string\()/,
-        replace: "$1!dassSidebarPublishing&&($2)"
+        replace: "$1dassSidebarPublishing||($2)"
     }, {
         match: /(\i=)(null!=\i)(?=,\{Component:\i,events:\i,play:\i\}=\(0,\i\.c\)\(\i\?"disable":"enable"\))/,
         replace: "$1dassSidebarPublishing||$2"
@@ -88,6 +91,12 @@ const SHARE_PATCHES = [{
     }, {
         match: /if\(0===(\i)\.length\)(?=\{let \i=\i\.length>0&&!\i;return\(0,\i\.jsx\)\(\i\.A,\{channelId:\i\.id,allPoppedOut:\i\}\))/,
         replace: "if(0===$1.length&&!dassShowStreamGrid)"
+    }]
+}, {
+    find: 'navId:"manage-streams"',
+    replacement: [{
+        match: /function (\i)\((\i)\)\{(?=let\{channel:\i,currentUser:\i,activeStreams:\i,hideSelfOptions:)/,
+        replace: "function $1($2){return $self.StreamMenu({...$2,dassNativeComponent:dassNativeStreamMenu})}function dassNativeStreamMenu($2){"
     }]
 }];
 

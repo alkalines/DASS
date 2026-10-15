@@ -34,14 +34,84 @@ function fixture() {
             expect(options.credential).toBe("separate_secret");
             if (deny) throw new SpikeSignalingError("rejected:unauthorized");
             if (failure) throw failure;
-            return signaling;
+            return signalingClosed.signal.aborted ? { ...signaling, closed: new AbortController().signal } : signaling;
         },
-        prepare: async () => { events.push("prepare"); return peer; }
+        prepare: async () => { events.push("prepare"); return peerClosed.signal.aborted ? { ...peer, closed: new AbortController().signal } : peer; }
     });
     controller.start();
     return { session, controller, bridge, events, peer, lease, signalingClosed, releases: () => releases,
         presence: (change: ViewerPresence["change"], viewerCount: number) => presenceListener?.({ type: "viewer_presence", session_id: "publisher_session", change, viewer_count: viewerCount }),
         deny: () => { deny = true; }, failConnection: (error: SpikeSignalingError) => { failure = error; }, exit: () => { context = undefined; controller.reset(); } };
+}
+
+test("Change Stream releases the old source before opening the picker; cancellation leaves sharing stopped", async () => {
+    const f = fixture();
+    try {
+        await f.controller.publish("https://dass.example", f.bridge);
+        await f.controller.changeSource("https://dass.example", { version: 1, capture: async () => { throw new Error("Cancelled"); } });
+        expect(f.controller.getSnapshot().phase).toBe("failed");
+        expect(f.controller.getPreviewStream()).toBeUndefined();
+        expect(f.releases()).toBe(1);
+        expect(f.peer.closed.aborted).toBe(true);
+    } finally { f.controller.stop(); }
+});
+
+test("stop during Change Stream aborts the picker and releases late results without restarting", async () => {
+    const f = fixture();
+    let complete: ((lease: CaptureLease) => void) | undefined;
+    let signal: AbortSignal | undefined;
+    let releases = 0;
+    try {
+        await f.controller.publish("https://dass.example", f.bridge);
+        const changing = f.controller.changeSource("https://dass.example", { version: 1, capture: abort => {
+            signal = abort;
+            return new Promise(resolve => { complete = resolve; });
+        } });
+        for (let i = 0; i < 10 && !signal; i++) await Promise.resolve();
+        expect(signal).toBeDefined();
+        await f.controller.changeSource("https://dass.example", f.bridge);
+        expect(f.events.filter(event => event === "capture")).toHaveLength(1);
+        f.controller.reset();
+        expect(signal?.aborted).toBe(true);
+        complete?.({ stream: {} as MediaStream, audioSelected: true, release: () => { releases++; } });
+        await changing;
+        expect(releases).toBe(1);
+        expect(f.controller.getSnapshot().phase).toBe("idle");
+        expect(f.events.filter(event => event === "authenticate")).toHaveLength(2);
+    } finally { f.controller.stop(); }
+});
+
+test("source changes reauthenticate before acquiring a replacement", async () => {
+    const f = fixture();
+    let releases = 0;
+    try {
+        await f.controller.publish("https://dass.example", f.bridge);
+        f.deny();
+        await f.controller.changeSource("https://dass.example", { version: 1, capture: async () => ({
+            stream: {} as MediaStream, audioSelected: true, release: () => { releases++; }
+        }) });
+        expect(f.releases()).toBe(1);
+        expect(releases).toBe(0);
+        expect(f.controller.getSnapshot().phase).toBe("failed");
+    } finally { f.controller.stop(); }
+});
+
+for (const stopWhileReleasing of [false, true]) {
+    test(`Change Stream waits for host audio cleanup${stopWhileReleasing ? " and cannot restart after stop" : " before restarting DASS"}`, async () => {
+        const f = fixture();
+        let finish: (() => void) | undefined;
+        try {
+            await f.controller.publish("https://dass.example", f.bridge);
+            f.lease.release = () => new Promise<void>(resolve => { finish = resolve; });
+            const changing = f.controller.changeSource("https://dass.example", f.bridge);
+            expect(f.events.filter(event => event === "capture")).toHaveLength(1);
+            if (stopWhileReleasing) f.controller.stop();
+            finish?.();
+            await changing;
+            expect(f.events.filter(event => event === "capture")).toHaveLength(stopWhileReleasing ? 1 : 2);
+            expect(f.controller.getSnapshot().phase).toBe(stopWhileReleasing ? "idle" : "publishing");
+        } finally { f.controller.stop(); }
+    });
 }
 
 test("session snapshots never contain credentials; setup is reused and can be forgotten", () => {

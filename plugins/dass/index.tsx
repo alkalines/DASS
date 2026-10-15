@@ -25,7 +25,7 @@ import { hasAcceptedPublishCapture, PublishController } from "./publishing";
 import type { DassShare } from "./routing";
 import { DassSession } from "./session";
 import { SettingsPanel } from "./settingsPanel";
-import { NativeShareButton, type ShareButtonProps, usePublisherStatus, usePublishingState } from "./shareButton";
+import { NativeShareButton, NativeStreamMenu, type ShareButtonProps, type StreamMenuProps, usePublisherStatus, usePublishingState } from "./shareButton";
 import { cancelShareTransportChooser, showShareTransportChooser } from "./shareTransport";
 import { sidebarActionProps, type SidebarState, stopSidebarStream } from "./sidebarPresentation";
 import { SpikePeer } from "../../clients/spike/peer";
@@ -210,6 +210,12 @@ export default definePlugin({
     settingsAboutComponent: () => <Paragraph>Configure your account once, then use the call's Share button. Supported builds route DASS tiles through the call grid, focused layout and filmstrip, with independent share audio controls and a local sidebar card. Runtime verification, zoom, individual tile popouts and remote voice-row badges remain incomplete. The temporary test viewer remains in Advanced options.</Paragraph>,
     ShareButton(props: ShareButtonProps) {
         return <NativeShareButton {...props} controller={publisher} />;
+    },
+    StreamMenu(props: StreamMenuProps) {
+        return <NativeStreamMenu {...props} controller={publisher} currentChannelId={pluginActive ? currentCall() : undefined} changeSource={() => {
+            const host = globalThis as typeof globalThis & { Equibop?: { DassCapture?: EquibopCaptureBridge; }; };
+            void publisher.changeSource(settings.store.backendUrl, host.Equibop?.DassCapture);
+        }} />;
     },
     usePublishingState(channelId: string) {
         const active = usePublishingState(publisher);

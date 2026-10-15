@@ -44,6 +44,23 @@ function fixture(audioSelected = true) {
 }
 
 describe("explicit host capture lifecycle", () => {
+    test("capture release is awaitable and retains singleton ownership until audio cleanup finishes", async () => {
+        const f = fixture();
+        const cleanup = deferred<void>();
+        let ownershipReleased = false;
+        const bridge = createCaptureBridge({ ...f.host, claim: () => () => { ownershipReleased = true; }, stopAudio: () => cleanup.promise });
+        const lease = await bridge.capture(new AbortController().signal);
+        const releasing = lease.release();
+        expect(releasing).toBeInstanceOf(Promise);
+        expect(lease.release()).toBe(releasing);
+        expect(bridge.ownsAudio()).toBe(true);
+        expect(ownershipReleased).toBe(false);
+        cleanup.resolve();
+        await releasing;
+        expect(bridge.ownsAudio()).toBe(false);
+        expect(ownershipReleased).toBe(true);
+    });
+
     test("missing host bridge refuses without native fallback", async () => {
         await expect(createEquibopCapture()(new AbortController().signal)).rejects.toThrow("unavailable");
     });

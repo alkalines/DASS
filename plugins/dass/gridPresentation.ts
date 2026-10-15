@@ -31,9 +31,10 @@ export function gridShares(channelId: string, currentChannelId: string | undefin
 }
 
 export function gridTileKeyExtractor(nativeKey: (index: number) => string, tiles: readonly unknown[]) {
-    return (index: number) => {
-        const renderer = tiles[index];
+    let nativeIndex = 0;
+    const keys = tiles.map(renderer => {
         return typeof renderer === "function" && "dassTileKey" in renderer && typeof renderer.dassTileKey === "string"
-            ? renderer.dassTileKey : nativeKey(index);
-    };
+            ? renderer.dassTileKey : nativeKey(nativeIndex++);
+    });
+    return (index: number) => keys[index];
 }

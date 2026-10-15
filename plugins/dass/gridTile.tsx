@@ -79,11 +79,11 @@ export function useFocusedWatchingState(runtime: GridRuntime, channelId: string)
 export function useGridTiles(runtime: GridRuntime, channelId: string, nativeTiles: GridTileRenderer[], className: string,
     onClick?: TileAction, onDoubleClick?: TileAction) {
     const { shares } = useGridState(runtime, channelId);
-    return [...nativeTiles, ...shares.map(tile => Object.assign(
+    return [...shares.map(tile => Object.assign(
         (width: number) => <NativeGridTile runtime={runtime} participant={projectParticipants([tile])[0]} channel={{ id: channelId }}
             width={width} className={className} onClick={onClick} onDoubleClick={onDoubleClick} />,
         { dassTileKey: tile.key }
-    ))];
+    )), ...nativeTiles];
 }
 
 export interface CallTileProps {
@@ -269,5 +269,5 @@ export interface FocusedCallProps {
 export function useFocusedCallProps(runtime: GridRuntime, props: FocusedCallProps) {
     const { shares } = useGridState(runtime, props.channel.id);
     const participants = projectParticipants(shares);
-    return { ...props, participants: [...props.participants, ...participants], filteredParticipants: [...props.filteredParticipants, ...participants] };
+    return { ...props, participants: [...participants, ...props.participants], filteredParticipants: [...participants, ...props.filteredParticipants] };
 }

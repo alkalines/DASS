@@ -15,7 +15,7 @@ export interface DassShare {
 export interface CaptureLease {
     stream: MediaStream;
     audioSelected: boolean;
-    release(): void;
+    release(): void | Promise<void>;
 }
 
 export interface PublishConnection {

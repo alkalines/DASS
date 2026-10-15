@@ -75,7 +75,7 @@ test("unapproved builds warn without gating or duplicating presentation and capt
     for (const build of [638652, 999999, 0, NaN]) {
         expect(getDiscordBuildWarning(build)).toBe("The current plugin version is not yet approved for this Discord build. This could cause the UI to break.");
     }
-    expect(DISCORD_SHARE_PATCHES).toHaveLength(5);
+    expect(DISCORD_SHARE_PATCHES).toHaveLength(6);
     expect(DISCORD_PRESENTATION_PATCHES).toHaveLength(8);
     for (const patches of [DISCORD_SHARE_PATCHES, DISCORD_PRESENTATION_PATCHES]) {
         for (const patch of patches) {

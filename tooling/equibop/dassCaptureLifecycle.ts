@@ -54,14 +54,15 @@ export function createCaptureBridge(host: CaptureHost) {
                     releaseOwnership?.();
                 })();
             };
-            const release = () => {
-                if (released) return;
+            const release = (): Promise<void> | undefined => {
+                if (released) return cleanup;
                 released = true;
                 cancelled = true;
                 if (!settled) host.cancelPicker?.();
                 signal.removeEventListener("abort", release);
                 stopTracks();
                 finish();
+                return cleanup;
             };
             signal.addEventListener("abort", release, { once: true });
             try {

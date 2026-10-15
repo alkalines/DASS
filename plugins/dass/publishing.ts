@@ -28,6 +28,7 @@ export class PublishController {
     private active = false;
     private operation?: { abort: AbortController; contextId: string; peer?: SpikePeer; signaling?: SpikeSignaling; capture?: CaptureLease; };
     private contextCheck?: ReturnType<typeof setInterval>;
+    private sourceChange?: AbortController;
     private listeners = new Set<() => void>();
     private status: PublishStatus = { phase: "idle", message: "No DASS share is running.", candidates: [] };
 
@@ -53,6 +54,8 @@ export class PublishController {
         }, 250);
     }
     reset(message = "DASS sharing stopped. Capture and connection resources were released.") {
+        this.sourceChange?.abort();
+        this.sourceChange = undefined;
         const { operation } = this;
         this.operation = undefined;
         operation?.abort.abort();
@@ -71,8 +74,28 @@ export class PublishController {
         return this.active && this.operation === operation && !operation.abort.signal.aborted && this.currentContext() === operation.contextId;
     }
 
+    async changeSource(backendUrl: string, bridge?: EquibopCaptureBridge) {
+        const { operation } = this;
+        if (!operation || !this.current(operation) || !hasAcceptedPublishCapture(this.status.phase) || this.sourceChange) return;
+        const released = operation.capture?.release();
+        operation.capture = undefined;
+        this.reset();
+        const request = new AbortController();
+        this.sourceChange = request;
+        try {
+            await released;
+            if (request.signal.aborted || !this.active || this.currentContext() !== operation.contextId) return;
+            this.sourceChange = undefined;
+            await this.publish(backendUrl, bridge);
+        } catch {
+            if (!request.signal.aborted) this.update({ phase: "failed", message: "Could not release the old capture. Restart the client before sharing again.", candidates: [] });
+        } finally {
+            if (this.sourceChange === request) this.sourceChange = undefined;
+        }
+    }
+
     async publish(backendUrl: string, bridge?: EquibopCaptureBridge, prepareOnly = false) {
-        if (!this.active || this.operation) return;
+        if (!this.active || this.operation || this.sourceChange) return;
         const contextId = this.currentContext();
         if (!contextId) return;
         let access: ReturnType<DassSession["getAccess"]>;

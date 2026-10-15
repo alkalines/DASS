@@ -34,7 +34,7 @@ export interface StreamQuality {
 
 type StreamIconName = "options" | "stop" | "change" | "popout" | "screen" | "camera" | "nitro";
 
-function StreamIcon({ name, premiumGradient }: { name: StreamIconName; premiumGradient?: boolean; }) {
+export function StreamIcon({ name, premiumGradient }: { name: StreamIconName; premiumGradient?: boolean; }) {
     const gradientId = React.useId();
     return <svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true">
         {premiumGradient ? <defs><linearGradient id={gradientId}>

@@ -114,8 +114,19 @@ and compiled. These checks do not prove that the rebuilt hooks mount at runtime:
 fully restart with DASS enabled and verify the sidebar card and focused stop
 action. No live module factories or active media were modified for the checks.
 Stop Streaming and Stop Watching use the owning DASS controllers; Stop Watching
-is disabled unless receiving a tile or dismissing its closed-view metadata. Change Stream and individual
-popout remain disabled. Publisher More Options shares its Show My Screen Share
+is disabled unless receiving a tile or dismissing its closed-view metadata. The
+publishing call button now exposes Discord's native dropdown arrow, and the
+Voice Connected share button opens the same DASS menu with **Change Stream** and
+**Stop Streaming**, without Report Problem. Change Stream releases the old capture,
+waits for host audio cleanup, and opens the existing Equibop source/quality/audio
+picker through a fresh authenticated DASS session. Cancelling leaves sharing
+stopped; ordinary voice is unaffected. Rebuild the Equibop capture bridge as well
+as the plugin for awaitable capture cleanup. The menu/arrow hooks matched once
+against build 638651 through read-only DevTools inspection; end-to-end acceptance
+of these changes remains pending. DASS grid and filmstrip tiles now precede native
+participant tiles (left first), preserving native participant keys.
+Change Stream in the tile overlay and individual popout remain disabled.
+Publisher More Options shares its Show My Screen Share
 and Pause Preview When Discord Isn’t Focused preferences across grid/focused
 tiles. These are session-only presentation preferences. They detach local preview
 playback without disabling/stopping capture tracks or interrupting publishing.
