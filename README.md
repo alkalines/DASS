@@ -3,6 +3,7 @@
 Early-stage project for an Equicord plugin and self-hosted Rust screensharing backend.
 
 - [Research and implementation plan](docs/research/PLAN.md)
+- [Security roadmap and acceptance gates](docs/research/SECURITY-ROADMAP.md)
 - [Contributor and agent instructions](AGENTS.md)
 - [Docker-only backend development](docs/backend.md)
 - [Build and install the plugin in Equicord or Equibop](docs/plugin.md)

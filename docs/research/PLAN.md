@@ -11,6 +11,16 @@ See [backend development](../backend.md) and [plugin status](../plugin.md) for
 commands and limitations. The architecture and future-work sections below are
 proposals, not verification evidence.
 
+For ordered security work, deployment tiers, acceptance criteria and future-agent
+handoffs, see the [security roadmap](SECURITY-ROADMAP.md). It defines an E2EE-only,
+public-Internet target with publisher-controlled stream admission. Rooms are
+informational: there are no administrator-managed room grants or room ACLs, and
+LAN is only a test environment. The revised target also excludes transport-only
+streaming and login IP allowlists/account expiry/login revocation flags. The
+dashboard stays minimal: Users, Rooms, Streams and a small recent-events log.
+These requirements supersede older room-authorization and LAN deployment proposals.
+These target requirements do not change historical implementation evidence below.
+
 ## 1. Recommendation
 
 Build an Equicord TypeScript plugin and a **single Rust backend executable**.
@@ -193,17 +203,28 @@ loss and retransmissions on named hardware before setting capacity promises.
 ## 7. Security and authorization
 
 **Always:** TLS for control, WebRTC DTLS-SRTP for media, certificate verification,
-unpredictable room identifiers and short-lived room/role-scoped capabilities.
+unpredictable stream identifiers and replay-resistant publisher approvals.
 No disabling TLS verification, no Discord user tokens sent to DASS, no public
 unauthenticated publish or join endpoints. Authenticate early, cap unauthenticated
 connections and validate every control message. A Discord channel ID is context,
 not proof of identity or channel membership.
 
-Start invite-only with backend-authorized publish/subscribe capabilities. Later,
-optional Discord OAuth must be verified server-side and use narrowly scoped access;
+For the revised public-Internet target, authenticated publishers control stream
+admission; there are no administrator-issued per-room publish/subscribe grants.
+Optional Discord OAuth must be verified server-side and use narrowly scoped access;
 Discord voice-channel membership/permission enforcement needs its own validated
 design. Never trust a client's claimed user ID or permission-store result as server
-authorization. Check roles on each operation and actively disconnect revoked peers.
+authorization. Authenticate stream ownership and enforce publisher decisions on
+each operation, removing viewers and rekeying when their approval is withdrawn.
+
+Publisher-controlled viewing is the target admission model: the backend
+relays a viewer request to the stream owner and enforces that owner's approval,
+without requiring administrators to grant every viewer every room. Explicit
+preapproval and a future verified same-call policy are possible options; manual
+approval remains the safe default until identity and call membership can be
+securely established. See [security roadmap steps 2.6–2.11](SECURITY-ROADMAP.md#2-enforce-publisher-controlled-stream-admission)
+for policy, server enforcement, revocation and hostile-client acceptance gates.
+This is future work, not a current permission mechanism or server-untrusted E2EE.
 
 Browser WebSockets cannot freely set authorization headers. Use a short-lived,
 single-use connection ticket or an authenticated first message with a short timeout;
