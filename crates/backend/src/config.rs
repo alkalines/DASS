@@ -254,7 +254,7 @@ mod tests {
             .users_json
             .is_some()
         );
-        for users in ["", "not-json", r#"{"version":2,"users":[]}"#] {
+        for users in ["", "not-json", r#"{"version":1,"users":[]}"#] {
             assert!(
                 config_with(&[("DASS_INSECURE_LOCAL_DEV", "true"), ("DASS_USERS", users)]).is_err()
             );

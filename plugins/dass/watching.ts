@@ -6,6 +6,15 @@
 
 import { browserFailureCode, logDiagnostic } from "../../clients/spike/diagnostics";
 import { routeWatch } from "./discordAdapter";
+import {
+    type E2eeIdentity,
+    evaluateIdentity,
+    identityFingerprint,
+    type IdentityStore,
+    trustLabel,
+    unwrapEpochKey,
+} from "../../clients/spike/e2ee";
+import { defaultIdentityStore,deviceIdentity } from "./e2eeIdentity";
 import { type DassShare, ScreenshareRouting, type ScreenshareTransport } from "./routing";
 import { SpikePeer } from "../../clients/spike/peer";
 import { type DassAuthentication, isAuthenticationRejected, signalingFailureMessage, SpikeSignaling, SpikeSignalingError } from "../../clients/spike/signaling";
@@ -37,12 +46,16 @@ export class WatchController implements ScreenshareTransport {
     private poll?: ReturnType<typeof setTimeout>;
     private contextCheck?: ReturnType<typeof setInterval>;
     private busy = false;
+    private identity?: E2eeIdentity;
+    private identityStore?: IdentityStore;
+    private publisherTrust?: string;
     private status: WatchStatus = { phase: "idle", message: "Bind a DASS room using a separate credential. Discord context is not authorization.", shares: [], candidates: [] };
     private listeners = new Set<() => void>();
 
     constructor(private readonly currentContext: () => string | undefined, private readonly dependencies = {
         connect: SpikeSignaling.connect,
-        prepare: SpikePeer.prepare
+        prepare: SpikePeer.prepare,
+        identityStore: async () => defaultIdentityStore()
     }) {}
 
     getSnapshot = () => this.status;
@@ -169,7 +182,7 @@ export class WatchController implements ScreenshareTransport {
         this.busy = true;
         this.update({ ...this.status, phase: "loading", message: "Preparing one viewer. No capture or Discord subscription is requested." });
         try {
-            const peer = await this.dependencies.prepare({ experimental: true, signal: this.abort.signal });
+            const peer = await this.dependencies.prepare({ experimental: true, signal: this.abort.signal, e2ee: true });
             if (!this.current(epoch)) { peer.close(); return; }
             this.peer = peer;
             peer.closed.addEventListener("abort", () => {
@@ -200,11 +213,13 @@ export class WatchController implements ScreenshareTransport {
             watchingShare: this.status.shares.find(listed => listed.roomId === share.roomId && listed.shareId === share.shareId) });
         const intercepted = routeWatch(this.routing, { transport: "dass", share });
         if (!intercepted.handled) throw new Error("DASS watch was not consumed.");
-        const result = await intercepted.completion;
-        if (this.current(epoch)) {
-            this.busy = false;
-            if (result.ok) this.update({ ...this.status, phase: "watching", message: "DASS tracks attached. Use Enable audio to permit sound playback.", stream: result.value,
-                watchingShare: this.status.shares.find(listed => listed.shareId === share.shareId) ?? { roomId: share.roomId, shareId: share.shareId } });
+            const result = await intercepted.completion;
+            if (this.current(epoch)) {
+                this.busy = false;
+                if (result.ok) this.update({ ...this.status, phase: "watching",
+                    message: `DASS tracks attached (${this.publisherTrust ?? "E2EE — identity unverified (TOFU)"}). Use Enable audio to permit sound playback.`,
+                    stream: result.value,
+                    watchingShare: this.status.shares.find(listed => listed.shareId === share.shareId) ?? { roomId: share.roomId, shareId: share.shareId } });
             else this.unexpectedClose("failed", result.message);
         }
         return result;
@@ -244,7 +259,37 @@ export class WatchController implements ScreenshareTransport {
         if (!this.current(epoch) || share.roomId !== this.roomId || !peer || !signaling || signal.aborted) throw new Error("Unbound viewer.");
         signal.addEventListener("abort", peer.close, { once: true });
         try {
-            await peer.activate({ backendUrl: this.backendUrl, credential: "", roomId: share.roomId, publisherId: share.shareId, signaling });
+            this.identityStore ??= await this.dependencies.identityStore();
+            this.identity ??= await deviceIdentity(this.identityStore);
+            const { identity } = this;
+            const publisherScope = `publisher/${share.roomId}/${share.shareId}`;
+            const existingPin = await this.identityStore.readPeer(publisherScope).catch(() => undefined);
+            await peer.activate({ backendUrl: this.backendUrl, credential: "", roomId: share.roomId, publisherId: share.shareId, signaling,
+                e2ee: {
+                    identityPublicKey: identity.publicKey,
+                    // The approval decision carries the publisher's E2EE key.
+                    // TOFU pin it on first contact; a changed key fails closed
+                    // and must be explicitly re-trusted before watching.
+                    trustPublisher: (publisherKey, _decision) => {
+                        const fingerprintPromise = identityFingerprint(publisherKey);
+                        const trust = evaluateIdentity(existingPin, publisherKey);
+                        this.publisherTrust = trustLabel(trust);
+                        if (trust.kind === "changed") return false;
+                        if (!existingPin) {
+                            void fingerprintPromise.then(fingerprint =>
+                                this.identityStore?.writePeer(publisherScope, { key: publisherKey, fingerprint, verified: false })).catch(() => {});
+                        }
+                        return true;
+                    },
+                    onEpochBlob: blob => {
+                        void (async () => {
+                            const pin = await this.identityStore?.readPeer(publisherScope);
+                            if (!pin) return;
+                            const { epoch, keyBytes } = await unwrapEpochKey(identity, pin.key, `stream/${share.shareId}`, blob);
+                            this.peer?.setReceiveEpoch(epoch, keyBytes);
+                        })().catch(() => logDiagnostic("epoch key unwrap failed", {}, true));
+                    },
+                } });
             await new Promise<void>((resolve, reject) => {
                 const finish = () => {
                     if (peer.closed.aborted || signal.aborted || !this.current(epoch)) { cleanup(); reject(new Error("Viewer disconnected.")); }

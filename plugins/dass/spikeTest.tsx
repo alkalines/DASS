@@ -10,6 +10,7 @@ import { copyToClipboard } from "@utils/clipboard";
 import { TextInput, useCallback, useEffect, useRef, useState } from "@webpack/common";
 
 import { createEquibopCapture, type EquibopCaptureBridge } from "./capture";
+import { deviceIdentity } from "./e2eeIdentity";
 import { PREPARATION_TIMEOUT_MS, preparationFailureMessage, SpikePeer } from "../../clients/spike/peer";
 
 let stopCurrentTest: (() => void) | undefined;
@@ -81,7 +82,7 @@ export function SpikeTestPanel({ backendUrl, isActive, beforePrepare }: { backen
             const host = globalThis as typeof globalThis & { Equibop?: { DassCapture?: EquibopCaptureBridge; }; };
             const capture = publisher ? await createEquibopCapture(host.Equibop?.DassCapture)(current.abort.signal) : undefined;
             if (current.abort.signal.aborted) { capture?.release(); return; }
-            current.peer = await SpikePeer.prepare({ experimental: true, signal: current.abort.signal, capture });
+            current.peer = await SpikePeer.prepare({ experimental: true, signal: current.abort.signal, capture, e2ee: true });
             if (resource.current !== current) { current.peer.close(); return; }
             current.peer.closed.addEventListener("abort", () => {
                 if (resource.current === current) {
@@ -115,8 +116,10 @@ export function SpikeTestPanel({ backendUrl, isActive, beforePrepare }: { backen
         setPrepared(false);
         setStatus("Authenticating and negotiating DASS media. This is not proof of playback.");
         try {
+            const identity = await deviceIdentity();
             const id = await current.peer.activate({ backendUrl, credential, roomId,
-                publisherId: current.publisher ? undefined : publisherId });
+                publisherId: current.publisher ? undefined : publisherId,
+                e2ee: { identityPublicKey: identity.publicKey } });
             if (resource.current === current) {
                 setSessionId(id);
                 setStatus(current.publisher ? "Answer applied. Give this DASS publisher session ID to the viewer. Verify real video/audio reception separately." : "Answer applied. Use the player's Play control if autoplay is blocked; verify video and selected audio.");

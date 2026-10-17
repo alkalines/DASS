@@ -49,7 +49,7 @@ test("login, validated response correlation, busy admission and abort cleanup", 
     await expect(connection.request({ type: "publish", session_id: "session" }, "accepted")).rejects.toThrow("busy");
     socket.reply({ type: "joined", session_id: "session" });
     expect(await joined).toEqual({ type: "joined", session_id: "session" });
-    const publish = connection.request({ type: "publish", session_id: "session" }, "accepted");
+    const publish = connection.request({ type: "publish", session_id: "session", publisher_key: "cHViLWtleQ" }, "accepted");
     abort.abort();
     await expect(publish).rejects.toThrow("cancelled");
     expect(connection.closed.aborted).toBe(true);

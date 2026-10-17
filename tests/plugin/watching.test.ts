@@ -1,3 +1,4 @@
+import { memoryIdentityStore } from "./helpers/e2eeStore";
 import { expect, test } from "bun:test";
 import { SpikePeer } from "../../clients/spike/peer";
 import { BrowserSocket, SpikeSignaling, SpikeSignalingError } from "../../clients/spike/signaling";
@@ -61,7 +62,8 @@ function fixture() {
             prepares++;
             options.signal.addEventListener("abort", close, { once: true });
             return peer;
-        }
+        },
+        identityStore: async () => memoryIdentityStore()
     });
     controller.start();
     return { controller, socket, peer, stream, closed, prepares: () => prepares, activations: () => activations,
@@ -96,7 +98,8 @@ for (const code of ["socket", "timeout", "expired", "server:expired", "server:tr
     test(`viewer ${code} is a disconnect, not a credential rejection`, async () => {
         const controller = new WatchController(() => "voice_context", {
             connect: async () => { throw new SpikeSignalingError(code); },
-            prepare: async () => { throw new Error("Unexpected preparation"); }
+            prepare: async () => { throw new Error("Unexpected preparation"); },
+            identityStore: async () => memoryIdentityStore()
         });
         controller.start();
         try {

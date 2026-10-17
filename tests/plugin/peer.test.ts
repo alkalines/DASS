@@ -58,6 +58,8 @@ class Stream {
 
 const offerSdp = "v=0\r\na=candidate:1 1 udp 2130706431 192.168.1.2 50000 typ host\r\n";
 
+const TEST_E2EE = { identityPublicKey: "dGVzdC12aWV3ZXIta2V5" };
+
 class Peer extends EventTarget {
     static instances: Peer[] = [];
     static gathering = "complete";
@@ -115,7 +117,9 @@ class Socket extends EventTarget {
                     : { type: "view_request_pending", session_id: "session", request_id: "pending_1" };
                 if (!Socket.denyView) pushed.push({ request_id: "server_view_decision", operation: {
                     type: "view_decision", session_id: "session", request_id: "pending_1",
-                    decision: Socket.denyDecision ? "deny" : "approve", approval_id: Socket.denyDecision ? "" : "approval_1"
+                    decision: Socket.denyDecision ? "deny" : "approve",
+                    approval_id: Socket.denyDecision ? "" : "approval_1",
+                    publisher_key: Socket.denyDecision ? "" : "cHViLWtleQ"
                 } });
                 break;
             case "subscribe": operation = Socket.rejectSubscribe ? { type: "rejected", code: "invalid_state" }
@@ -176,7 +180,7 @@ test("viewer reuses directory authentication without a second credential login",
     const signaling = await SpikeSignaling.connect({ experimental: true, backendUrl: "https://dass.example", credential: "separate_secret", signal: abort.signal });
     const connection = await SpikePeer.prepare({ experimental: true, signal: abort.signal });
     try {
-        await connection.activate({ backendUrl: "https://dass.example", credential: "", roomId: "room", publisherId: "source", signaling });
+        await connection.activate({ backendUrl: "https://dass.example", credential: "", roomId: "room", publisherId: "source", signaling, e2ee: TEST_E2EE });
         expect(Socket.instances).toHaveLength(1);
         expect(Socket.instances[0].operations.map(operation => operation.type)).toEqual(["login", "join", "request_view", "subscribe", "offer"]);
         let changes = 0;
@@ -194,7 +198,7 @@ test("publisher opts into presence before its offer and receives scoped join/lea
     const connection = await SpikePeer.prepare({ experimental: true, signal: new AbortController().signal, capture: source.lease });
     const updates: number[] = [];
     try {
-        await connection.activate({ backendUrl: "https://dass.example", credential: "separate_secret", roomId: "room",
+        await connection.activate({ backendUrl: "https://dass.example", credential: "separate_secret", roomId: "room", e2ee: TEST_E2EE,
             onViewerPresence: presence => updates.push(presence.viewer_count) });
         const socket = Socket.instances[0];
         expect(socket.operations.map(operation => operation.type)).toEqual(["login", "join", "publish", "enable_viewer_presence", "offer"]);
@@ -212,7 +216,7 @@ test("unsupported presence backend closes publishing without offering or keeping
     const source = capture();
     const connection = await SpikePeer.prepare({ experimental: true, signal: new AbortController().signal, capture: source.lease });
     try {
-        await expect(connection.activate({ backendUrl: "https://dass.example", credential: "separate_secret", roomId: "room",
+        await expect(connection.activate({ backendUrl: "https://dass.example", credential: "separate_secret", roomId: "room", e2ee: TEST_E2EE,
             onViewerPresence: () => {} })).rejects.toThrow("No Discord fallback");
         expect(connection.closeMessage).toContain("viewer_presence:rejected:invalid_message");
         expect(source.releases).toBe(1);
@@ -325,14 +329,14 @@ test("publisher activation correlates WSS operations; signaling loss stops captu
     const source = capture();
     const connection = await SpikePeer.prepare({ experimental: true, signal: new AbortController().signal, capture: source.lease });
     try {
-        expect(await connection.activate({ backendUrl: "https://dass.example", credential: "separate-dass-test", roomId: "room" })).toBe("session");
+        expect(await connection.activate({ backendUrl: "https://dass.example", credential: "separate-dass-test", roomId: "room", e2ee: TEST_E2EE })).toBe("session");
         const socket = Socket.instances[0];
         expect(socket.operations.map(operation => operation.type)).toEqual(["login", "join", "publish", "offer"]);
         expect(socket.operations[3].sdp).not.toContain("fd00::2");
         expect(socket.operations[3].sdp).toContain("192.168.1.2 50000");
         expect(Peer.instances[0].localDescription?.sdp).toContain("fd00::2");
         expect(Peer.instances[0].remoteDescription?.type).toBe("answer");
-        await expect(connection.activate({ backendUrl: "https://dass.example", credential: "test", roomId: "room" })).rejects.toThrow("once");
+        await expect(connection.activate({ backendUrl: "https://dass.example", credential: "test", roomId: "room", e2ee: TEST_E2EE })).rejects.toThrow("once");
         socket.dispatchEvent(new Event("close"));
         expect(connection.closed.aborted).toBe(true);
         expect(connection.closeMessage).toContain("connection:socket");
@@ -346,7 +350,7 @@ test("viewer binds to the selected publisher and setup rejection tears down", as
     const connection = await SpikePeer.prepare({ experimental: true, signal: new AbortController().signal });
     try {
         Socket.failOffer = true;
-        await expect(connection.activate({ backendUrl: "https://dass.example", credential: "separate-dass-test", roomId: "room", publisherId: "publisher" })).rejects.toThrow("failed");
+        await expect(connection.activate({ backendUrl: "https://dass.example", credential: "separate-dass-test", roomId: "room", publisherId: "publisher", e2ee: TEST_E2EE })).rejects.toThrow("failed");
         expect(Socket.instances[0].operations[3]).toEqual({ type: "subscribe", session_id: "session", publisher_id: "publisher", approval_id: "approval_1" });
         expect(connection.closed.aborted).toBe(true);
         expect(connection.closeMessage).toContain("offer:server:transport_failed");
@@ -361,7 +365,7 @@ test("subscribe rejection is observable at closure before the activation catch r
     connection.closed.addEventListener("abort", () => { statusAtClosure = connection.closeMessage; }, { once: true });
     try {
         Socket.rejectSubscribe = true;
-        await expect(connection.activate({ backendUrl: "https://dass.example", credential: "separate-dass-test", roomId: "room", publisherId: "ocr_wrong" })).rejects.toThrow();
+        await expect(connection.activate({ backendUrl: "https://dass.example", credential: "separate-dass-test", roomId: "room", publisherId: "ocr_wrong", e2ee: TEST_E2EE })).rejects.toThrow();
         expect(statusAtClosure).toContain("subscribe:rejected:invalid_state");
         expect(connection.closeMessage).toBe(statusAtClosure);
         expect(statusAtClosure).not.toContain("ocr_wrong");
@@ -383,7 +387,7 @@ test("viewer never subscribes when the publisher denies or the request is refuse
         Socket.denyDecision = mode === "deny";
         const connection = await SpikePeer.prepare({ experimental: true, signal: new AbortController().signal });
         try {
-            await expect(connection.activate({ backendUrl: "https://dass.example", credential: "separate-dass-test", roomId: "room", publisherId: "publisher" })).rejects.toThrow();
+            await expect(connection.activate({ backendUrl: "https://dass.example", credential: "separate-dass-test", roomId: "room", publisherId: "publisher", e2ee: TEST_E2EE })).rejects.toThrow();
             const types = Socket.instances.at(-1)?.operations.map(operation => operation.type);
             expect(types).not.toContain("subscribe");
             expect(types).not.toContain("offer");

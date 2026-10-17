@@ -261,7 +261,10 @@ sections document development history, not the current normal workflow.
 The capability checker sends no credentials, rejects redirects, requires HTTPS except for explicitly
 enabled loopback HTTP, and bounds discovery to 5 seconds and 16 KiB. Only the
 version-1 scaffold contract is accepted. Discovery is not authentication or an
-authorization to capture. There is no production transport or E2EE to configure.
+authorization to capture. E2EE is mandatory in the media path (publisher and
+viewer ECDH identities plus AES-256-GCM frame encryption); it is not yet
+independently reviewed or validated on real clients, so treat it as
+unproven code rather than a security claim.
 
 **Historical chooser-only behavior:** On Discord stable build **634304**, the center voice tray and left Voice Connected
 panel share buttons now declare an explicit Discord/DASS chooser before their
@@ -526,5 +529,6 @@ cannot rewrite Equibop's bundled renderer. The upstream submodule is unchanged.
 
 Release gates remain real Wayland/X11 picker cancellation, optional audio,
 disable/logout/context-exit cleanup, independent Discord voice, no Discord
-media/thumbnail leakage, authenticated publish/subscribe, required-E2EE rejection,
-and the Phase 0 media interoperability tests in the implementation plan.
+media/thumbnail leakage, authenticated publish/subscribe, mandatory-E2EE
+behavior (no transport-only fallback), and the Phase 0 media interoperability
+tests in the implementation plan.

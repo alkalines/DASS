@@ -13,6 +13,7 @@ import { TextInput, useEffect, useRef, useState } from "@webpack/common";
 import { readRememberedAccount } from "./accountStorage";
 import { type EquibopCaptureBridge, type LocalCaptureCheck } from "./capture";
 import { type DiscoveryController } from "./controller";
+import { trustLabel } from "../../clients/spike/e2ee";
 import { type PublishController } from "./publishing";
 import { type DassSession } from "./session";
 import { type WatchController } from "./watching";
@@ -101,9 +102,11 @@ export function SettingsPanel({ session, publisher, watching, discovery, localCa
             <Paragraph role="status">{publishStatus.message}</Paragraph>
             {(publishStatus.pendingViewers.length > 0 || publishStatus.approvedViewers.length > 0) && <div className="vc-dass-viewers">
                 {publishStatus.pendingViewers.map(pending => <div key={pending.requestId} className="vc-dass-viewer-row">
-                    <Paragraph>{pending.displayName} wants to watch your stream.</Paragraph>
+                    <Paragraph>{pending.displayName} wants to watch your stream. {pending.trust ? trustLabel(pending.trust) : ""}</Paragraph>
                     <div className="vc-dass-actions">
-                        <Button size="small" onClick={() => void publisher.decideView(pending.requestId, "approve")}>Approve</Button>
+                        {pending.trust?.kind === "changed"
+                            ? <Button size="small" variant="dangerPrimary" onClick={() => void publisher.acceptViewerIdentity(pending.viewerId)}>Accept new identity</Button>
+                            : <Button size="small" onClick={() => void publisher.decideView(pending.requestId, "approve")}>Approve</Button>}
                         <Button size="small" variant="secondary" onClick={() => void publisher.decideView(pending.requestId, "deny")}>Deny</Button>
                         <Button size="small" variant="dangerPrimary" onClick={() => void publisher.decideView(pending.requestId, "block")}>Block</Button>
                     </div>

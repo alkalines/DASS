@@ -25,6 +25,7 @@ export interface DassAuthentication {
 export type ViewerPresence = Extract<ServerOperation, { type: "viewer_presence"; }>;
 export type ViewRequest = Extract<ServerOperation, { type: "view_request"; }>;
 export type ViewDecision = Extract<ServerOperation, { type: "view_decision"; }>;
+export type KeyRelay = Extract<ServerOperation, { type: "key_relay"; }>;
 
 export function signalingUrl(baseUrl: string): string {
     let url: URL;
@@ -79,6 +80,7 @@ export class SpikeSignaling {
     private viewRequestListener?: { sessionId: string; listener: (request: ViewRequest) => void; };
     private viewRequestClosed?: { sessionId: string; requestId: string; listener: () => void; };
     private viewDecisionListener?: { sessionId: string; requestId: string; listener: (decision: ViewDecision) => void; };
+    private keyRelayListener?: { listener: (relay: KeyRelay) => void; };
     private earlyDecisions: ViewDecision[] = [];
     private readonly closedController = new AbortController();
     readonly closed = this.closedController.signal;
@@ -193,8 +195,18 @@ export class SpikeSignaling {
                 presence.listener(update);
                 return;
             }
-            const { pending } = this;
+            if (message.operation.type === "key_relay") {
+                const relay = message.operation;
+                // Relays are opaque E2EE blobs bound to a publisher session; the
+                // session_id names our own viewer session, publisher_id names
+                // the stream. Unknown relays are ignored, never acted upon.
+                if (message.request_id === "server_key_relay" && relay.publisher_id && relay.blob) {
+                    this.keyRelayListener?.listener(relay);
+                }
+                return;
+            }
             if (message.operation.type === "closed") {
+                const { pending } = this;
                 if (pending?.requestId === message.request_id && pending.expectedType === "closed") {
                     this.pending = undefined;
                     clearTimeout(pending.timer);
@@ -202,6 +214,7 @@ export class SpikeSignaling {
                 }
                 return this.close(`server:${message.operation.reason}`);
             }
+            const { pending } = this;
             if (!pending || pending.requestId !== message.request_id) return this.close("protocol");
             if (message.operation.type === "rejected") return this.close(`rejected:${message.operation.code}`);
             if (message.operation.type !== pending.expectedType) return this.close("protocol");
@@ -239,6 +252,15 @@ export class SpikeSignaling {
         }
     }
 
+    /** Relay one E2EE-wrapped epoch key to an approved viewer account. */
+    async keyRelay(sessionId: string, viewerId: string, blob: string) {
+        const accepted = await this.request({ type: "key_relay", session_id: sessionId, viewer_id: viewerId, blob }, "accepted");
+        if (accepted.type !== "accepted" || accepted.session_id !== sessionId) {
+            this.close("protocol");
+            throw new SpikeSignalingError("protocol");
+        }
+    }
+
     /** Publisher withdrawal: removes every viewer session of one account. */
     async removeViewer(sessionId: string, viewerId: string) {
         const accepted = await this.request({ type: "remove_viewer", session_id: sessionId, viewer_id: viewerId }, "accepted");
@@ -248,13 +270,19 @@ export class SpikeSignaling {
         }
     }
 
+    /** Viewer opt-in: receive publisher-encrypted epoch key relays. */
+    onKeyRelay(listener: (relay: KeyRelay) => void) {
+        if (this.keyRelayListener) throw new Error("DASS key relays are already handled.");
+        this.keyRelayListener = { listener };
+    }
+
     /**
      * Viewer asks to watch one publisher's stream and waits for its decision.
-     * Resolves with the server-pushed `view_decision`; `approval_id` is set on
-     * an approval and consumed by a single `subscribe`.
+     * `viewerKey` is this device's E2EE identity key, shown to the publisher
+     * for its pinned-identity decision. Resolves with the pushed `view_decision`.
      */
-    async requestView(sessionId: string, publisherId: string, signal?: AbortSignal): Promise<ViewDecision> {
-        const accepted = await this.request({ type: "request_view", session_id: sessionId, publisher_id: publisherId }, "view_request_pending");
+    async requestView(sessionId: string, publisherId: string, viewerKey: string, signal?: AbortSignal): Promise<ViewDecision> {
+        const accepted = await this.request({ type: "request_view", session_id: sessionId, publisher_id: publisherId, viewer_key: viewerKey }, "view_request_pending");
         const pendingId = (() => {
             if (accepted.type !== "view_request_pending" || accepted.session_id !== sessionId || !accepted.request_id) {
                 this.close("protocol");
@@ -315,6 +343,7 @@ export class SpikeSignaling {
         this.viewRequestListener = undefined;
         this.viewRequestClosed = undefined;
         this.viewDecisionListener = undefined;
+        this.keyRelayListener = undefined;
         clearTimeout(this.expiryTimer);
         this.socket.removeEventListener("open", this.onOpen);
         this.socket.removeEventListener("message", this.onMessage);

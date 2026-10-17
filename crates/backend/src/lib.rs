@@ -108,6 +108,10 @@ async fn capabilities(State(discovery): State<DiscoveryState>, headers: HeaderMa
     document.insecure_local_development = discovery.config.tls.is_none();
     document.control_plane_available = discovery.control_plane_available;
     document.authentication_available = discovery.control_plane_available;
+    // The backend relays publisher-encrypted epoch keys for every stream; E2EE
+    // availability means the key-management relay exists, not that the RTC
+    // media path or client-side frame encryption has been validated.
+    document.e2ee_available = discovery.control_plane_available;
     // Signaling control tests are not yet a media interoperability gate.
     let mut response = Json(document).into_response();
     response

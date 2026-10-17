@@ -4,7 +4,7 @@
 use crate::{
     auth::{
         InviteStore, MAX_USERS, MAX_USERS_FILE_BYTES, User, UsersFile, create_user,
-        validate_user_fields, validated_hash,
+        valid_identifier, validate_user_fields, validated_hash,
     },
     signaling::SignalingState,
 };
@@ -378,9 +378,15 @@ async fn users(State(state): State<AdminState>) -> Response {
     let Ok(document) = state.document.try_lock() else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
-    let users: Vec<_> = document.users.iter().map(|user| serde_json::json!({
-        "username": user.username, "display_name": user.display_name,
-    })).collect();
+    let users: Vec<_> = document
+        .users
+        .iter()
+        .map(|user| {
+            serde_json::json!({
+                "username": user.username, "display_name": user.display_name,
+            })
+        })
+        .collect();
     Json(users).into_response()
 }
 
@@ -635,7 +641,11 @@ mod tests {
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
         assert!(receiver.has_changed().unwrap());
         let store = receiver.borrow_and_update().clone();
-        assert!(store.verify_account("alice", "a long user password").is_ok());
+        assert!(
+            store
+                .verify_account("alice", "a long user password")
+                .is_ok()
+        );
         let response = app
             .clone()
             .oneshot(request("/admin/api/users", "GET", true, ""))
@@ -674,8 +684,16 @@ mod tests {
             StatusCode::NO_CONTENT
         );
         let store = receiver.borrow_and_update().clone();
-        assert!(store.verify_account("alice", "a long user password").is_err());
-        assert!(store.verify_account("alice", "a better user password").is_ok());
+        assert!(
+            store
+                .verify_account("alice", "a long user password")
+                .is_err()
+        );
+        assert!(
+            store
+                .verify_account("alice", "a better user password")
+                .is_ok()
+        );
         assert_eq!(
             app.oneshot(request("/admin/api/users/alice", "DELETE", true, ""))
                 .await
@@ -696,7 +714,7 @@ mod tests {
 
     #[tokio::test]
     async fn disconnect_notifications_are_explicit_and_room_controls_are_gone() {
-        let (_directory, state, mut receiver) = fixture();
+        let (_directory, state, receiver) = fixture();
         let app = router(state);
         // Room block/unblock controls were removed with room authority; rooms
         // are a read-only grouping view.

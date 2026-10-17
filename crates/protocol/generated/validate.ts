@@ -1,9 +1,13 @@
-import { type ClientMessage, MAX_DIRECTORY_SHARES, MAX_LOGIN_PASSWORD_BYTES, MAX_MESSAGE_BYTES, MAX_PUBLISHER_DISPLAY_NAME_BYTES, MAX_ROOM_MEMBERS, PROTOCOL_VERSION, type ServerMessage } from "./signaling";
+import { type ClientMessage, MAX_DIRECTORY_SHARES, MAX_IDENTITY_KEY_CHARS, MAX_KEY_RELAY_CHARS, MAX_LOGIN_PASSWORD_BYTES, MAX_MESSAGE_BYTES, MAX_PUBLISHER_DISPLAY_NAME_BYTES, MAX_ROOM_MEMBERS, PROTOCOL_VERSION, type ServerMessage } from "./signaling";
 
-const pushedRequestIds = ["server_view_request", "server_view_decision", "server_view_request_closed", "server_viewer_presence"];
+const pushedRequestIds = ["server_view_request", "server_view_decision", "server_view_request_closed", "server_viewer_presence", "server_key_relay"];
 
 const encoder = new TextEncoder();
 const identifier = (value: unknown) => typeof value === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(value);
+const opaqueField = (maximumChars: number) => (value: unknown) => typeof value === "string"
+    && value.length > 0 && value.length <= maximumChars && /^[A-Za-z0-9_-]+$/.test(value);
+const identityKey = opaqueField(MAX_IDENTITY_KEY_CHARS);
+const emptyOrIdentityKey = (value: unknown) => value === "" || identityKey(value);
 const text = (maximumBytes: number) => (value: unknown) => typeof value === "string"
     && value.length > 0 && !value.includes("\0") && encoder.encode(value).byteLength <= maximumBytes;
 const boolean = (value: unknown) => typeof value === "boolean";
@@ -20,12 +24,13 @@ const clientShapes: Record<string, Shape> = {
     account_login: { username: identifier, password: text(MAX_LOGIN_PASSWORD_BYTES) },
     join: { room_id: identifier, require_e2ee: boolean },
     directory: { room_id: identifier },
-    publish: { session_id: identifier },
+    publish: { session_id: identifier, publisher_key: identityKey },
     enable_viewer_presence: { session_id: identifier },
-    request_view: { session_id: identifier, publisher_id: identifier },
+    request_view: { session_id: identifier, publisher_id: identifier, viewer_key: identityKey },
     view_decision: { session_id: identifier, request_id: identifier, decision: member(["approve", "deny", "block"]) },
     subscribe: { session_id: identifier, publisher_id: identifier, approval_id: identifier },
     remove_viewer: { session_id: identifier, viewer_id: identifier },
+    key_relay: { session_id: identifier, viewer_id: identifier, blob: opaqueField(MAX_KEY_RELAY_CHARS) },
     offer: { session_id: identifier, sdp: text(12288) },
     ice: { session_id: identifier, candidate: text(2048) },
     leave: { session_id: identifier }
@@ -42,10 +47,12 @@ const serverShapes: Record<string, Shape> = {
         })) },
     view_request_pending: { session_id: identifier, request_id: identifier },
     view_request: { session_id: identifier, request_id: identifier, viewer_id: identifier,
-        viewer_display_name: displayName },
+        viewer_display_name: displayName, viewer_key: identityKey },
     view_decision: { session_id: identifier, request_id: identifier,
-        decision: member(["approve", "deny", "block"]), approval_id: value => value === "" || identifier(value) },
+        decision: member(["approve", "deny", "block"]), approval_id: value => value === "" || identifier(value),
+        publisher_key: emptyOrIdentityKey },
     view_request_closed: { session_id: identifier, request_id: identifier },
+    key_relay: { session_id: identifier, publisher_id: identifier, blob: opaqueField(MAX_KEY_RELAY_CHARS) },
     accepted: { session_id: identifier },
     answer: { session_id: identifier, sdp: text(12288) },
     ice: { session_id: identifier, candidate: text(2048) },
@@ -83,7 +90,8 @@ function parse(message: string, shapes: Record<string, Shape>): unknown {
                     && ids.every((id, index) => id === publishers[index].publisher_id);
             }
             if (shapes === serverShapes && operation.type === "view_decision") {
-                return operation.decision !== "approve" || (operation.approval_id as string).length > 0;
+                return operation.decision !== "approve"
+                    || ((operation.approval_id as string).length > 0 && (operation.publisher_key as string).length > 0);
             }
             if (shapes === serverShapes && operation.type === "viewer_presence") {
                 return operation.change !== "joined" || (operation.viewer_count as number) > 0;

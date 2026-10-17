@@ -1,3 +1,4 @@
+import { memoryIdentityStore } from "./helpers/e2eeStore";
 import { expect, spyOn, test } from "bun:test";
 import { browserFailureCode } from "../../clients/spike/diagnostics";
 import { createEquibopCapture } from "../../plugins/dass/capture";
@@ -31,7 +32,8 @@ test("publisher authorization failures log stage and code without session identi
     const session = new DassSession();
     const publisher = new PublishController(session, () => "private_discord_context", {
         connect: async () => { throw new SpikeSignalingError("rejected:unauthorized"); },
-        prepare: async () => { throw new Error("unexpected capture"); }
+        prepare: async () => { throw new Error("unexpected capture"); },
+        identityStore: async () => memoryIdentityStore()
     });
     try {
         session.configure("private_room", "secret-credential");

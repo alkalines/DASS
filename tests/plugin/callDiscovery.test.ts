@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
+import { memoryIdentityStore } from "./helpers/e2eeStore";
 import { expect, test } from "bun:test";
 
 import { createCallDiscovery } from "../../plugins/dass/callDiscovery";
@@ -132,13 +133,14 @@ test("directory and publisher share an exclusive backend account without paralle
             close: () => { if (!closed.signal.aborted) { held = false; closes++; closed.abort(new SpikeSignalingError("closed")); } }
         } as unknown as SpikeSignaling;
     }, () => "call_a");
-    const directory = new WatchController(() => "call_a", { connect: options => session.connect(options), prepare: SpikePeer.prepare });
+    const directory = new WatchController(() => "call_a", { connect: options => session.connect(options), prepare: SpikePeer.prepare, identityStore: async () => memoryIdentityStore() });
     const publisher = new PublishController(session, () => "call_a", {
         connect: options => session.connect(options),
         prepare: async () => {
             const closed = new AbortController();
             return { closed: closed.signal, close: () => closed.abort(), candidates: [], activate: async () => "publisher" } as unknown as SpikePeer;
-        }
+        },
+        identityStore: async () => memoryIdentityStore()
     });
     const discovery = createCallDiscovery(session, directory, () => "https://dass.example", () => !["idle", "failed"].includes(publisher.getSnapshot().phase));
     const unsubscribe = publisher.subscribe(() => {

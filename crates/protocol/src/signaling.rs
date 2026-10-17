@@ -18,6 +18,10 @@ pub const MAX_LOGIN_PASSWORD_BYTES: usize = 512;
 /// publishers never admit a viewer.
 pub const VIEW_REQUEST_TIMEOUT_SECONDS: u32 = 60;
 pub const SESSION_LIFETIME_SECONDS: u32 = 600;
+/// ECDH P-256 public identity keys and wrapped media-epoch keys cross the wire
+/// as base64url text; the backend treats them as opaque bounded fields.
+pub const MAX_IDENTITY_KEY_CHARS: usize = 256;
+pub const MAX_KEY_RELAY_CHARS: usize = 4096;
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -45,17 +49,23 @@ pub enum ClientOperation {
     Directory {
         room_id: String,
     },
+    /// Publishing requires the publisher's E2EE identity key; a stream without
+    /// an identity is refused rather than delivered as transport-only media.
     Publish {
         session_id: String,
+        publisher_key: String,
     },
     EnableViewerPresence {
         session_id: String,
     },
     /// An authenticated viewer asks a specific live publisher for admission.
-    /// The backend assigns the opaque pending request ID.
+    /// The backend assigns the opaque pending request ID. `viewer_key` is the
+    /// viewer's E2EE identity key, relayed to the publisher for its pinned
+    /// membership decision; a request without one is refused.
     RequestView {
         session_id: String,
         publisher_id: String,
+        viewer_key: String,
     },
     /// Only the authenticated publisher owner may decide. `request_id` is the
     /// server-generated pending ID from the `view_request` push, not the
@@ -75,6 +85,14 @@ pub enum ClientOperation {
     RemoveViewer {
         session_id: String,
         viewer_id: String,
+    },
+    /// Publisher → approved-viewer relay of an opaque encrypted media-epoch key
+    /// blob. The backend forwards the bounded ciphertext only to viewer sessions
+    /// it recorded as approved for this stream; it never sees media keys.
+    KeyRelay {
+        session_id: String,
+        viewer_id: String,
+        blob: String,
     },
     Offer {
         session_id: String,
@@ -142,19 +160,31 @@ pub enum ServerOperation {
     },
     /// Pushed to the authenticated publisher when a viewer asks to watch.
     /// `request_id` inside the operation is the pending approval ID.
+    /// `viewer_key` is the E2EE identity the publisher's client pins.
     ViewRequest {
         session_id: String,
         request_id: String,
         viewer_id: String,
         viewer_display_name: String,
+        viewer_key: String,
     },
     /// Pushed to the viewer when the publisher decides. `approval_id` is set
     /// only for an approval and is consumed by a single `subscribe`.
+    /// `publisher_key` is the publisher's E2EE identity key on an approval so
+    /// the viewer can pin it; it is empty on deny/block.
     ViewDecision {
         session_id: String,
         request_id: String,
         decision: ViewDecisionKind,
         approval_id: String,
+        publisher_key: String,
+    },
+    /// Relays an opaque publisher-encrypted media-epoch key blob to an approved
+    /// viewer session. The backend enforces the route only; contents are E2EE.
+    KeyRelay {
+        session_id: String,
+        publisher_id: String,
+        blob: String,
     },
     /// Pushed to the publisher when a pending request expires or is withdrawn.
     ViewRequestClosed {
@@ -224,6 +254,16 @@ fn valid_text(value: &str, maximum_bytes: usize) -> bool {
     !value.is_empty() && value.len() <= maximum_bytes && !value.contains('\0')
 }
 
+/// Opaque base64url fields (identity keys, wrapped epoch keys): bounded text
+/// without padding, decoded only by clients, never by the backend.
+fn valid_opaque(value: &str, maximum_chars: usize) -> bool {
+    !value.is_empty()
+        && value.len() <= maximum_chars
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+}
+
 /// Fixed error: never exposes submitted credentials, SDP or identifiers.
 #[derive(Debug, PartialEq, Eq)]
 pub struct InvalidMessage;
@@ -253,9 +293,21 @@ impl ClientMessage {
             ClientOperation::Join { room_id, .. } | ClientOperation::Directory { room_id } => {
                 valid_id(room_id)
             }
-            ClientOperation::Publish { session_id }
-            | ClientOperation::EnableViewerPresence { session_id }
+            ClientOperation::EnableViewerPresence { session_id }
             | ClientOperation::Leave { session_id } => valid_id(session_id),
+            ClientOperation::Publish {
+                session_id,
+                publisher_key,
+            } => valid_id(session_id) && valid_opaque(publisher_key, MAX_IDENTITY_KEY_CHARS),
+            ClientOperation::KeyRelay {
+                session_id,
+                viewer_id,
+                blob,
+            } => {
+                valid_id(session_id)
+                    && valid_id(viewer_id)
+                    && valid_opaque(blob, MAX_KEY_RELAY_CHARS)
+            }
             ClientOperation::RemoveViewer {
                 session_id,
                 viewer_id,
@@ -268,7 +320,12 @@ impl ClientMessage {
             ClientOperation::RequestView {
                 session_id,
                 publisher_id,
-            } => valid_id(session_id) && valid_id(publisher_id),
+                viewer_key,
+            } => {
+                valid_id(session_id)
+                    && valid_id(publisher_id)
+                    && valid_opaque(viewer_key, MAX_IDENTITY_KEY_CHARS)
+            }
             ClientOperation::Subscribe {
                 session_id,
                 publisher_id,
@@ -364,6 +421,7 @@ mod tests {
             ClientOperation::RequestView {
                 session_id: "viewer_session".into(),
                 publisher_id: "publisher_session".into(),
+                viewer_key: "aXYtcHVibGljLWtleQ".into(),
             },
             ClientOperation::ViewDecision {
                 session_id: "publisher_session".into(),
@@ -378,6 +436,15 @@ mod tests {
             ClientOperation::RemoveViewer {
                 session_id: "publisher_session".into(),
                 viewer_id: "alice".into(),
+            },
+            ClientOperation::KeyRelay {
+                session_id: "publisher_session".into(),
+                viewer_id: "alice".into(),
+                blob: "ZW5jcnlwdGVkLWVwb2NoLWtleQ".into(),
+            },
+            ClientOperation::Publish {
+                session_id: "publisher_session".into(),
+                publisher_key: "cHVibGlzaGVyLWtleQ".into(),
             },
         ] {
             let message = ClientMessage {
@@ -414,6 +481,46 @@ mod tests {
     }
 
     #[test]
+    fn e2ee_fields_are_opaque_bounded_and_required() {
+        // Identity keys and wrapped keys need non-empty bounded base64url text.
+        for invalid in [
+            "",
+            "has+plu/slashes=",
+            &"x".repeat(MAX_IDENTITY_KEY_CHARS + 1),
+        ] {
+            let message = ClientMessage {
+                protocol_version: crate::PROTOCOL_VERSION,
+                request_id: "r".into(),
+                operation: ClientOperation::RequestView {
+                    session_id: "viewer_session".into(),
+                    publisher_id: "publisher_session".into(),
+                    viewer_key: invalid.into(),
+                },
+            };
+            assert!(!message.is_valid());
+        }
+        let relay = ClientMessage {
+            protocol_version: crate::PROTOCOL_VERSION,
+            request_id: "r".into(),
+            operation: ClientOperation::KeyRelay {
+                session_id: "publisher_session".into(),
+                viewer_id: "alice".into(),
+                blob: "x".repeat(MAX_KEY_RELAY_CHARS + 1),
+            },
+        };
+        assert!(!relay.is_valid());
+        let publish = ClientMessage {
+            protocol_version: crate::PROTOCOL_VERSION,
+            request_id: "r".into(),
+            operation: ClientOperation::Publish {
+                session_id: "publisher_session".into(),
+                publisher_key: "".into(),
+            },
+        };
+        assert!(!publish.is_valid());
+    }
+
+    #[test]
     fn pushed_view_operations_are_bounded_server_notifications() {
         let request = serde_json::to_value(ServerMessage {
             protocol_version: crate::PROTOCOL_VERSION,
@@ -423,6 +530,7 @@ mod tests {
                 request_id: "pending_1".into(),
                 viewer_id: "alice".into(),
                 viewer_display_name: "Alice".into(),
+                viewer_key: "aXYtcHVibGljLWtleQ".into(),
             },
         })
         .unwrap();
@@ -436,7 +544,8 @@ mod tests {
                     "session_id": "publisher_session",
                     "request_id": "pending_1",
                     "viewer_id": "alice",
-                    "viewer_display_name": "Alice"
+                    "viewer_display_name": "Alice",
+                    "viewer_key": "aXYtcHVibGljLWtleQ"
                 }
             })
         );
@@ -445,10 +554,20 @@ mod tests {
             request_id: "pending_1".into(),
             decision: ViewDecisionKind::Approve,
             approval_id: "approval_1".into(),
+            publisher_key: "cHVibGlzaGVyLWtleQ".into(),
         })
         .unwrap();
         assert_eq!(decision["type"], "view_decision");
         assert_eq!(decision["decision"], "approve");
+        assert_eq!(decision["publisher_key"], "cHVibGlzaGVyLWtleQ");
+        let relay = serde_json::to_value(ServerOperation::KeyRelay {
+            session_id: "viewer_session".into(),
+            publisher_id: "publisher_session".into(),
+            blob: "ZW5jcnlwdGVk".into(),
+        })
+        .unwrap();
+        assert_eq!(relay["type"], "key_relay");
+        assert_eq!(relay["publisher_id"], "publisher_session");
     }
 
     #[test]

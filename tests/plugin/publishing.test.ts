@@ -5,6 +5,7 @@ import { CaptureLease } from "../../plugins/dass/routing";
 import { hasAcceptedPublishCapture, PublishController } from "../../plugins/dass/publishing";
 import { DassSession } from "../../plugins/dass/session";
 import { createShareSelection } from "../../plugins/dass/discordAdapter";
+import { memoryIdentityStore } from "./helpers/e2eeStore";
 
 function fixture() {
     const session = new DassSession();
@@ -15,18 +16,21 @@ function fixture() {
     let deny = false;
     let failure: SpikeSignalingError | undefined;
     let presenceListener: ((presence: ViewerPresence) => void) | undefined;
-    let viewRequestListener: ((request: { request_id: string; viewer_id: string; viewer_display_name: string; }) => void) | undefined;
+    let viewRequestListener: ((request: { request_id: string; viewer_id: string; viewer_display_name: string; viewer_key: string; }) => void) | undefined;
     const decisions: Array<{ requestId: string; decision: string; }> = [];
     const removals: string[] = [];
     const signalingClosed = new AbortController();
     const signaling = { closed: signalingClosed.signal, close: () => signalingClosed.abort(),
         onViewRequests: (_session: string, listener: typeof viewRequestListener) => { viewRequestListener = listener; },
         decideView: async (_session: string, requestId: string, decision: string) => { decisions.push({ requestId, decision }); },
-        removeViewer: async (_session: string, viewerId: string) => { removals.push(viewerId); }
+        removeViewer: async (_session: string, viewerId: string) => { removals.push(viewerId); },
+        keyRelay: async () => {}
     } as unknown as SpikeSignaling;
     const peerClosed = new AbortController();
     const peer = { closed: peerClosed.signal, candidates: ["candidate:1 1 UDP 1 192.168.1.2 50000 typ host"],
-        closeMessage: "Source ended.", close: () => peerClosed.abort(), activate: async (options: any) => {
+        closeMessage: "Source ended.", close: () => peerClosed.abort(),
+        setSendEpoch: () => {}, retireEpochsBelow: () => {},
+        activate: async (options: any) => {
              events.push("activate");
              presenceListener = options.onViewerPresence;
             expect(options.roomId).toBe("authorized_room");
@@ -43,12 +47,13 @@ function fixture() {
             if (failure) throw failure;
             return signalingClosed.signal.aborted ? { ...signaling, closed: new AbortController().signal } : signaling;
         },
-        prepare: async () => { events.push("prepare"); return peerClosed.signal.aborted ? { ...peer, closed: new AbortController().signal } : peer; }
+        prepare: async () => { events.push("prepare"); return peerClosed.signal.aborted ? { ...peer, closed: new AbortController().signal } : peer; },
+        identityStore: async () => memoryIdentityStore()
     });
     controller.start();
     return { session, controller, bridge, events, peer, lease, signalingClosed, releases: () => releases,
         presence: (change: ViewerPresence["change"], viewerCount: number) => presenceListener?.({ type: "viewer_presence", session_id: "publisher_session", change, viewer_count: viewerCount }),
-        request: (request: { request_id: string; viewer_id: string; viewer_display_name: string; }) => viewRequestListener?.(request),
+        request: (request: { request_id: string; viewer_id: string; viewer_display_name: string; viewer_key: string; }) => viewRequestListener?.(request),
         decisions, removals,
         deny: () => { deny = true; }, failConnection: (error: SpikeSignalingError) => { failure = error; }, exit: () => { context = undefined; controller.reset(); } };
 }
@@ -261,7 +266,8 @@ test("late authentication cannot reopen the picker after disable", async () => {
     let captures = 0;
     const controller = new PublishController(session, () => "voice", {
         connect: () => new Promise(resolve => { resolveLogin = resolve; }),
-        prepare: async () => { throw new Error("Preparation must not run"); }
+        prepare: async () => { throw new Error("Preparation must not run"); },
+        identityStore: async () => memoryIdentityStore()
     });
     controller.start();
     const publishing = controller.publish("https://dass.example", { version: 1, capture: async () => {
@@ -330,10 +336,15 @@ test("publisher sees pending view requests and decides them manually", async () 
     try {
         await f.controller.publish("https://dass.example", f.bridge);
         expect(f.controller.getSnapshot().phase).toBe("publishing");
-        f.request({ request_id: "req_1", viewer_id: "alice", viewer_display_name: "Alice" });
-        expect(f.controller.getSnapshot().pendingViewers).toEqual([
+        f.request({ request_id: "req_1", viewer_id: "alice", viewer_display_name: "Alice", viewer_key: "aXYta2V5" });
+        // Trust evaluation is async; flush microtasks before asserting.
+        await Promise.resolve();
+        await Promise.resolve();
+        const pending = f.controller.getSnapshot().pendingViewers;
+        expect(pending.map(viewer => ({ requestId: viewer.requestId, viewerId: viewer.viewerId, displayName: viewer.displayName }))).toEqual([
             { requestId: "req_1", viewerId: "alice", displayName: "Alice" }
         ]);
+        expect(pending[0].trust.kind).toBe("first-contact");
         await f.controller.decideView("req_1", "approve");
         expect(f.decisions).toEqual([{ requestId: "req_1", decision: "approve" }]);
         expect(f.controller.getSnapshot().pendingViewers).toEqual([]);

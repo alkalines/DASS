@@ -54,6 +54,7 @@ const PRESENCE_REQUEST_ID: &str = "server_viewer_presence";
 const VIEW_REQUEST_PUSH_ID: &str = "server_view_request";
 const VIEW_DECISION_PUSH_ID: &str = "server_view_decision";
 const VIEW_REQUEST_CLOSED_PUSH_ID: &str = "server_view_request_closed";
+const KEY_RELAY_PUSH_ID: &str = "server_key_relay";
 const MAX_PRESENCE_VIEWERS: usize = MAX_ROOM_MEMBERS - 1;
 const MAX_PENDING_VIEW_REQUESTS: usize = 64;
 const MAX_PENDING_PER_PUBLISHER: usize = 8;
@@ -62,8 +63,7 @@ const MAX_APPROVALS_PER_PUBLISHER: usize = 16;
 const DENY_COOLDOWN: Duration = Duration::from_secs(30);
 const MAX_LOGIN_SOURCES: usize = 1_024;
 const PER_SOURCE_LOGINS_PER_SECOND: usize = 4;
-const VIEW_REQUEST_LIFETIME: Duration =
-    Duration::from_secs(VIEW_REQUEST_TIMEOUT_SECONDS as u64);
+const VIEW_REQUEST_LIFETIME: Duration = Duration::from_secs(VIEW_REQUEST_TIMEOUT_SECONDS as u64);
 
 /// Server-pushed events for one authenticated connection. Queues stay bounded;
 /// a connection that cannot drain its events is closed rather than silently
@@ -78,6 +78,8 @@ enum ConnectionEvent {
         request_id: String,
         viewer_id: String,
         viewer_display_name: String,
+        /// Opaque E2EE identity the publisher's client pins for membership.
+        viewer_key: String,
     },
     ViewRequestClosed {
         request_id: String,
@@ -86,6 +88,13 @@ enum ConnectionEvent {
         request_id: String,
         decision: ViewDecisionKind,
         approval_id: String,
+        /// Publisher's E2EE identity for the viewer's pin; empty on denial.
+        publisher_key: String,
+    },
+    /// Publisher-encrypted epoch key ciphertext bound for one approved viewer.
+    KeyRelay {
+        publisher_id: String,
+        blob: String,
     },
     /// Publisher withdrawal or stream end: terminate this session's route.
     Close(CloseReason),
@@ -282,6 +291,9 @@ struct JoinedSession {
     events: mpsc::Sender<ConnectionEvent>,
     receive_peer: Option<SpikePeer>,
     publisher: Option<PublisherLease>,
+    /// E2EE identity declared by an accepted `publish`; copied into the
+    /// directory entry so approved viewers can pin it.
+    publisher_key: String,
     viewer_presence_enabled: bool,
     viewer_subscription: Option<ViewerSubscriptionLease>,
 }
@@ -305,11 +317,18 @@ struct ActiveViewer {
 struct ApprovedView {
     viewer_session_id: String,
     viewer_account: String,
+    /// Retained so epoch key relays can reach an approved viewer that has not
+    /// finished subscribing yet.
+    viewer_events: mpsc::Sender<ConnectionEvent>,
 }
 
 struct PublisherEntry {
     room_id: String,
     account: String,
+    /// The publisher's E2EE identity key, required at publish time so the
+    /// backend can echo it to viewers it has already authorized. The key is
+    /// opaque public material; media keys never traverse the backend.
+    publisher_key: String,
     viewers: HashMap<String, ActiveViewer>,
     pending: HashSet<String>,
     approvals: HashMap<String, ApprovedView>,
@@ -353,6 +372,7 @@ impl Drop for PublisherLease {
                             request_id: request_id.clone(),
                             decision: ViewDecisionKind::Deny,
                             approval_id: String::new(),
+                            publisher_key: String::new(),
                         });
                 }
             }
@@ -441,6 +461,7 @@ fn register_publisher(state: &SignalingState, joined: &mut JoinedSession) -> Res
         PublisherEntry {
             room_id: joined.room.room_id.clone(),
             account: joined.session_account.clone(),
+            publisher_key: joined.publisher_key.clone(),
             viewers: HashMap::new(),
             pending: HashSet::new(),
             approvals: HashMap::new(),
@@ -574,6 +595,7 @@ fn request_view(
     state: &SignalingState,
     joined: &JoinedSession,
     publisher_session_id: &str,
+    viewer_key: &str,
 ) -> Result<String, ErrorCode> {
     let mut publishers = state.publishers.lock().map_err(|_| ErrorCode::Overloaded)?;
     let Some(publisher) = publishers.get_mut(publisher_session_id) else {
@@ -607,7 +629,10 @@ fn request_view(
     {
         return Err(ErrorCode::InvalidState);
     }
-    let mut requests = state.view_requests.lock().map_err(|_| ErrorCode::Overloaded)?;
+    let mut requests = state
+        .view_requests
+        .lock()
+        .map_err(|_| ErrorCode::Overloaded)?;
     if requests.len() >= MAX_PENDING_VIEW_REQUESTS
         || requests
             .values()
@@ -634,10 +659,7 @@ fn request_view(
         viewer_events: joined.events.clone(),
         expires: Instant::now() + VIEW_REQUEST_LIFETIME,
     };
-    let display_name = state
-        .invites
-        .borrow()
-        .display_name(&viewer_account);
+    let display_name = state.invites.borrow().display_name(&viewer_account);
     requests.insert(request_id.clone(), pending);
     drop(requests);
     if publisher
@@ -646,6 +668,7 @@ fn request_view(
             request_id: request_id.clone(),
             viewer_id: viewer_account,
             viewer_display_name: display_name,
+            viewer_key: viewer_key.to_owned(),
         })
         .is_err()
     {
@@ -678,7 +701,10 @@ fn decide_view(
     if !publisher.pending.remove(request_id) {
         return Err(ErrorCode::InvalidState);
     }
-    let mut requests = state.view_requests.lock().map_err(|_| ErrorCode::Overloaded)?;
+    let mut requests = state
+        .view_requests
+        .lock()
+        .map_err(|_| ErrorCode::Overloaded)?;
     let Some(pending) = requests.remove(request_id) else {
         return Err(ErrorCode::InvalidState);
     };
@@ -697,12 +723,14 @@ fn decide_view(
                 ApprovedView {
                     viewer_session_id: pending.viewer_session_id.clone(),
                     viewer_account: pending.viewer_account.clone(),
+                    viewer_events: pending.viewer_events.clone(),
                 },
             );
             ConnectionEvent::ViewDecision {
                 request_id: request_id.to_owned(),
                 decision: ViewDecisionKind::Approve,
                 approval_id,
+                publisher_key: publisher.publisher_key.clone(),
             }
         }
         ViewDecisionKind::Deny | ViewDecisionKind::Block => {
@@ -724,6 +752,7 @@ fn decide_view(
                 request_id: request_id.to_owned(),
                 decision: ViewDecisionKind::Deny,
                 approval_id: String::new(),
+                publisher_key: String::new(),
             }
         }
     };
@@ -792,6 +821,7 @@ fn block_account_viewers(
                         request_id,
                         decision: ViewDecisionKind::Deny,
                         approval_id: String::new(),
+                        publisher_key: String::new(),
                     });
             }
         }
@@ -829,7 +859,10 @@ fn remove_viewer(
     }
     let mut pending_ids = Vec::new();
     {
-        let mut requests = state.view_requests.lock().map_err(|_| ErrorCode::Overloaded)?;
+        let mut requests = state
+            .view_requests
+            .lock()
+            .map_err(|_| ErrorCode::Overloaded)?;
         let expired: Vec<_> = requests
             .iter()
             .filter(|(_, request)| {
@@ -864,7 +897,52 @@ fn remove_viewer(
             request_id: String::new(),
             decision: ViewDecisionKind::Deny,
             approval_id: String::new(),
+            publisher_key: String::new(),
         });
+    }
+    Ok(())
+}
+
+/// Publisher → approved-viewer epoch key relay. The backend only enforces the
+/// route to viewer sessions it recorded as approved or watching; the blob is
+/// opaque E2EE ciphertext that never decodes to media keys server-side.
+fn key_relay(
+    state: &SignalingState,
+    joined: &JoinedSession,
+    viewer_account: &str,
+    blob: &str,
+) -> Result<(), ErrorCode> {
+    let mut publishers = state.publishers.lock().map_err(|_| ErrorCode::Overloaded)?;
+    let Some(publisher) = publishers.get_mut(&joined.session_id) else {
+        return Err(ErrorCode::InvalidState);
+    };
+    let mut delivered = false;
+    for viewer in publisher.viewers.values() {
+        if viewer.account == viewer_account {
+            delivered |= viewer
+                .events
+                .try_send(ConnectionEvent::KeyRelay {
+                    publisher_id: joined.session_id.clone(),
+                    blob: blob.to_owned(),
+                })
+                .is_ok();
+        }
+    }
+    for approval in publisher.approvals.values() {
+        if approval.viewer_account == viewer_account {
+            delivered |= approval
+                .viewer_events
+                .try_send(ConnectionEvent::KeyRelay {
+                    publisher_id: joined.session_id.clone(),
+                    blob: blob.to_owned(),
+                })
+                .is_ok();
+        }
+    }
+    // A relay for an unknown account fails closed: keys never leave routes the
+    // backend has authorized for this stream.
+    if !delivered {
+        return Err(ErrorCode::InvalidState);
     }
     Ok(())
 }
@@ -917,6 +995,7 @@ fn expire_pending_views(state: &SignalingState) {
                 request_id,
                 decision: ViewDecisionKind::Deny,
                 approval_id: String::new(),
+                publisher_key: String::new(),
             });
     }
 }
@@ -1295,18 +1374,18 @@ async fn run(
                         break;
                     }
                     ConnectionEvent::ViewerPresence { session_id, change, viewer_count } => {
-                        if !session.as_ref().is_some_and(|joined| joined.session_id == session_id) {
+                        if session.as_ref().is_none_or(|joined| joined.session_id != session_id) {
                             continue;
                         }
                         send(&mut socket, PRESENCE_REQUEST_ID.into(), ServerOperation::ViewerPresence {
                             session_id, change, viewer_count,
                         }).await
                     }
-                    ConnectionEvent::ViewRequest { request_id, viewer_id, viewer_display_name } => {
+                    ConnectionEvent::ViewRequest { request_id, viewer_id, viewer_display_name, viewer_key } => {
                         let Some(joined) = session.as_ref() else { continue; };
                         send(&mut socket, VIEW_REQUEST_PUSH_ID.into(), ServerOperation::ViewRequest {
                             session_id: joined.session_id.clone(),
-                            request_id, viewer_id, viewer_display_name,
+                            request_id, viewer_id, viewer_display_name, viewer_key,
                         }).await
                     }
                     ConnectionEvent::ViewRequestClosed { request_id } => {
@@ -1315,11 +1394,18 @@ async fn run(
                             session_id: joined.session_id.clone(), request_id,
                         }).await
                     }
-                    ConnectionEvent::ViewDecision { request_id, decision, approval_id } => {
+                    ConnectionEvent::ViewDecision { request_id, decision, approval_id, publisher_key } => {
                         let Some(joined) = session.as_ref() else { continue; };
                         send(&mut socket, VIEW_DECISION_PUSH_ID.into(), ServerOperation::ViewDecision {
                             session_id: joined.session_id.clone(),
-                            request_id, decision, approval_id,
+                            request_id, decision, approval_id, publisher_key,
+                        }).await
+                    }
+                    ConnectionEvent::KeyRelay { publisher_id, blob } => {
+                        let Some(joined) = session.as_ref() else { continue; };
+                        send(&mut socket, KEY_RELAY_PUSH_ID.into(), ServerOperation::KeyRelay {
+                            session_id: joined.session_id.clone(),
+                            publisher_id, blob,
                         }).await
                     }
                 };
@@ -1420,6 +1506,7 @@ fn operation_name(operation: &ClientOperation) -> &'static str {
         ClientOperation::ViewDecision { .. } => "view_decision",
         ClientOperation::Subscribe { .. } => "subscribe",
         ClientOperation::RemoveViewer { .. } => "remove_viewer",
+        ClientOperation::KeyRelay { .. } => "key_relay",
         ClientOperation::Offer { .. } => "offer",
         ClientOperation::Ice { .. } => "ice",
     }
@@ -1446,7 +1533,7 @@ async fn media_operation(
         return Ok(None);
     };
     let session_id = match operation {
-        ClientOperation::Publish { session_id }
+        ClientOperation::Publish { session_id, .. }
         | ClientOperation::Subscribe { session_id, .. }
         | ClientOperation::Offer { session_id, .. }
         | ClientOperation::Ice { session_id, .. } => session_id,
@@ -1459,7 +1546,7 @@ async fn media_operation(
         return Ok(Some(rejected(ErrorCode::InvalidState)));
     };
     let response = match operation {
-        ClientOperation::Publish { .. } => {
+        ClientOperation::Publish { publisher_key, .. } => {
             if joined.receive_peer.is_some() {
                 return Ok(Some(rejected(ErrorCode::InvalidState)));
             }
@@ -1474,6 +1561,9 @@ async fn media_operation(
                 Ok(peer) => joined.receive_peer = Some(peer),
                 Err(_) => return Ok(Some(rejected(ErrorCode::Overloaded))),
             }
+            // Only record the E2EE identity once the media route exists, so a
+            // failed bind never leaves a stale pinned key on the stream.
+            joined.publisher_key = publisher_key.clone();
             ServerOperation::Accepted {
                 session_id: session_id.clone(),
             }
@@ -1498,15 +1588,12 @@ async fn media_operation(
                 {
                     return Ok(Some(rejected(ErrorCode::InvalidState)));
                 }
-                match publisher.approvals.remove(approval_id) {
+                matches!(
+                    publisher.approvals.remove(approval_id),
                     Some(approval)
                         if approval.viewer_session_id == joined.session_id
-                            && approval.viewer_account == account =>
-                    {
-                        true
-                    }
-                    _ => false,
-                }
+                            && approval.viewer_account == account
+                )
             };
             if !approved {
                 return Ok(Some(rejected(ErrorCode::Unauthorized)));
@@ -1606,13 +1693,7 @@ fn operate_for_peer(
             let store = state.invites.borrow().clone();
             directory(state, &store, room_id)
         }
-        ClientOperation::Join {
-            room_id,
-            require_e2ee,
-        } => {
-            if require_e2ee {
-                return rejected(ErrorCode::E2eeUnavailable);
-            }
+        ClientOperation::Join { room_id, .. } => {
             if session.is_some() {
                 return rejected(ErrorCode::InvalidState);
             }
@@ -1632,6 +1713,7 @@ fn operate_for_peer(
                 session_account: account.to_owned(),
                 receive_peer: None,
                 publisher: None,
+                publisher_key: String::new(),
                 viewer_presence_enabled: false,
                 viewer_subscription: None,
             });
@@ -1663,6 +1745,7 @@ fn operate_for_peer(
         ClientOperation::RequestView {
             session_id,
             publisher_id,
+            viewer_key,
         } => {
             let Some(joined) = session
                 .as_ref()
@@ -1673,7 +1756,7 @@ fn operate_for_peer(
             if joined.viewer_subscription.is_some() || joined.receive_peer.is_some() {
                 return rejected(ErrorCode::InvalidState);
             }
-            match request_view(state, joined, &publisher_id) {
+            match request_view(state, joined, &publisher_id, &viewer_key) {
                 Ok(request_id) => ServerOperation::ViewRequestPending {
                     session_id: session_id.clone(),
                     request_id,
@@ -1716,9 +1799,27 @@ fn operate_for_peer(
                 Err(code) => rejected(code),
             }
         }
+        ClientOperation::KeyRelay {
+            session_id,
+            viewer_id,
+            blob,
+        } => {
+            let Some(joined) = session
+                .as_ref()
+                .filter(|joined| joined.session_id == session_id)
+            else {
+                return rejected(ErrorCode::InvalidState);
+            };
+            match key_relay(state, joined, &viewer_id, &blob) {
+                Ok(()) => ServerOperation::Accepted {
+                    session_id: session_id.clone(),
+                },
+                Err(code) => rejected(code),
+            }
+        }
         operation => {
             let session_id = match &operation {
-                ClientOperation::Publish { session_id }
+                ClientOperation::Publish { session_id, .. }
                 | ClientOperation::EnableViewerPresence { session_id }
                 | ClientOperation::Subscribe { session_id, .. }
                 | ClientOperation::Offer { session_id, .. }
@@ -1748,7 +1849,9 @@ fn operate_for_peer(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::auth::{InviteFile, UsersFile, create_invite, create_invite_with_display_name, create_user};
+    use crate::auth::{
+        InviteFile, UsersFile, create_invite, create_invite_with_display_name, create_user,
+    };
 
     fn store_with_invites(invites: Vec<crate::auth::Invite>) -> Arc<InviteStore> {
         Arc::new(
@@ -1766,11 +1869,7 @@ mod tests {
     fn users_store(users: Vec<crate::auth::User>) -> Arc<InviteStore> {
         Arc::new(
             InviteStore::from_users_bytes(
-                &serde_json::to_vec(&UsersFile {
-                    version: 2,
-                    users,
-                })
-                .unwrap(),
+                &serde_json::to_vec(&UsersFile { version: 2, users }).unwrap(),
             )
             .unwrap(),
         )
@@ -1783,6 +1882,7 @@ mod tests {
             PublisherEntry {
                 room_id: "room".into(),
                 account: account.into(),
+                publisher_key: "cHVibGlzaGVyLWtleQ".into(),
                 viewers: HashMap::new(),
                 pending: HashSet::new(),
                 approvals: HashMap::new(),
@@ -1801,19 +1901,20 @@ mod tests {
     ) -> (mpsc::Receiver<ConnectionEvent>, JoinedSession) {
         let (events, receiver) = mpsc::channel(MAX_QUEUED_MESSAGES);
         let session = JoinedSession {
-                session_id: session_id.into(),
-                session_account: account.into(),
-                room: RoomLease {
-                    room_id: "room".into(),
-                    rooms: Arc::new(Mutex::new(HashMap::new())),
-                },
-                setup_deadline: Instant::now() + Duration::from_secs(60),
-                observed_peer_ip: None,
-                events,
-                receive_peer: None,
-                publisher: None,
-                viewer_presence_enabled: false,
-                viewer_subscription: None,
+            session_id: session_id.into(),
+            session_account: account.into(),
+            room: RoomLease {
+                room_id: "room".into(),
+                rooms: Arc::new(Mutex::new(HashMap::new())),
+            },
+            setup_deadline: Instant::now() + Duration::from_secs(60),
+            observed_peer_ip: None,
+            events,
+            receive_peer: None,
+            publisher: None,
+            publisher_key: "cHVibGlzaGVyLWtleQ".into(),
+            viewer_presence_enabled: false,
+            viewer_subscription: None,
         };
         (receiver, session)
     }
@@ -1841,35 +1942,42 @@ mod tests {
         let mut wrong_room = viewer_session("viewer_account", "other_session").1;
         wrong_room.room.room_id = "other_room".into();
         assert!(matches!(
-            request_view(&state, &wrong_room, "publisher_session"),
+            request_view(
+                &state,
+                &wrong_room,
+                "publisher_session",
+                "aXYtcHVibGljLWtleQ"
+            ),
             Err(ErrorCode::InvalidState)
         ));
         assert!(matches!(
-            request_view(&state, &viewer, "missing_publisher"),
+            request_view(&state, &viewer, "missing_publisher", "aXYtcHVibGljLWtleQ"),
             Err(ErrorCode::InvalidState)
         ));
 
-        request_view(&state, &viewer, "publisher_session").unwrap();
+        request_view(&state, &viewer, "publisher_session", "aXYtcHVibGljLWtleQ").unwrap();
         let pushed = next_event(&mut publisher_events).await;
         let request_id = match pushed {
             ConnectionEvent::ViewRequest {
                 request_id,
                 viewer_id,
                 viewer_display_name,
+                viewer_key,
             } => {
                 assert_eq!(viewer_id, "viewer_account");
                 assert_eq!(viewer_display_name, "viewer_account");
+                assert_eq!(viewer_key, "aXYtcHVibGljLWtleQ");
                 request_id
             }
             _ => panic!("expected a pushed view request"),
         };
         // Duplicates do not queue a second prompt.
         assert!(matches!(
-            request_view(&state, &viewer, "publisher_session"),
+            request_view(&state, &viewer, "publisher_session", "aXYtcHVibGljLWtleQ"),
             Err(ErrorCode::InvalidState)
         ));
 
-        let (mut decider_events, decider) = viewer_session("viewer_account", "decider_session");
+        let (mut decider_events, mut decider) = viewer_session("viewer_account", "decider_session");
         decider.room.room_id = "room".into();
         let _ = &mut decider_events;
         // A non-publisher session cannot decide someone else's request.
@@ -1895,9 +2003,12 @@ mod tests {
                 decision,
                 approval_id,
                 request_id: decided,
+                publisher_key,
             } => {
                 assert!(matches!(decision, ViewDecisionKind::Approve));
                 assert_eq!(decided, request_id);
+                // The approval carries the publisher's E2EE identity for pinning.
+                assert_eq!(publisher_key, "cHVibGlzaGVyLWtleQ");
                 approval_id
             }
             _ => panic!("expected a pushed approval"),
@@ -1905,14 +2016,17 @@ mod tests {
         assert!(!approval_id.is_empty());
         // Decisions are single-use; replaying one cannot reuse the pending ID.
         assert!(matches!(
-            decide_view(&state, &publisher_joined, &request_id, &ViewDecisionKind::Deny),
+            decide_view(
+                &state,
+                &publisher_joined,
+                &request_id,
+                &ViewDecisionKind::Deny
+            ),
             Err(ErrorCode::InvalidState)
         ));
         // The approval is bound to the owning stream entry.
-        let approval = state
-            .publishers
-            .lock()
-            .unwrap()
+        let publishers = state.publishers.lock().unwrap();
+        let approval = publishers
             .get("publisher_session")
             .unwrap()
             .approvals
@@ -1935,12 +2049,18 @@ mod tests {
         let (mut viewer_events, viewer) = viewer_session("viewer_account", "viewer_session");
         let publisher_joined = viewer_session("publisher_account", "publisher_session").1;
 
-        request_view(&state, &viewer, "publisher_session").unwrap();
+        request_view(&state, &viewer, "publisher_session", "aXYtcHVibGljLWtleQ").unwrap();
         let request_id = match next_event(&mut publisher_events).await {
             ConnectionEvent::ViewRequest { request_id, .. } => request_id,
             _ => panic!("expected request"),
         };
-        decide_view(&state, &publisher_joined, &request_id, &ViewDecisionKind::Deny).unwrap();
+        decide_view(
+            &state,
+            &publisher_joined,
+            &request_id,
+            &ViewDecisionKind::Deny,
+        )
+        .unwrap();
         assert!(matches!(
             next_event(&mut viewer_events).await,
             ConnectionEvent::ViewDecision {
@@ -1950,7 +2070,7 @@ mod tests {
         ));
         // Denied viewers get a cooldown before they can prompt again.
         assert!(matches!(
-            request_view(&state, &viewer, "publisher_session"),
+            request_view(&state, &viewer, "publisher_session", "aXYtcHVibGljLWtleQ"),
             Err(ErrorCode::Denied)
         ));
         state
@@ -1962,10 +2082,16 @@ mod tests {
             .denied_at
             .clear();
 
-        // An active viewer of the same account is closed when a later request
-        // is blocked: withdrawal terminates routes, not just prompts.
+        // Queue the prompt before the account becomes active: active accounts
+        // cannot request again. Blocking must clear both the prompt and route.
+        let (_blocked_events, blocked) = viewer_session("viewer_account", "blocked_session");
+        request_view(&state, &blocked, "publisher_session", "YmxvY2tlZC1rZXk").unwrap();
+        let request_id = match next_event(&mut publisher_events).await {
+            ConnectionEvent::ViewRequest { request_id, .. } => request_id,
+            _ => panic!("expected second request"),
+        };
         let (mut active_events, active) = viewer_session("viewer_account", "active_session");
-        register_viewer_subscription(
+        let _subscription = register_viewer_subscription(
             &state,
             "room",
             "publisher_session",
@@ -1974,19 +2100,27 @@ mod tests {
             active.events.clone(),
         )
         .unwrap();
-        let (_blocked_events, blocked) = viewer_session("viewer_account", "blocked_session");
-        request_view(&state, &blocked, "publisher_session").unwrap();
-        let request_id = match next_event(&mut publisher_events).await {
-            ConnectionEvent::ViewRequest { request_id, .. } => request_id,
-            _ => panic!("expected second request"),
-        };
-        decide_view(&state, &publisher_joined, &request_id, &ViewDecisionKind::Block).unwrap();
+        assert!(matches!(
+            next_event(&mut publisher_events).await,
+            ConnectionEvent::ViewerPresence {
+                change: ViewerPresenceChange::Joined,
+                viewer_count: 1,
+                ..
+            }
+        ));
+        decide_view(
+            &state,
+            &publisher_joined,
+            &request_id,
+            &ViewDecisionKind::Block,
+        )
+        .unwrap();
         assert!(matches!(
             next_event(&mut active_events).await,
             ConnectionEvent::Close(CloseReason::Revoked)
         ));
         assert!(matches!(
-            request_view(&state, &viewer, "publisher_session"),
+            request_view(&state, &viewer, "publisher_session", "aXYtcHVibGljLWtleQ"),
             Err(ErrorCode::Denied)
         ));
         // Blocked accounts cannot use a stale approval either.
@@ -2015,7 +2149,7 @@ mod tests {
         let publisher_joined = viewer_session("publisher_account", "publisher_session").1;
         let (mut viewer_events, viewer) = viewer_session("viewer_account", "viewer_session");
         let (_ignored, active) = viewer_session("active_account", "active_session");
-        register_viewer_subscription(
+        let _subscription = register_viewer_subscription(
             &state,
             "room",
             "publisher_session",
@@ -2024,7 +2158,15 @@ mod tests {
             active.events.clone(),
         )
         .unwrap();
-        request_view(&state, &viewer, "publisher_session").unwrap();
+        assert!(matches!(
+            next_event(&mut publisher_events).await,
+            ConnectionEvent::ViewerPresence {
+                change: ViewerPresenceChange::Joined,
+                viewer_count: 1,
+                ..
+            }
+        ));
+        request_view(&state, &viewer, "publisher_session", "aXYtcHVibGljLWtleQ").unwrap();
         match next_event(&mut publisher_events).await {
             ConnectionEvent::ViewRequest { .. } => {}
             _ => panic!("expected request"),
@@ -2072,7 +2214,7 @@ mod tests {
             .unwrap()
             .insert("publisher_session".into(), entry);
         let (mut viewer_events, viewer) = viewer_session("viewer_account", "viewer_session");
-        request_view(&state, &viewer, "publisher_session").unwrap();
+        request_view(&state, &viewer, "publisher_session", "aXYtcHVibGljLWtleQ").unwrap();
         // Active viewer of the same stream is closed when the publisher drops.
         let (mut active_events, active) = viewer_session("viewer2_account", "active_session");
         let subscription = register_viewer_subscription(
@@ -2107,6 +2249,66 @@ mod tests {
         assert!(state.view_requests.lock().unwrap().is_empty());
         assert!(state.publishers.lock().unwrap().is_empty());
         drop(subscription);
+    }
+
+    #[tokio::test]
+    async fn key_relay_only_reaches_approved_viewer_sessions() {
+        let (_sender, receiver) = watch::channel(Arc::new(InviteStore::default()));
+        let state = SignalingState::new(receiver);
+        let (_publisher_events, entry) = publisher_entry("publisher_account");
+        state
+            .publishers
+            .lock()
+            .unwrap()
+            .insert("publisher_session".into(), entry);
+        let publisher_joined = viewer_session("publisher_account", "publisher_session").1;
+        let (mut viewer_events, viewer) = viewer_session("viewer_account", "viewer_session");
+        let (_other_events, other) = viewer_session("other_account", "other_session");
+
+        // No approval exists yet: an unknown viewer account is refused and the
+        // opaque blob never crosses to an unapproved session.
+        assert!(matches!(
+            key_relay(&state, &publisher_joined, "viewer_account", "YmxvYg"),
+            Err(ErrorCode::InvalidState)
+        ));
+        assert!(matches!(
+            key_relay(&state, &other, "viewer_account", "YmxvYg"),
+            Err(ErrorCode::InvalidState)
+        ));
+
+        request_view(&state, &viewer, "publisher_session", "aXYtcHVibGljLWtleQ").unwrap();
+        let request_id = match state.view_requests.lock().unwrap().keys().next().cloned() {
+            Some(id) => id,
+            None => panic!("expected pending view request"),
+        };
+        decide_view(
+            &state,
+            &publisher_joined,
+            &request_id,
+            &ViewDecisionKind::Approve,
+        )
+        .unwrap();
+        let _ = next_event(&mut viewer_events).await;
+
+        key_relay(
+            &state,
+            &publisher_joined,
+            "viewer_account",
+            "ZW5jcnlwdGVkLWVwb2No",
+        )
+        .unwrap();
+        match next_event(&mut viewer_events).await {
+            ConnectionEvent::KeyRelay { publisher_id, blob } => {
+                assert_eq!(publisher_id, "publisher_session");
+                assert_eq!(blob, "ZW5jcnlwdGVkLWVwb2No");
+            }
+            _ => panic!("expected a key relay"),
+        }
+        // A non-publisher session can never emit key material for the stream.
+        assert!(matches!(
+            key_relay(&state, &viewer, "other_account", "YmxvYg"),
+            Err(ErrorCode::InvalidState)
+        ));
     }
 
     #[test]
@@ -2187,16 +2389,11 @@ mod tests {
         let state = SignalingState::new(receiver);
         let mut session = None;
         let mut left = None;
-        let mut apply = |operation| {
-            operate(
-                &state,
-                "account_1",
-                operation,
-                &mut session,
-                &mut left,
-            )
-        };
+        let mut apply =
+            |operation| operate(&state, "account_1", operation, &mut session, &mut left);
         // No room grant exists anymore: joining any opaque room is grouping.
+        // require_e2ee no longer rejects: the backend relays publisher-encrypted
+        // epoch keys, so the E2EE requirement is met by the control plane.
         let ServerOperation::Joined { session_id } = apply(ClientOperation::Join {
             room_id: "any_room".into(),
             require_e2ee: false,
@@ -2204,14 +2401,18 @@ mod tests {
             panic!("join")
         };
         assert!(matches!(
-            apply(ClientOperation::Join {
-                room_id: "any_room".into(),
-                require_e2ee: true
-            }),
-            ServerOperation::Rejected {
-                code: ErrorCode::E2eeUnavailable
+            apply(ClientOperation::Leave { session_id }),
+            ServerOperation::Closed {
+                reason: CloseReason::Left,
+                ..
             }
         ));
+        let ServerOperation::Joined { session_id } = apply(ClientOperation::Join {
+            room_id: "any_room".into(),
+            require_e2ee: true,
+        }) else {
+            panic!("join with required E2EE")
+        };
         assert!(matches!(
             apply(ClientOperation::Subscribe {
                 session_id: session_id.clone(),
@@ -2224,7 +2425,8 @@ mod tests {
         ));
         assert!(matches!(
             apply(ClientOperation::Publish {
-                session_id: session_id.clone()
+                session_id: session_id.clone(),
+                publisher_key: "cHVibGlzaGVyLWtleQ".into()
             }),
             ServerOperation::Rejected {
                 code: ErrorCode::TransportUnavailable
@@ -2246,11 +2448,8 @@ mod tests {
 
     #[tokio::test]
     async fn directory_lists_live_publishers_with_display_names() {
-        let (publisher_invite, _) = create_invite_with_display_name(
-            "publisher".into(),
-            Some("Studio PC".into()),
-        )
-        .unwrap();
+        let (publisher_invite, _) =
+            create_invite_with_display_name("publisher".into(), Some("Studio PC".into())).unwrap();
         let (other_invite, _) = create_invite("outsider".into()).unwrap();
         let store = store_with_invites(vec![publisher_invite, other_invite]);
         let (_sender, receiver) = watch::channel(store.clone());
@@ -2299,7 +2498,7 @@ mod tests {
             .unwrap()
             .insert("publisher_session".into(), entry);
         let (_viewer_events, viewer) = viewer_session("alice", "viewer_session");
-        request_view(&state, &viewer, "publisher_session").unwrap();
+        request_view(&state, &viewer, "publisher_session", "aXYtcHVibGljLWtleQ").unwrap();
         match next_event(&mut publisher_events).await {
             ConnectionEvent::ViewRequest {
                 viewer_id,
@@ -2516,7 +2715,10 @@ mod network_tests {
         )
         .await;
         assert_eq!(joined["operation"]["type"], "joined");
-        joined["operation"]["session_id"].as_str().unwrap().to_owned()
+        joined["operation"]["session_id"]
+            .as_str()
+            .unwrap()
+            .to_owned()
     }
 
     #[tokio::test]
@@ -2538,8 +2740,13 @@ mod network_tests {
             serde_json::json!({ "type": "join", "room_id": "room_1", "require_e2ee": true }),
         )
         .await;
-        assert_eq!(result["operation"]["code"], "e2ee_unavailable");
-        let session_id = join(&mut client, "room_1", "join").await;
+        // E2EE-capable control plane: require_e2ee joins are admitted now that
+        // the backend relays publisher-encrypted epoch keys.
+        assert_eq!(result["operation"]["type"], "joined");
+        let session_id = result["operation"]["session_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
         let result = request(&mut client, "subscribe", serde_json::json!({
             "type": "subscribe", "session_id": session_id, "publisher_id": "p", "approval_id": "a"
         }))
@@ -2613,11 +2820,11 @@ mod network_tests {
                     "ready",
                     "signaling_available",
                     "media_available",
-                    "e2ee_available",
                     "insecure_local_development",
                 ] {
                     assert!(response.contains(&format!("\"{field}\":false")));
                 }
+                assert!(response.contains("\"e2ee_available\":true"));
             } else {
                 assert!(response.starts_with("HTTP/1.1 503"));
             }
@@ -2677,7 +2884,8 @@ mod network_tests {
             &mut viewer,
             "request_missing",
             serde_json::json!({
-                "type": "request_view", "session_id": session_id, "publisher_id": "missing"
+                "type": "request_view", "session_id": session_id, "publisher_id": "missing",
+                "viewer_key": "aXYtcHVibGljLWtleQ"
             }),
         )
         .await;

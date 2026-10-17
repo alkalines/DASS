@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
+import * as DataStore from "@api/DataStore";
 import { showNotification } from "@api/Notifications";
 import { definePluginSettings } from "@api/Settings";
 import ErrorBoundary from "@components/ErrorBoundary";
@@ -19,6 +20,7 @@ import { type EquibopCaptureBridge, LocalCaptureCheck } from "./capture";
 import { DiscoveryController } from "./controller";
 import { logDiagnostic } from "../../clients/spike/diagnostics";
 import { DISCORD_PRESENTATION_PATCHES, DISCORD_SHARE_PATCHES, getDiscordBuildWarning, isLocalPublisherLive, type PublishIntent, routePublish, routeWatch, type WatchIntent } from "./discordAdapter";
+import { configureIdentityBackend, defaultIdentityStore } from "./e2eeIdentity";
 import { gridShares, gridTileKeyExtractor } from "./gridPresentation";
 import { CallAudioControl, callPresentation, type CallTileProps, type CallViewProps, type FocusedCallProps, type GridRuntime, type GridTileRenderer, NativeCallView, NativeGridTile, type TileAction, useFocusedCallProps, useFocusedWatchingState, useGridTiles, useHasGridShares } from "./gridTile";
 import { hasAcceptedPublishCapture, PublishController } from "./publishing";
@@ -38,9 +40,9 @@ import { WatchController } from "./watching";
 const currentCall = () => SelectedChannelStore.getVoiceChannelId();
 const discovery = new DiscoveryController();
 const session = new DassSession({ read: readRememberedAccount, write: writeRememberedAccount, forget: forgetRememberedAccount }, undefined, currentCall);
-const watching = new WatchController(currentCall, { connect: options => session.connect(options), prepare: SpikePeer.prepare });
-const directory = new WatchController(currentCall, { connect: options => session.connect(options), prepare: SpikePeer.prepare });
-const publisher = new PublishController(session, currentCall, { connect: options => session.connect(options), prepare: SpikePeer.prepare });
+const watching = new WatchController(currentCall, { connect: options => session.connect(options), prepare: SpikePeer.prepare, identityStore: defaultIdentityStore });
+const directory = new WatchController(currentCall, { connect: options => session.connect(options), prepare: SpikePeer.prepare, identityStore: defaultIdentityStore });
+const publisher = new PublishController(session, currentCall, { connect: options => session.connect(options), prepare: SpikePeer.prepare, identityStore: defaultIdentityStore });
 const callDiscovery = createCallDiscovery(session, directory, () => settings.store.backendUrl,
     () => !["idle", "failed"].includes(publisher.getSnapshot().phase) || ["loading", "ready", "watching"].includes(watching.getSnapshot().phase));
 const localCapture = new LocalCaptureCheck();
@@ -150,6 +152,7 @@ function startRuntime() {
         void showNotification({ title: "DASS compatibility warning", body: buildWarning });
     }
     logDiagnostic("plugin started", { defaultDass: settings.store.defaultDass });
+    configureIdentityBackend(DataStore);
     discovery.start();
     watching.start();
     publisher.start();

@@ -60,38 +60,51 @@ The intended connection sequence is:
    sessions.
 2. After `authenticated`, request `join` with an opaque room ID and explicit
    `require_e2ee`. Rooms are discovery grouping only; any authenticated client
-   may join or list any room. Required E2EE must be rejected while E2EE is
-   unavailable. `directory` with `room_id` returns up to 64 live
+   may join or list any room. E2EE is now mandatory end-to-end: `publish`
+   requires the publisher's `publisher_key` (base64url ECDH P-256 identity) and
+   `request_view` requires the viewer's `viewer_key`, so there is no
+   transport-only media mode. `directory` with `room_id` returns up to 64 live
    `publisher_ids` with display names in that room. There is no client update
    operation. Entries come from connected, server-owned publishers.
 3. After `joined`, use its session ID for `publish` or the admission flow.
    Publishing registers a live stream entry keyed to the publisher's session
    and account. Watching is **publisher-controlled**:
 
-   - The viewer sends `request_view` with its session ID and a target
-     `publisher_id` in the same room. The backend answers
-     `view_request_pending` with a server-generated pending request ID and
-     pushes the publisher an unsolicited `view_request` (stable envelope ID
-     `server_view_request`) carrying the viewer's account ID and display name.
-     Pending requests expire after `VIEW_REQUEST_TIMEOUT_SECONDS` (60 s), are
-     bounded globally (64), per publisher (8) and per viewer account (4), and
-     duplicate prompts from one account to one stream never queue.
+   - The viewer sends `request_view` with its session ID, a target
+     `publisher_id` in the same room and its `viewer_key` E2EE identity. The
+     backend answers `view_request_pending` with a server-generated pending
+     request ID and pushes the publisher an unsolicited `view_request` (stable
+     envelope ID `server_view_request`) carrying the viewer's account ID,
+     display name and `viewer_key`. The publisher's client pins that key as
+     the admission target: a changed key surfaces as an identity-change prompt
+     rather than silently inheriting prior approval. Pending requests expire
+     after `VIEW_REQUEST_TIMEOUT_SECONDS` (60 s), are bounded globally (64),
+     per publisher (8) and per viewer account (4), and duplicate prompts from
+     one account to one stream never queue.
    - Only the publisher session owning the stream may send `view_decision`
      referencing that pending request ID: `approve`, `deny` or `block`. The
      decision is single-use. The viewer receives a pushed `view_decision`
      (stable envelope ID `server_view_decision`); on `approve` it carries an
-     opaque `approval_id`. `deny` imposes a 30 s cooldown on further requests
-     from that account on this stream; `block` additionally refuses all future
-     requests and terminates that account's existing viewer sessions, unused
-     approvals and pending prompts on this stream. An expired or withdrawn
-     request pushes `view_request_closed` (stable envelope ID
-     `server_view_request_closed`) to the publisher.
+     opaque `approval_id` plus the publisher's `publisher_key` so the viewer
+     can pin it. `deny` imposes a 30 s cooldown on further requests from that
+     account on this stream; `block` additionally refuses all future requests
+     and terminates that account's existing viewer sessions, unused approvals
+     and pending prompts on this stream. An expired or withdrawn request pushes
+     `view_request_closed` (stable envelope ID `server_view_request_closed`)
+     to the publisher.
    - `subscribe` requires the `approval_id`. The backend consumes it exactly
      once and only for the stream, viewer session and account it names; a
      forged, stale or mismatched ID is rejected. The publisher can withdraw an
      account at any time with `remove_viewer` (`viewer_id` is the viewer's
      account ID), which terminates that account's viewer sessions, unused
      approvals and pending prompts and drops its media route immediately.
+   - After approval, the publisher's client wraps the current AES-256 media
+     epoch key under ECDH with the viewer's pinned identity and relays it with
+     `key_relay` (`viewer_id` names the approved viewer account; `blob` is
+     opaque E2EE ciphertext). The backend forwards it only to sessions it
+     recorded as approved or watching for that stream; media keys never appear
+     to the server. Viewer removal triggers an epoch rotation and a fresh
+     relay to remaining viewers so removed viewers keep only past epochs.
    - A publisher going offline or ending its session closes every pending
      request (viewers see a denial), every approved viewer connection and the
      forwarding route. Approvals never transfer to a new stream instance.
@@ -182,7 +195,12 @@ admission counts unauthenticated connections and bounds socket/handshake lifetim
 see [control-plane.md](control-plane.md) for the exact current limits.
 
 No operation carries media frames or previews. Media must use WebRTC DTLS-SRTP,
-not JSON or Electron IPC. This protocol includes no E2EE keys and promises no
-E2EE. Authentication, secure signaling, `str0m`, and the real two-client gate
-remain tracked in [transport-gate.md](transport-gate.md); production SFU work is
-blocked until that gate passes.
+not JSON or Electron IPC. E2EE is mandatory: encoded frames are AES-256-GCM
+encrypted per media epoch on the publisher's device (SFrame-derived header,
+HKDF-SHA-256 key derivation, nonce = per-epoch salt XOR epoch‖counter) and
+decrypted only on approved viewers' devices; the backend forwards ciphertext
+unchanged and never holds media keys. Identity keys are ECDH P-256 with local
+TOFU pinning and an out-of-band safety-number comparison. Authentication,
+secure signaling, `str0m`, and the real two-client gate remain tracked in
+[transport-gate.md](transport-gate.md); production SFU work is blocked until
+that gate passes.

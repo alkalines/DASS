@@ -6,6 +6,16 @@
 
 import { createEquibopCapture, type EquibopCaptureBridge } from "./capture";
 import { browserFailureCode, logDiagnostic } from "../../clients/spike/diagnostics";
+import {
+    type E2eeIdentity,
+    evaluateIdentity,
+    generateEpochKey,
+    identityFingerprint,
+    type IdentityStore,
+    type IdentityTrust,
+    wrapEpochKey,
+} from "../../clients/spike/e2ee";
+import { defaultIdentityStore,deviceIdentity } from "./e2eeIdentity";
 import { type CaptureLease } from "./routing";
 import { type DassSession } from "./session";
 import { preparationFailureMessage, SpikePeer } from "../../clients/spike/peer";
@@ -15,6 +25,8 @@ export interface PendingViewer {
     requestId: string;
     viewerId: string;
     displayName: string;
+    /** Pinned-identity trust for the key this viewer presented. */
+    trust: IdentityTrust;
 }
 
 export interface ApprovedViewer {
@@ -38,14 +50,15 @@ export function hasAcceptedPublishCapture(phase: PublishStatus["phase"]): boolea
 /** Owns publishing independently of settings/modal mounting and Discord's native stream. */
 export class PublishController {
     private active = false;
-    private operation?: { abort: AbortController; contextId: string; peer?: SpikePeer; signaling?: SpikeSignaling; capture?: CaptureLease; sessionId?: string; };
+    private operation?: { abort: AbortController; contextId: string; peer?: SpikePeer; signaling?: SpikeSignaling; capture?: CaptureLease; sessionId?: string;
+        identity?: E2eeIdentity; store?: IdentityStore; epoch?: number; epochKey?: Uint8Array; viewerKeys?: Map<string, string>; };
     private contextCheck?: ReturnType<typeof setInterval>;
     private sourceChange?: AbortController;
     private listeners = new Set<() => void>();
     private status: PublishStatus = { phase: "idle", message: "No DASS share is running.", candidates: [], pendingViewers: [], approvedViewers: [] };
 
     constructor(private readonly session: DassSession, private readonly currentContext: () => string | undefined,
-        private readonly dependencies = { connect: SpikeSignaling.connect, prepare: SpikePeer.prepare }) {}
+        private readonly dependencies = { connect: SpikeSignaling.connect, prepare: SpikePeer.prepare, identityStore: async () => defaultIdentityStore() }) {}
 
     getSnapshot = () => this.status;
     getPreviewStream = () => this.operation && this.current(this.operation) ? this.operation.capture?.stream : undefined;
@@ -100,7 +113,7 @@ export class PublishController {
             this.sourceChange = undefined;
             await this.publish(backendUrl, bridge);
         } catch {
-            if (!request.signal.aborted) this.update({ phase: "failed", message: "Could not release the old capture. Restart the client before sharing again.", candidates: [] });
+            if (!request.signal.aborted) this.update({ phase: "failed", message: "Could not release the old capture. Restart the client before sharing again.", candidates: [], pendingViewers: [], approvedViewers: [] });
         } finally {
             if (this.sourceChange === request) this.sourceChange = undefined;
         }
@@ -112,7 +125,7 @@ export class PublishController {
         if (!contextId) return;
         let access: ReturnType<DassSession["getAccess"]>;
         try { access = this.session.getAccess(); }
-        catch { this.update({ phase: "failed", message: "Set up your DASS session first. No Discord fallback.", candidates: [] }); return; }
+        catch { this.update({ phase: "failed", message: "Set up your DASS session first. No Discord fallback.", candidates: [], pendingViewers: [], approvedViewers: [] }); return; }
         const operation: NonNullable<PublishController["operation"]> = { abort: new AbortController(), contextId };
         this.operation = operation;
         this.update({ phase: "authenticating", message: "Authenticating DASS before opening capture…", candidates: [], pendingViewers: [], approvedViewers: [] });
@@ -135,8 +148,10 @@ export class PublishController {
             const capture = await createEquibopCapture(bridge)(operation.abort.signal);
             if (!this.current(operation)) { capture.release(); return; }
             operation.capture = capture;
-            this.update({ phase: "preparing", message: "Preparing Chromium's DASS connection…", candidates: [], pendingViewers: [], approvedViewers: [] });
-            operation.peer = await this.dependencies.prepare({ experimental: true, signal: operation.abort.signal, capture });
+            this.update({ phase: "preparing", message: "Preparing Chromium's DASS connection with mandatory E2EE…", candidates: [], pendingViewers: [], approvedViewers: [] });
+            operation.store ??= await this.dependencies.identityStore();
+            operation.identity ??= await deviceIdentity(operation.store);
+            operation.peer = await this.dependencies.prepare({ experimental: true, signal: operation.abort.signal, capture, e2ee: true });
             if (!this.current(operation)) { operation.peer.close(); return; }
             operation.peer.closed.addEventListener("abort", () => {
                 if (this.current(operation)) this.fail(operation, operation.peer!.closeMessage);
@@ -164,7 +179,11 @@ export class PublishController {
             const access = this.session.getAccess();
             if (!operation.signaling) operation.signaling = await this.dependencies.connect({ experimental: true, backendUrl, ...access, signal: operation.abort.signal });
             if (!this.current(operation)) { operation.signaling.close(); return; }
-            operation.sessionId = await operation.peer.activate({ backendUrl, ...access, signaling: operation.signaling, onViewerPresence: presence => {
+            operation.store ??= await this.dependencies.identityStore();
+            operation.identity ??= await deviceIdentity(operation.store);
+            operation.sessionId = await operation.peer.activate({ backendUrl, ...access, signaling: operation.signaling,
+                e2ee: { identityPublicKey: operation.identity.publicKey },
+                onViewerPresence: presence => {
                 if (this.current(operation)) this.update({ ...this.status, viewerCount: presence.viewer_count });
             } });
             // Publisher-controlled admission: every pushed view request is a
@@ -173,9 +192,22 @@ export class PublishController {
             if (operation.sessionId && this.current(operation) && typeof operation.signaling.onViewRequests === "function") {
                 operation.signaling.onViewRequests(operation.sessionId, viewRequest => {
                     if (!this.current(operation)) return;
-                    const pending = [...this.status.pendingViewers.filter(existing => existing.requestId !== viewRequest.request_id),
-                        { requestId: viewRequest.request_id, viewerId: viewRequest.viewer_id, displayName: viewRequest.viewer_display_name }];
-                    this.update({ ...this.status, pendingViewers: pending });
+                    // E2EE membership gate: the publisher pins the presented
+                    // viewer identity. A changed key pauses admission until the
+                    // publisher explicitly re-confirms — never silently trusted.
+                    const { store } = operation;
+                    if (!store) return;
+                    void store.readPeer(viewRequest.viewer_id)
+                        .then(pin => evaluateIdentity(pin, viewRequest.viewer_key))
+                        .then(trust => {
+                            if (!this.current(operation)) return;
+                            const pending = [...this.status.pendingViewers.filter(existing => existing.requestId !== viewRequest.request_id),
+                                { requestId: viewRequest.request_id, viewerId: viewRequest.viewer_id, displayName: viewRequest.viewer_display_name, trust }];
+                            operation.viewerKeys?.set(viewRequest.viewer_id, viewRequest.viewer_key);
+                            operation.viewerKeys ??= new Map([[viewRequest.viewer_id, viewRequest.viewer_key]]);
+                            this.update({ ...this.status, pendingViewers: pending });
+                        })
+                        .catch(() => logDiagnostic("view request trust evaluation failed", {}, true));
                 });
             }
             if (this.current(operation)) this.update({ ...this.status, phase: "publishing", message: "DASS negotiation complete. The stream appears in the directory once media connects. Close this panel to keep sharing, or Stop sharing to end capture." });
@@ -190,11 +222,17 @@ export class PublishController {
         }
     }
 
-    /** Publisher decision for one pending view request. */
+    /** Publisher decision for one pending view request. Approving pins the
+     * viewer's presented E2EE identity and relays the current media epoch key
+     * to them; a changed identity must be explicitly re-confirmed first. */
     async decideView(requestId: string, decision: "approve" | "deny" | "block") {
         const { operation } = this;
         if (!operation?.signaling || !operation.sessionId || !this.current(operation)) return;
         const request = this.status.pendingViewers.find(pending => pending.requestId === requestId);
+        if (decision === "approve" && request?.trust.kind === "changed") {
+            this.update({ ...this.status, message: "This viewer's E2EE identity changed. Confirm the new identity before approving." });
+            return;
+        }
         try {
             await operation.signaling.decideView(operation.sessionId, requestId, decision);
         } catch (error) {
@@ -208,9 +246,58 @@ export class PublishController {
             ? [...this.status.approvedViewers.filter(viewer => viewer.viewerId !== request.viewerId), { viewerId: request.viewerId }]
             : this.status.approvedViewers;
         this.update({ ...this.status, pendingViewers, approvedViewers });
+        if (decision === "approve" && request) await this.deliverEpoch(operation, request.viewerId);
+        // Deny/block can also evict an already-approved session of the same
+        // account; rotate so it cannot decrypt further frames.
+        if (decision !== "approve" && operation.epoch !== undefined) await this.rotateEpoch(operation);
     }
 
-    /** Withdraw an approved or watching viewer account entirely. */
+    /**
+     * Rotate the media epoch and relay it to an approved viewer. A fresh
+     * 256-bit key is wrapped under ECDH with the viewer's pinned identity; the
+     * backend only forwards the ciphertext. Past-epoch content is not released
+     * to newly admitted viewers.
+     */
+    private async deliverEpoch(operation: NonNullable<PublishController["operation"]>, viewerId: string) {
+        if (!operation.peer || !operation.signaling || !operation.identity || !operation.sessionId) return;
+        const viewerKey = operation.viewerKeys?.get(viewerId);
+        if (!viewerKey || !operation.peer || !operation.identity || !operation.sessionId || !operation.signaling) return;
+        if (operation.epoch === undefined || !operation.epochKey) {
+            operation.epoch = 1;
+            operation.epochKey = generateEpochKey();
+            try { operation.peer.setSendEpoch(operation.epoch, operation.epochKey); } catch { return; }
+        }
+        try {
+            const blob = await wrapEpochKey(operation.identity, viewerKey, `stream/${operation.sessionId}`, operation.epoch, operation.epochKey);
+            await operation.signaling.keyRelay(operation.sessionId, viewerId, blob);
+            const pin = await operation.store?.readPeer(viewerId);
+            if (!pin) await operation.store?.writePeer(viewerId, { key: viewerKey, fingerprint: await identityFingerprint(viewerKey), verified: false });
+        } catch (error) {
+            logDiagnostic("epoch key relay failed", { code: error instanceof SpikeSignalingError ? error.code : "unknown" }, true);
+        }
+    }
+
+    /** Rekey after viewer removal so removed viewers keep only past epochs. */
+    private async rotateEpoch(operation: NonNullable<PublishController["operation"]>) {
+        if (!operation.peer || !operation.signaling || !operation.identity || !operation.sessionId || operation.epoch === undefined) return;
+        operation.epoch += 1;
+        operation.epochKey = generateEpochKey();
+        operation.peer.setSendEpoch(operation.epoch, operation.epochKey);
+        try { operation.peer.retireEpochsBelow(operation.epoch); } catch {}
+        for (const viewerId of new Set(operation.viewerKeys?.keys() ?? [])) {
+            const stillApproved = this.status.approvedViewers.some(viewer => viewer.viewerId === viewerId);
+            if (!stillApproved) continue;
+            try {
+                const blob = await wrapEpochKey(operation.identity, operation.viewerKeys!.get(viewerId)!, `stream/${operation.sessionId}`, operation.epoch, operation.epochKey);
+                await operation.signaling.keyRelay(operation.sessionId, viewerId, blob);
+            } catch {
+                logDiagnostic("epoch rekey relay failed", {}, true);
+            }
+        }
+    }
+
+    /** Withdraw an approved or watching viewer account entirely. The media
+     * epoch rotates so the removed viewer cannot decrypt further frames. */
     async removeViewer(viewerId: string) {
         const { operation } = this;
         if (!operation?.signaling || !operation.sessionId || !this.current(operation)) return;
@@ -221,10 +308,25 @@ export class PublishController {
             return;
         }
         if (!this.current(operation)) return;
+        operation.viewerKeys?.delete(viewerId);
         this.update({
             ...this.status,
             pendingViewers: this.status.pendingViewers.filter(pending => pending.viewerId !== viewerId),
             approvedViewers: this.status.approvedViewers.filter(viewer => viewer.viewerId !== viewerId),
+        });
+        await this.rotateEpoch(operation);
+    }
+
+    /** Explicitly accept a viewer's changed E2EE identity after review. */
+    async acceptViewerIdentity(viewerId: string) {
+        const { operation } = this;
+        const key = operation?.viewerKeys?.get(viewerId);
+        if (!key) return;
+        await operation?.store?.writePeer(viewerId, { key, fingerprint: await identityFingerprint(key), verified: false });
+        this.update({
+            ...this.status,
+            pendingViewers: this.status.pendingViewers.map(pending =>
+                pending.viewerId === viewerId ? { ...pending, trust: { kind: "tofu" } } : pending),
         });
     }
 

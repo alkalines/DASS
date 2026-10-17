@@ -5,10 +5,23 @@
  */
 
 import { logDiagnostic } from "./diagnostics";
+import { E2eeTransforms } from "./e2ee";
 import type { CaptureLease } from "../../plugins/dass/routing";
-import { type DassAuthentication, SpikeSignaling, SpikeSignalingError } from "./signaling";
+import { type DassAuthentication, SpikeSignaling, SpikeSignalingError, type ViewDecision } from "./signaling";
 
 export const PREPARATION_TIMEOUT_MS = 180_000;
+
+/** E2EE hooks for `SpikePeer.activate`. Identity keys are mandatory: the
+ * backend refuses media setup without them (no transport-only mode). */
+export interface PeerE2ee {
+    /** This device's base64url ECDH P-256 identity public key. */
+    identityPublicKey: string;
+    /** Viewer trust gate on the publisher's pinned identity key from the
+     * approval decision. Returning false aborts before subscribing. */
+    trustPublisher?: (publisherKey: string, decision: ViewDecision) => boolean;
+    /** Viewer callback with an opaque relayed epoch blob for local unwrapping. */
+    onEpochBlob?: (blob: string) => void;
+}
 
 const PREPARATION_MESSAGES = {
     offer_size: "The gathered offer exceeded the spike's 12 KiB limit.",
@@ -91,6 +104,7 @@ export class SpikePeer {
     private timer?: ReturnType<typeof setTimeout>;
     private gatheringFailure?: () => void;
     private readonly stopController = new AbortController();
+    private e2eeTransforms?: E2eeTransforms;
     readonly closed = this.stopController.signal;
 
     private constructor(
@@ -105,7 +119,7 @@ export class SpikePeer {
         this.timer = setTimeout(() => this.closeWithDiagnostic("Preparation expired after 180 seconds. Prepare fresh candidates."), PREPARATION_TIMEOUT_MS);
     }
 
-    static async prepare(options: { experimental: true; signal: AbortSignal; capture?: CaptureLease; }): Promise<SpikePeer> {
+    static async prepare(options: { experimental: true; signal: AbortSignal; capture?: CaptureLease; e2ee?: boolean; }): Promise<SpikePeer> {
         if (options.experimental !== true || options.signal.aborted) {
             options.capture?.release();
             throw new SpikePreparationError("cancelled");
@@ -116,6 +130,11 @@ export class SpikePeer {
         const connection = new SpikePeer(peer, options.signal, options.capture);
         let stage: PreparationFailure = "capture_tracks";
         try {
+            // E2EE is mandatory for DASS media: attach insertable-stream
+            // transforms before negotiation and fail closed when the runtime
+            // cannot encrypt frames. Frames are dropped until an epoch key
+            // arrives, so no plaintext can leave this peer.
+            if (options.e2ee) connection.e2eeTransforms = new E2eeTransforms();
             if (options.capture) {
                 const video = options.capture.stream.getVideoTracks();
                 const audio = options.capture.stream.getAudioTracks();
@@ -125,11 +144,16 @@ export class SpikePeer {
                     throw new SpikePreparationError("capture_tracks");
                 }
                 for (const track of [...video, ...audio]) {
-                    connection.configure(peer.addTransceiver(track, { direction: "sendonly", streams: [options.capture.stream] }), track.kind);
+                    const transceiver = peer.addTransceiver(track, { direction: "sendonly", streams: [options.capture.stream] });
+                    connection.configure(transceiver, track.kind);
+                    connection.e2eeTransforms?.attach(transceiver.sender, "encrypt");
                 }
             } else {
-                connection.configure(peer.addTransceiver("video", { direction: "recvonly" }), "video");
-                connection.configure(peer.addTransceiver("audio", { direction: "recvonly" }), "audio");
+                for (const kind of ["video", "audio"]) {
+                    const transceiver = peer.addTransceiver(kind, { direction: "recvonly" });
+                    connection.configure(transceiver, kind);
+                    connection.e2eeTransforms?.attach(transceiver.receiver, "decrypt");
+                }
             }
             stage = "offer";
             const offer = await peer.createOffer();
@@ -184,11 +208,28 @@ export class SpikePeer {
         });
     }
 
+    /** Push a fresh media epoch key into the send transform (publisher). */
+    setSendEpoch(epoch: number, keyBytes: Uint8Array) {
+        this.e2eeTransforms?.setEpoch(epoch, keyBytes, true);
+    }
+
+    /** Install a received epoch key into the decrypt transform (viewer). */
+    setReceiveEpoch(epoch: number, keyBytes: Uint8Array) {
+        this.e2eeTransforms?.setEpoch(epoch, keyBytes, false);
+    }
+
+    /** Evict old epoch keys after a rekey has had time to drain. */
+    retireEpochsBelow(epoch: number) {
+        this.e2eeTransforms?.retireBelow(epoch);
+    }
+
     async activate(options: DassAuthentication & { backendUrl: string; roomId: string; publisherId?: string; signaling?: SpikeSignaling;
+        e2ee?: PeerE2ee;
         onViewerPresence?: Parameters<SpikeSignaling["enableViewerPresence"]>[1]; }): Promise<string> {
         this.checkActive();
-        if (this.activated || !this.offer || (Boolean(this.capture) === Boolean(options.publisherId))) {
-            throw new Error("Select the matching DASS publisher or viewer role once.");
+        if (this.activated || !this.offer || (Boolean(this.capture) === Boolean(options.publisherId))
+            || !options.e2ee || !options.e2ee.identityPublicKey) {
+            throw new Error("Select the matching DASS publisher or viewer role once, with an E2EE identity.");
         }
         this.activated = true;
         clearTimeout(this.timer);
@@ -200,7 +241,7 @@ export class SpikePeer {
             this.signaling.closed.addEventListener("abort", this.onSignalingClosed, { once: true });
             if (this.signaling.closed.aborted) throw new Error("DASS signaling closed.");
             this.activationStage = "join";
-            const joined = await this.signaling.request({ type: "join", room_id: options.roomId, require_e2ee: false }, "joined");
+            const joined = await this.signaling.request({ type: "join", room_id: options.roomId, require_e2ee: true }, "joined");
             this.checkActive();
             if (joined.type !== "joined") throw new Error("DASS join failed.");
             this.activationStage = options.publisherId ? "request_view" : "publish";
@@ -208,18 +249,31 @@ export class SpikePeer {
             if (options.publisherId) {
                 // Publisher-controlled admission: ask, then wait for the
                 // publisher's pushed decision. Denial or a closed request
-                // never proceeds to subscribe.
-                const decision = await this.signaling.requestView(joined.session_id, options.publisherId, this.closed);
+                // never proceeds to subscribe. The viewer's E2EE identity key
+                // accompanies the request so the publisher can pin it.
+                const decision = await this.signaling.requestView(joined.session_id, options.publisherId, options.e2ee.identityPublicKey, this.closed);
                 this.checkActive();
-                if (decision.decision !== "approve" || !decision.approval_id) {
+                if (decision.decision !== "approve" || !decision.approval_id || !decision.publisher_key) {
                     throw new SpikeSignalingError("rejected:denied");
+                }
+                // Fail closed on an unpinned/changed publisher identity rather
+                // than receiving media under a substituted key.
+                if (options.e2ee.trustPublisher && !options.e2ee.trustPublisher(decision.publisher_key, decision)) {
+                    throw new SpikeSignalingError("rejected:e2ee_unavailable");
+                }
+                if (options.e2ee.onEpochBlob) {
+                    const handler = options.e2ee.onEpochBlob;
+                    const { publisherId } = options;
+                    this.signaling.onKeyRelay(relay => {
+                        if (relay.publisher_id === publisherId) handler(relay.blob);
+                    });
                 }
                 approvalId = decision.approval_id;
             }
             this.activationStage = options.publisherId ? "subscribe" : "publish";
             const accepted = await this.signaling.request(options.publisherId
                 ? { type: "subscribe", session_id: joined.session_id, publisher_id: options.publisherId, approval_id: approvalId }
-                : { type: "publish", session_id: joined.session_id }, "accepted");
+                : { type: "publish", session_id: joined.session_id, publisher_key: options.e2ee.identityPublicKey }, "accepted");
             this.checkActive();
             if (accepted.type !== "accepted" || accepted.session_id !== joined.session_id) throw new Error("DASS role does not match the session.");
             if (!options.publisherId && options.onViewerPresence) {
@@ -289,6 +343,8 @@ export class SpikePeer {
         this.signaling?.closed.removeEventListener("abort", this.onSignalingClosed);
         this.stopController.abort();
         this.signaling?.close();
+        this.e2eeTransforms?.close();
+        this.e2eeTransforms = undefined;
         this.peer.close();
         for (const track of [...this.receivedStream.getTracks(), ...(this.capture?.stream.getTracks() ?? [])]) {
             track.removeEventListener("ended", this.close);

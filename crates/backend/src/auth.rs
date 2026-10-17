@@ -376,7 +376,11 @@ mod tests {
     fn verifies_only_dass_credentials_without_room_authority() {
         let (store, credential, _) = sample();
         assert_eq!(store.verify(&credential).unwrap(), "invite_1");
-        assert!(store.verify(&format!("invite_1.{}", "0".repeat(64))).is_err());
+        assert!(
+            store
+                .verify(&format!("invite_1.{}", "0".repeat(64)))
+                .is_err()
+        );
         assert!(store.verify("discord-token").is_err());
         assert!(
             store
@@ -403,13 +407,12 @@ mod tests {
             "rooms": [{"room_id": "*", "access": true, "publish": true, "subscribe": true}],
             "allowed_ips": ["192.168.1.20"]
         });
-        for (file, parse) in [
+        for file in [
             serde_json::json!({"version": 1, "users": [legacy_user]}),
             serde_json::json!({"version": 2, "users": [legacy_user]}),
         ] {
             let bytes = serde_json::to_vec(&file).unwrap();
             assert!(InviteStore::from_users_bytes(&bytes).is_err());
-            let _ = parse;
         }
         let (_, _, invite) = sample();
         let mut legacy_invite = serde_json::to_value(&invite).unwrap();
@@ -487,10 +490,14 @@ mod tests {
         })
         .unwrap();
         invalid_hash["users"][0]["password_hash"] = "not-an-argon-hash".into();
-        assert!(InviteStore::from_users_bytes(&serde_json::to_vec(&invalid_hash).unwrap()).is_err());
+        assert!(
+            InviteStore::from_users_bytes(&serde_json::to_vec(&invalid_hash).unwrap()).is_err()
+        );
         invalid_hash["users"][0]["password_hash"] = "valid hash stays private".into();
         invalid_hash["users"][0]["unexpected"] = true.into();
-        assert!(InviteStore::from_users_bytes(&serde_json::to_vec(&invalid_hash).unwrap()).is_err());
+        assert!(
+            InviteStore::from_users_bytes(&serde_json::to_vec(&invalid_hash).unwrap()).is_err()
+        );
     }
 
     #[test]
@@ -498,9 +505,7 @@ mod tests {
         for password in ["short", "has\ncontrol\ncharacters", &"x".repeat(513)] {
             assert!(create_user("alice".into(), password, None).is_err());
         }
-        assert!(
-            create_user("alice/name".into(), "correct horse battery staple", None).is_err()
-        );
+        assert!(create_user("alice/name".into(), "correct horse battery staple", None).is_err());
     }
 
     #[test]

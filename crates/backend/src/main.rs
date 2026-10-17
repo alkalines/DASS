@@ -172,10 +172,8 @@ fn create_invite_files(arguments: &[String]) -> Result<(), &'static str> {
             "usage: dass-backend create-invite RECORD_FILE CREDENTIAL_FILE INVITE_ID [DISPLAY_NAME]",
         );
     }
-    let (invite, credential) = create_invite_with_display_name(
-        arguments[3].clone(),
-        arguments.get(4).cloned(),
-    )?;
+    let (invite, credential) =
+        create_invite_with_display_name(arguments[3].clone(), arguments.get(4).cloned())?;
     let record = serde_json::to_vec_pretty(&InviteFile {
         version: 2,
         invites: vec![invite],
@@ -213,11 +211,7 @@ fn create_user_file(arguments: &[String]) -> Result<(), &'static str> {
         );
     }
     let password = read_account_password(&arguments[2])?;
-    let user = create_user(
-        arguments[3].clone(),
-        &password,
-        arguments.get(4).cloned(),
-    )?;
+    let user = create_user(arguments[3].clone(), &password, arguments.get(4).cloned())?;
     let record = serde_json::to_vec_pretty(&UsersFile {
         version: 2,
         users: vec![user],
