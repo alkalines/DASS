@@ -39,13 +39,12 @@ Discord cannot receive the stream.
    exit stops media while retaining the signed-in account for the next call.
 
 No client helper executable, subprocess, proxy or external encoder is introduced.
-The backend still checks scoped room grants: provision the Discord call/channel ID
-as `room_id` in the account's grant instead of an unrelated `lan_test` room. This
-ID selects context only; it is not proof of Discord membership or authorization.
-For trusted private-backend users with dynamic DM calls, account grants can use
-`"room_id": "*"` for all rooms. This is backend-wide access, not verified call
-membership. See the limitations and future authorization note in
-[lan-accounts.md](lan-accounts.md#temporary-all-rooms-access-for-trusted-accounts).
+Rooms are discovery grouping only: the current Discord call's channel ID becomes
+the opaque DASS room ID shared by the participants' clients. It selects context
+only; it is not proof of Discord membership and grants no stream access. A viewer
+asks to watch a specific live stream and the publisher's client approves, denies
+or blocks the request; only a backend-consumed single-use approval permits
+`subscribe`. The publisher can withdraw an account's viewers at any time.
 
 ## Publisher names
 

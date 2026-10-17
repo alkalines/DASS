@@ -18,15 +18,18 @@ at most **one publisher and one subscriber globally**. The publisher session ID
 returned by room join is the `publisher_id` supplied to subscribe. There is no
 directory or public publisher enumeration endpoint.
 
-Publisher: authenticate → join authorized room → publish → send-only SDP offer
+Publisher: authenticate → join a room → publish → send-only SDP offer
 with at most one audio and one video m-line → answer → bounded trickle ICE.
 
-Viewer: authenticate with access and subscribe grants → join **the same room** →
-subscribe with that publisher's session ID → receive-only SDP offer → answer →
-bounded trickle ICE. A subscription for a missing publisher, another room, oneself
-or an occupied slot is rejected without revealing cross-room publisher presence.
-Offer/ICE requires the permission for the already selected role; permission is
-checked on every operation. Grants and the exact ICE allowlist are separate checks.
+Viewer: authenticate → join **the same room** → `request_view` → receive the
+publisher's pushed `view_decision` approval → `subscribe` with the single-use
+`approval_id` and that publisher's session ID → receive-only SDP offer → answer →
+bounded trickle ICE. Rooms are discovery grouping; login alone never grants media.
+A subscription for a missing publisher, another room, oneself, an unapproved or
+mismatched approval ID, or an occupied slot is rejected without revealing
+cross-room publisher presence. Approvals are scoped to one stream instance and
+viewer account/session; publisher approval and the exact ICE allowlist are
+separate checks.
 Required E2EE is still rejected.
 
 Only **Opus and VP8** are enabled. Each RTC has one task owner. Decrypted RTP
@@ -59,7 +62,9 @@ audio/video. There is no source switching, simulcast, renegotiation or ICE resta
   forwarded writes are marked non-nackable. Library pacing is retained, not a
   measured bandwidth/congestion-control guarantee.
 - Prior ICE, SDP, packet-rate, setup, inactivity and lifetime limits still apply.
-  Invite expiry/reload ends the WSS-owned RTC; room membership is not authorization.
+  Session expiry/policy reload ends the WSS-owned RTC; room membership is not
+  authorization, and publisher withdrawal/block drops the route and queued
+  packets immediately through `close_publisher`/`drop_viewer`.
 
 Audio/video synchronization currently uses arrival-time wallclock estimates with
 original RTP timestamps. Loss recovery, sequence/timestamp wrap, long-running
@@ -85,8 +90,11 @@ it did not run host Cargo or independently run Docker.
   must pass again with the new role-aware implementation. Combined authenticated
   two-client forwarding and real capture/playback still need coverage.
 - A signaling-level test checks same-room source binding, successful subscriber
-  SDP with subscribe-only grants, expiry rejection before ICE parsing, and
-  publisher-drop invalidation of the viewer route.
+  SDP with a consumed approval, expiry rejection before ICE parsing, and
+  publisher-drop invalidation of the viewer route. New unit tests cover
+  publisher-owned bounded pending requests, single-use decisions, deny cooldown,
+  block/remove withdrawal and offline-publisher cleanup; they were written for
+  this change and remain unexecuted (Docker unavailable).
 
 Run from the **DASS repository root** in your `sudo su` shell:
 

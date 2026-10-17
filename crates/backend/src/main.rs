@@ -2,13 +2,13 @@ use dass_backend::{
     admin::{AdminDocument, AdminState, parse_credentials},
     app_with_control_panel,
     auth::{
-        InviteFile, InviteStore, MAX_ACCOUNT_PASSWORD_BYTES, RoomGrant, UsersFile,
+        InviteFile, InviteStore, MAX_ACCOUNT_PASSWORD_BYTES, UsersFile,
         create_invite_with_display_name, create_user,
     },
     config::Config,
     listener::{BoundedListener, PeerAddress, tls_acceptor},
     rtc::SpikeConfig,
-    signaling::{SignalingState, now_seconds},
+    signaling::SignalingState,
 };
 use std::{
     fs::File,
@@ -167,36 +167,17 @@ async fn reload_invites(path: PathBuf, sender: watch::Sender<Arc<InviteStore>>) 
 }
 
 fn create_invite_files(arguments: &[String]) -> Result<(), &'static str> {
-    if !(7..=8).contains(&arguments.len()) || arguments[0] != "create-invite" {
+    if !(4..=5).contains(&arguments.len()) || arguments[0] != "create-invite" {
         return Err(
-            "usage: dass-backend create-invite RECORD_FILE CREDENTIAL_FILE INVITE_ID ROOM_ID ROLE EXPIRES_UNIX_SECONDS [DISPLAY_NAME]; ROLE is viewer, publisher, or both",
+            "usage: dass-backend create-invite RECORD_FILE CREDENTIAL_FILE INVITE_ID [DISPLAY_NAME]",
         );
-    }
-    let (publish, subscribe) = match arguments[5].as_str() {
-        "viewer" => (false, true),
-        "publisher" => (true, false),
-        "both" => (true, true),
-        _ => return Err("invalid DASS role"),
-    };
-    let expires = arguments[6]
-        .parse::<u32>()
-        .map_err(|_| "invalid expiration")?;
-    if expires <= now_seconds()? {
-        return Err("expiration must be in the future");
     }
     let (invite, credential) = create_invite_with_display_name(
         arguments[3].clone(),
-        arguments.get(7).cloned(),
-        vec![RoomGrant {
-            room_id: arguments[4].clone(),
-            access: true,
-            publish,
-            subscribe,
-        }],
-        expires,
+        arguments.get(4).cloned(),
     )?;
     let record = serde_json::to_vec_pretty(&InviteFile {
-        version: 1,
+        version: 2,
         invites: vec![invite],
     })
     .map_err(|_| "cannot serialize invite")?;
@@ -226,38 +207,19 @@ fn create_invite_files(arguments: &[String]) -> Result<(), &'static str> {
 }
 
 fn create_user_file(arguments: &[String]) -> Result<(), &'static str> {
-    if !(7..=8).contains(&arguments.len()) || arguments[0] != "create-user" {
+    if !(5..=6).contains(&arguments.len()) || arguments[0] != "create-user" {
         return Err(
-            "usage: dass-backend create-user RECORD_FILE PASSWORD_FILE USERNAME ROOM_ID ROLE EXPIRES_UNIX_SECONDS [DISPLAY_NAME]; ROLE is viewer, publisher, or both",
+            "usage: dass-backend create-user RECORD_FILE PASSWORD_FILE USERNAME [DISPLAY_NAME]",
         );
-    }
-    let (publish, subscribe) = match arguments[5].as_str() {
-        "viewer" => (false, true),
-        "publisher" => (true, false),
-        "both" => (true, true),
-        _ => return Err("invalid DASS role"),
-    };
-    let expires = arguments[6]
-        .parse::<u32>()
-        .map_err(|_| "invalid expiration")?;
-    if expires <= now_seconds()? {
-        return Err("expiration must be in the future");
     }
     let password = read_account_password(&arguments[2])?;
     let user = create_user(
         arguments[3].clone(),
         &password,
-        arguments.get(7).cloned(),
-        vec![RoomGrant {
-            room_id: arguments[4].clone(),
-            access: true,
-            publish,
-            subscribe,
-        }],
-        expires,
+        arguments.get(4).cloned(),
     )?;
     let record = serde_json::to_vec_pretty(&UsersFile {
-        version: 1,
+        version: 2,
         users: vec![user],
     })
     .map_err(|_| "cannot serialize DASS user")?;
@@ -308,8 +270,9 @@ fn create_admin_file(arguments: &[String]) -> Result<(), &'static str> {
         return Err("usage: dass-backend create-admin RECORD_FILE PASSWORD_FILE USERNAME");
     }
     let password = read_account_password(&arguments[2])?;
-    let user = create_user(arguments[3].clone(), &password, None, vec![], u32::MAX)?;
-    // Administrator hashes are separate from account authorization; no room grants.
+    let user = create_user(arguments[3].clone(), &password, None)?;
+    // Administrator hashes are separate from account authentication and grant
+    // no stream or room authority.
     let pair = format!("{}:{}", user.username, user.password_hash);
     let mut file = std::fs::OpenOptions::new()
         .write(true)

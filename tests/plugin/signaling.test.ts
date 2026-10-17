@@ -73,7 +73,7 @@ test("unexpected IDs, malformed messages and server closure fail closed", async 
 test("validated backend rejection survives socket cleanup without exposing request data", async () => {
     const socket = new Socket();
     const connection = await connect(socket);
-    const pending = connection.request({ type: "subscribe", session_id: "session", publisher_id: "private_source" }, "accepted");
+    const pending = connection.request({ type: "subscribe", session_id: "session", publisher_id: "private_source", approval_id: "private_approval" }, "accepted");
     socket.reply({ type: "rejected", code: "invalid_state" });
     await expect(pending).rejects.toThrow("rejected:invalid_state");
     expect(connection.closed.reason).toBeInstanceOf(SpikeSignalingError);

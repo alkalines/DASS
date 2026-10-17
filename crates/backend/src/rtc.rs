@@ -57,6 +57,17 @@ impl SpikeConfig {
         self.auto_lan_peers
     }
 
+    /// Clear one publisher's forwarding registration, including any queued
+    /// viewer packets, before its endpoint or session finishes teardown.
+    pub fn close_publisher(&self, publisher_id: &str) {
+        self.hub.close_publisher(publisher_id);
+    }
+
+    /// Clear one viewer's route and queued packets (publisher removal/block).
+    pub fn drop_viewer(&self, publisher_id: &str, subscriber_id: &str) {
+        self.hub.drop_viewer(publisher_id, subscriber_id);
+    }
+
     /// Disabled unless explicitly requested. This spike requires TLS signaling.
     pub fn from_env(tls_enabled: bool) -> Result<Option<Self>, &'static str> {
         Self::from_lookup(tls_enabled, |name| std::env::var(name).ok())

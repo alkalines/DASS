@@ -217,7 +217,7 @@ mod tests {
             config_with(&[
                 ("DASS_TLS_CERT_FILE", "/run/secrets/cert.pem"),
                 ("DASS_TLS_KEY_FILE", "/run/secrets/key.pem"),
-                ("DASS_USERS", r#"{"version":1,"users":[]}"#),
+                ("DASS_USERS", r#"{"version":2,"users":[]}"#),
             ])
             .unwrap()
             .users_json
@@ -244,7 +244,7 @@ mod tests {
 
     #[test]
     fn user_env_is_validated_bounded_and_exclusive_with_invite_file() {
-        let valid_users = r#"{"version":1,"users":[]}"#;
+        let valid_users = r#"{"version":2,"users":[]}"#;
         assert!(
             config_with(&[
                 ("DASS_INSECURE_LOCAL_DEV", "true"),

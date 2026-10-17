@@ -1,5 +1,7 @@
 //! Versioned authenticated control-plane contract, including experimental RTC negotiation.
 //! Identifiers are opaque DASS identifiers, never Discord authorization claims.
+//! Stream admission is publisher-controlled: approval request and decision IDs are
+//! server-generated, single-use and scoped to one stream instance and viewer account.
 
 use serde::{Deserialize, Serialize};
 
@@ -12,6 +14,10 @@ pub const SETUP_DEADLINE_MS: usize = 15_000;
 pub const MAX_DIRECTORY_SHARES: usize = 64;
 pub const MAX_PUBLISHER_DISPLAY_NAME_BYTES: usize = 128;
 pub const MAX_LOGIN_PASSWORD_BYTES: usize = 512;
+/// Pending view requests expire without a publisher decision; offline or silent
+/// publishers never admit a viewer.
+pub const VIEW_REQUEST_TIMEOUT_SECONDS: u32 = 60;
+pub const SESSION_LIFETIME_SECONDS: u32 = 600;
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -45,9 +51,30 @@ pub enum ClientOperation {
     EnableViewerPresence {
         session_id: String,
     },
+    /// An authenticated viewer asks a specific live publisher for admission.
+    /// The backend assigns the opaque pending request ID.
+    RequestView {
+        session_id: String,
+        publisher_id: String,
+    },
+    /// Only the authenticated publisher owner may decide. `request_id` is the
+    /// server-generated pending ID from the `view_request` push, not the
+    /// caller's message envelope ID.
+    ViewDecision {
+        session_id: String,
+        request_id: String,
+        decision: ViewDecisionKind,
+    },
+    /// Admission requires the approval ID from an approved `view_decision`.
     Subscribe {
         session_id: String,
         publisher_id: String,
+        approval_id: String,
+    },
+    /// Publisher withdrawal: removes every viewer session of one account.
+    RemoveViewer {
+        session_id: String,
+        viewer_id: String,
     },
     Offer {
         session_id: String,
@@ -85,6 +112,15 @@ pub enum ViewerPresenceChange {
 }
 
 #[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ViewDecisionKind {
+    Approve,
+    Deny,
+    /// Deny now and refuse further requests from this account on this stream.
+    Block,
+}
+
+#[derive(Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ServerOperation {
     Authenticated {
@@ -97,6 +133,33 @@ pub enum ServerOperation {
         room_id: String,
         publisher_ids: Vec<String>,
         publishers: Vec<PublisherMetadata>,
+    },
+    /// Direct response to `request_view`: the backend's pending request ID.
+    /// The pushed `view_decision` for this viewer echoes the same ID.
+    ViewRequestPending {
+        session_id: String,
+        request_id: String,
+    },
+    /// Pushed to the authenticated publisher when a viewer asks to watch.
+    /// `request_id` inside the operation is the pending approval ID.
+    ViewRequest {
+        session_id: String,
+        request_id: String,
+        viewer_id: String,
+        viewer_display_name: String,
+    },
+    /// Pushed to the viewer when the publisher decides. `approval_id` is set
+    /// only for an approval and is consumed by a single `subscribe`.
+    ViewDecision {
+        session_id: String,
+        request_id: String,
+        decision: ViewDecisionKind,
+        approval_id: String,
+    },
+    /// Pushed to the publisher when a pending request expires or is withdrawn.
+    ViewRequestClosed {
+        session_id: String,
+        request_id: String,
     },
     Accepted {
         session_id: String,
@@ -144,6 +207,8 @@ pub enum ErrorCode {
     E2eeUnavailable,
     Overloaded,
     InvalidState,
+    /// The publisher denied this view request or the viewer is blocked.
+    Denied,
     TransportUnavailable,
 }
 
@@ -191,10 +256,24 @@ impl ClientMessage {
             ClientOperation::Publish { session_id }
             | ClientOperation::EnableViewerPresence { session_id }
             | ClientOperation::Leave { session_id } => valid_id(session_id),
-            ClientOperation::Subscribe {
+            ClientOperation::RemoveViewer {
+                session_id,
+                viewer_id,
+            } => valid_id(session_id) && valid_id(viewer_id),
+            ClientOperation::ViewDecision {
+                session_id,
+                request_id,
+                ..
+            } => valid_id(session_id) && valid_id(request_id),
+            ClientOperation::RequestView {
                 session_id,
                 publisher_id,
             } => valid_id(session_id) && valid_id(publisher_id),
+            ClientOperation::Subscribe {
+                session_id,
+                publisher_id,
+                approval_id,
+            } => valid_id(session_id) && valid_id(publisher_id) && valid_id(approval_id),
             ClientOperation::Offer { session_id, sdp } => {
                 valid_id(session_id) && valid_text(sdp, 12_288)
             }
@@ -280,22 +359,51 @@ mod tests {
     }
 
     #[test]
-    fn publisher_presence_opt_in_requires_a_valid_session_identifier() {
-        let message = ClientMessage {
-            protocol_version: crate::PROTOCOL_VERSION,
-            request_id: "enable_presence".into(),
-            operation: ClientOperation::EnableViewerPresence {
+    fn approval_operations_require_valid_bounded_identifiers() {
+        for operation in [
+            ClientOperation::RequestView {
+                session_id: "viewer_session".into(),
+                publisher_id: "publisher_session".into(),
+            },
+            ClientOperation::ViewDecision {
                 session_id: "publisher_session".into(),
+                request_id: "approval".into(),
+                decision: ViewDecisionKind::Approve,
+            },
+            ClientOperation::Subscribe {
+                session_id: "viewer_session".into(),
+                publisher_id: "publisher_session".into(),
+                approval_id: "approval".into(),
+            },
+            ClientOperation::RemoveViewer {
+                session_id: "publisher_session".into(),
+                viewer_id: "alice".into(),
+            },
+        ] {
+            let message = ClientMessage {
+                protocol_version: crate::PROTOCOL_VERSION,
+                request_id: "r".into(),
+                operation,
+            };
+            assert!(message.is_valid());
+        }
+        for (field, invalid) in [
+            ("session", "discord/channel"),
+            ("session", ""),
+            ("session", &"x".repeat(65)),
+        ] {
+            assert!(!valid_id(invalid), "{field}");
+        }
+        let missing_approval = ClientMessage {
+            protocol_version: crate::PROTOCOL_VERSION,
+            request_id: "r".into(),
+            operation: ClientOperation::Subscribe {
+                session_id: "viewer_session".into(),
+                publisher_id: "publisher_session".into(),
+                approval_id: "not/an/approval".into(),
             },
         };
-        assert!(message.is_valid());
-        let invalid = ClientMessage {
-            operation: ClientOperation::EnableViewerPresence {
-                session_id: "discord/channel".into(),
-            },
-            ..message
-        };
-        assert!(!invalid.is_valid());
+        assert!(!missing_approval.is_valid());
     }
 
     #[test]
@@ -303,6 +411,44 @@ mod tests {
         for bytes in [b"{".to_vec(), vec![b' '; MAX_MESSAGE_BYTES + 1]] {
             assert!(matches!(parse_client_message(&bytes), Err(InvalidMessage)));
         }
+    }
+
+    #[test]
+    fn pushed_view_operations_are_bounded_server_notifications() {
+        let request = serde_json::to_value(ServerMessage {
+            protocol_version: crate::PROTOCOL_VERSION,
+            request_id: "server_view_request".into(),
+            operation: ServerOperation::ViewRequest {
+                session_id: "publisher_session".into(),
+                request_id: "pending_1".into(),
+                viewer_id: "alice".into(),
+                viewer_display_name: "Alice".into(),
+            },
+        })
+        .unwrap();
+        assert_eq!(
+            request,
+            serde_json::json!({
+                "protocol_version": 1,
+                "request_id": "server_view_request",
+                "operation": {
+                    "type": "view_request",
+                    "session_id": "publisher_session",
+                    "request_id": "pending_1",
+                    "viewer_id": "alice",
+                    "viewer_display_name": "Alice"
+                }
+            })
+        );
+        let decision = serde_json::to_value(ServerOperation::ViewDecision {
+            session_id: "viewer_session".into(),
+            request_id: "pending_1".into(),
+            decision: ViewDecisionKind::Approve,
+            approval_id: "approval_1".into(),
+        })
+        .unwrap();
+        assert_eq!(decision["type"], "view_decision");
+        assert_eq!(decision["decision"], "approve");
     }
 
     #[test]

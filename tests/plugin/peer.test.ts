@@ -91,6 +91,8 @@ class Socket extends EventTarget {
     static failOffer = false;
     static rejectSubscribe = false;
     static rejectPresence = false;
+    static denyView = false;
+    static denyDecision = false;
     protocol = "dass.v1";
     readyState = 1;
     bufferedAmount = 0;
@@ -101,12 +103,21 @@ class Socket extends EventTarget {
         const request = JSON.parse(message);
         this.operations.push(request.operation);
         let operation: unknown;
+        const pushed: Array<unknown> = [];
         switch (request.operation.type) {
             case "login": operation = { type: "authenticated", expires_at_unix_seconds: Math.floor(Date.now() / 1000) + 60 }; break;
             case "join": operation = { type: "joined", session_id: "session" }; break;
             case "publish": operation = { type: "accepted", session_id: "session" }; break;
             case "enable_viewer_presence": operation = Socket.rejectPresence ? { type: "rejected", code: "invalid_message" }
                 : { type: "accepted", session_id: "session" }; break;
+            case "request_view":
+                operation = Socket.denyView ? { type: "rejected", code: "denied" }
+                    : { type: "view_request_pending", session_id: "session", request_id: "pending_1" };
+                if (!Socket.denyView) pushed.push({ request_id: "server_view_decision", operation: {
+                    type: "view_decision", session_id: "session", request_id: "pending_1",
+                    decision: Socket.denyDecision ? "deny" : "approve", approval_id: Socket.denyDecision ? "" : "approval_1"
+                } });
+                break;
             case "subscribe": operation = Socket.rejectSubscribe ? { type: "rejected", code: "invalid_state" }
                 : { type: "accepted", session_id: "session" }; break;
             case "offer": operation = Socket.failOffer
@@ -114,9 +125,14 @@ class Socket extends EventTarget {
                 : { type: "answer", session_id: "session", sdp: "v=0\r\n" }; break;
             default: throw new Error("Unexpected operation");
         }
-        queueMicrotask(() => this.dispatchEvent(new MessageEvent("message", { data: JSON.stringify({
-            protocol_version: 1, request_id: request.request_id, operation
-        }) })));
+        queueMicrotask(() => {
+            this.dispatchEvent(new MessageEvent("message", { data: JSON.stringify({
+                protocol_version: 1, request_id: request.request_id, operation
+            }) }));
+            for (const push of pushed) this.dispatchEvent(new MessageEvent("message", { data: JSON.stringify({
+                protocol_version: 1, ...push as object
+            }) }));
+        });
     }
     close() { this.closes++; this.readyState = 3; }
 }
@@ -136,6 +152,8 @@ async function withBrowserDoubles(run: () => Promise<void>) {
     Socket.failOffer = false;
     Socket.rejectSubscribe = false;
     Socket.rejectPresence = false;
+    Socket.denyView = false;
+    Socket.denyDecision = false;
     for (const [name, value] of Object.entries(doubles)) Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
     try { await run(); } finally {
         for (const [name, descriptor] of originals) {
@@ -160,7 +178,7 @@ test("viewer reuses directory authentication without a second credential login",
     try {
         await connection.activate({ backendUrl: "https://dass.example", credential: "", roomId: "room", publisherId: "source", signaling });
         expect(Socket.instances).toHaveLength(1);
-        expect(Socket.instances[0].operations.map(operation => operation.type)).toEqual(["login", "join", "subscribe", "offer"]);
+        expect(Socket.instances[0].operations.map(operation => operation.type)).toEqual(["login", "join", "request_view", "subscribe", "offer"]);
         let changes = 0;
         connection.tracksChanged.addEventListener("change", () => { changes++; });
         Peer.instances[0].receive(new Track("video"));
@@ -329,7 +347,7 @@ test("viewer binds to the selected publisher and setup rejection tears down", as
     try {
         Socket.failOffer = true;
         await expect(connection.activate({ backendUrl: "https://dass.example", credential: "separate-dass-test", roomId: "room", publisherId: "publisher" })).rejects.toThrow("failed");
-        expect(Socket.instances[0].operations[2]).toEqual({ type: "subscribe", session_id: "session", publisher_id: "publisher" });
+        expect(Socket.instances[0].operations[3]).toEqual({ type: "subscribe", session_id: "session", publisher_id: "publisher", approval_id: "approval_1" });
         expect(connection.closed.aborted).toBe(true);
         expect(connection.closeMessage).toContain("offer:server:transport_failed");
         expect(Peer.instances[0].closes).toBe(1);
@@ -358,3 +376,18 @@ test("mDNS, IPv6, privileged ports and non-UDP candidates fail visibly", () => {
         ["udp", "999.1.2.3", "50000"], ["udp", "192.168.1.2", "65536"]
     ]) expect(() => gatheredCandidates(`a=candidate:1 1 ${protocol} 2130706431 ${address} ${port} typ host\r\n`)).toThrow();
 });
+
+test("viewer never subscribes when the publisher denies or the request is refused", async () => withBrowserDoubles(async () => {
+    for (const mode of ["deny", "reject"]) {
+        Socket.denyView = mode === "reject";
+        Socket.denyDecision = mode === "deny";
+        const connection = await SpikePeer.prepare({ experimental: true, signal: new AbortController().signal });
+        try {
+            await expect(connection.activate({ backendUrl: "https://dass.example", credential: "separate-dass-test", roomId: "room", publisherId: "publisher" })).rejects.toThrow();
+            const types = Socket.instances.at(-1)?.operations.map(operation => operation.type);
+            expect(types).not.toContain("subscribe");
+            expect(types).not.toContain("offer");
+            expect(connection.closed.aborted).toBe(true);
+        } finally { connection.close(); }
+    }
+}));

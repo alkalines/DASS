@@ -203,9 +203,22 @@ export class SpikePeer {
             const joined = await this.signaling.request({ type: "join", room_id: options.roomId, require_e2ee: false }, "joined");
             this.checkActive();
             if (joined.type !== "joined") throw new Error("DASS join failed.");
+            this.activationStage = options.publisherId ? "request_view" : "publish";
+            let approvalId = "";
+            if (options.publisherId) {
+                // Publisher-controlled admission: ask, then wait for the
+                // publisher's pushed decision. Denial or a closed request
+                // never proceeds to subscribe.
+                const decision = await this.signaling.requestView(joined.session_id, options.publisherId, this.closed);
+                this.checkActive();
+                if (decision.decision !== "approve" || !decision.approval_id) {
+                    throw new SpikeSignalingError("rejected:denied");
+                }
+                approvalId = decision.approval_id;
+            }
             this.activationStage = options.publisherId ? "subscribe" : "publish";
             const accepted = await this.signaling.request(options.publisherId
-                ? { type: "subscribe", session_id: joined.session_id, publisher_id: options.publisherId }
+                ? { type: "subscribe", session_id: joined.session_id, publisher_id: options.publisherId, approval_id: approvalId }
                 : { type: "publish", session_id: joined.session_id }, "accepted");
             this.checkActive();
             if (accepted.type !== "accepted" || accepted.session_id !== joined.session_id) throw new Error("DASS role does not match the session.");

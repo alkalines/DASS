@@ -25,14 +25,15 @@ panel have been removed. The target is the existing LIVE badge beside a
 participant, existing stream tile (including loading state), existing Watch
 action and existing sharing/Stop controls in both full-call and sidebar views.
 There must not be a separate normal-workflow DASS button or panel.
-Media context comes from the current call's channel ID, checked against backend
-grants; the client has no room selection field.
+Media context comes from the current call's channel ID as an opaque room
+identifier; the client has no room selection field. A Discord channel ID alone
+grants nothing: stream admission requires the publisher's live approval.
 
 ## Call discovery and watching integration
 
 After successful DASS login, `callDiscovery.ts` binds a directory-only
 `WatchController` to the current call through independently authenticated WSS.
-The backend must authorize that room; a Discord channel ID alone grants nothing.
+Rooms are discovery grouping only; listing supplies no media permission.
 Discovery polls every five seconds using the existing bounded directory protocol.
 It does not prepare ICE, create a decoder, request capture or start a native
 Discord subscription. Its connection is separate from publisher and viewer

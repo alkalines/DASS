@@ -23,6 +23,8 @@ export interface DassAuthentication {
 }
 
 export type ViewerPresence = Extract<ServerOperation, { type: "viewer_presence"; }>;
+export type ViewRequest = Extract<ServerOperation, { type: "view_request"; }>;
+export type ViewDecision = Extract<ServerOperation, { type: "view_decision"; }>;
 
 export function signalingUrl(baseUrl: string): string {
     let url: URL;
@@ -74,6 +76,10 @@ export class SpikeSignaling {
     private pending?: Pending<ServerOperation> & { requestId: string; expectedType: ServerOperation["type"]; };
     private expiryTimer?: ReturnType<typeof setTimeout>;
     private publisherPresence?: { sessionId: string; viewerCount: number; listener: (presence: ViewerPresence) => void; };
+    private viewRequestListener?: { sessionId: string; listener: (request: ViewRequest) => void; };
+    private viewRequestClosed?: { sessionId: string; requestId: string; listener: () => void; };
+    private viewDecisionListener?: { sessionId: string; requestId: string; listener: (decision: ViewDecision) => void; };
+    private earlyDecisions: ViewDecision[] = [];
     private readonly closedController = new AbortController();
     readonly closed = this.closedController.signal;
 
@@ -141,6 +147,43 @@ export class SpikeSignaling {
         if (!(event instanceof MessageEvent) || typeof event.data !== "string") return this.close("protocol");
         try {
             const message = parseServerMessage(event.data);
+            if (message.operation.type === "view_request") {
+                const update = message.operation;
+                const listener = this.viewRequestListener;
+                if (!listener || message.request_id !== "server_view_request" || update.session_id !== listener.sessionId
+                    || !update.request_id || !update.viewer_id) return this.close("protocol");
+                listener.listener(update);
+                return;
+            }
+            if (message.operation.type === "view_request_closed") {
+                const update = message.operation;
+                const closed = this.viewRequestClosed;
+                if (closed && message.request_id === "server_view_request_closed" && update.session_id === closed.sessionId
+                    && update.request_id === closed.requestId) {
+                    this.viewRequestClosed = undefined;
+                    closed.listener();
+                }
+                // A closed prompt for another request is informational; ignore it.
+                return;
+            }
+            if (message.operation.type === "view_decision") {
+                const update = message.operation;
+                const listener = this.viewDecisionListener;
+                // Decisions for unknown/expired requests are ignored; a forged
+                // matching decision still cannot create an approval server-side.
+                if (!listener || message.request_id !== "server_view_decision") {
+                    // A decision cannot create an approval client-side; buffer a
+                    // bounded few in case it raced ahead of its pending response.
+                    if (message.request_id === "server_view_decision" && this.earlyDecisions.length < 8) {
+                        this.earlyDecisions.push(update);
+                    }
+                    return;
+                }
+                if (update.session_id !== listener.sessionId || update.request_id !== listener.requestId) return this.close("protocol");
+                this.viewDecisionListener = undefined;
+                listener.listener(update);
+                return;
+            }
             if (message.operation.type === "viewer_presence") {
                 const presence = this.publisherPresence;
                 const update = message.operation;
@@ -181,6 +224,66 @@ export class SpikeSignaling {
         }
     }
 
+    /** Publisher opt-in: every pushed view request on this session reaches the listener. */
+    onViewRequests(sessionId: string, listener: (request: ViewRequest) => void) {
+        if (this.viewRequestListener) throw new Error("DASS view requests are already handled.");
+        this.viewRequestListener = { sessionId, listener };
+    }
+
+    /** Publisher decision for a pending request ID from a `view_request` push. */
+    async decideView(sessionId: string, requestId: string, decision: "approve" | "deny" | "block") {
+        const accepted = await this.request({ type: "view_decision", session_id: sessionId, request_id: requestId, decision }, "accepted");
+        if (accepted.type !== "accepted" || accepted.session_id !== sessionId) {
+            this.close("protocol");
+            throw new SpikeSignalingError("protocol");
+        }
+    }
+
+    /** Publisher withdrawal: removes every viewer session of one account. */
+    async removeViewer(sessionId: string, viewerId: string) {
+        const accepted = await this.request({ type: "remove_viewer", session_id: sessionId, viewer_id: viewerId }, "accepted");
+        if (accepted.type !== "accepted" || accepted.session_id !== sessionId) {
+            this.close("protocol");
+            throw new SpikeSignalingError("protocol");
+        }
+    }
+
+    /**
+     * Viewer asks to watch one publisher's stream and waits for its decision.
+     * Resolves with the server-pushed `view_decision`; `approval_id` is set on
+     * an approval and consumed by a single `subscribe`.
+     */
+    async requestView(sessionId: string, publisherId: string, signal?: AbortSignal): Promise<ViewDecision> {
+        const accepted = await this.request({ type: "request_view", session_id: sessionId, publisher_id: publisherId }, "view_request_pending");
+        const pendingId = (() => {
+            if (accepted.type !== "view_request_pending" || accepted.session_id !== sessionId || !accepted.request_id) {
+                this.close("protocol");
+                throw new SpikeSignalingError("protocol");
+            }
+            return accepted.request_id;
+        })();
+        return new Promise((resolve, reject) => {
+            const cleanup = () => {
+                this.viewDecisionListener = undefined;
+                this.closed.removeEventListener("abort", onClosed);
+                signal?.removeEventListener("abort", onClosed);
+            };
+            const onClosed = () => { cleanup(); reject(this.closed.reason ?? new SpikeSignalingError("cancelled")); };
+            this.viewDecisionListener = { sessionId, requestId: pendingId, listener: decision => {
+                cleanup();
+                resolve(decision);
+            } };
+            this.closed.addEventListener("abort", onClosed, { once: true });
+            signal?.addEventListener("abort", onClosed, { once: true });
+            const early = this.earlyDecisions.findIndex(decision => decision.request_id === pendingId && decision.session_id === sessionId);
+            if (early >= 0) {
+                const [decision] = this.earlyDecisions.splice(early, 1);
+                cleanup();
+                resolve(decision);
+            }
+        });
+    }
+
     request(operation: ClientOperation, expectedType: ServerOperation["type"]): Promise<ServerOperation> {
         if (!this.active || this.signal.aborted || this.socket.readyState !== 1 || this.pending || this.sequence >= 256) {
             return Promise.reject(new Error("DASS connection is unavailable or busy."));
@@ -209,6 +312,9 @@ export class SpikeSignaling {
         if (!this.active) return;
         this.active = false;
         this.publisherPresence = undefined;
+        this.viewRequestListener = undefined;
+        this.viewRequestClosed = undefined;
+        this.viewDecisionListener = undefined;
         clearTimeout(this.expiryTimer);
         this.socket.removeEventListener("open", this.onOpen);
         this.socket.removeEventListener("message", this.onMessage);

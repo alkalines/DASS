@@ -83,10 +83,12 @@ separating root and normal-user tooling runs without deleting caches or changing
 ownership. A denied update command leaves the old lockfile unchanged; subsequent
 locked checks/builds are expected to fail.
 
-New tests include valid/invalid/expired/revoked credentials, unauthorized rooms
-and roles, bounded hash costs, duplicate requests, exclusive credential leases,
+New tests include valid/invalid credentials, legacy-field fail-closed loading,
+bounded hash costs, duplicate requests, exclusive credential leases,
 room saturation/cleanup, exact Origin and query rejection, admission exhaustion,
-and network-level authenticated WSS with verified TLS 1.3 certificates.
+publisher-owned pending requests, single-use decisions, deny cooldown, block and
+removal withdrawal, and network-level authenticated WSS with verified TLS 1.3
+certificates.
 Network tests also exercise the login deadline, idle credential expiration,
 room reservation timeout and truthful discovery/readiness over HTTPS. Ephemeral
 test roots are trusted explicitly; there is no certificate-verification bypass.
@@ -113,37 +115,40 @@ an independent container run or security audit.
 
 ## Invite model and admin issuance
 
-The server reads a bounded, administrator-owned JSON file:
+The server reads a bounded, administrator-owned JSON file. Version-2 records
+authenticate service-wide: room grants, roles, scheduled expiration, revocation
+flags and login IP allowlists were removed. Stream admission is decided live by
+the publisher through approval requests, never by stored grants.
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "invites": [{
     "invite_id": "publisher_invite",
     "password_hash": "GENERATED_ARGON2ID_PHC_HASH",
-    "expires_at_unix_seconds": 1800000000,
-    "revoked": false,
-    "rooms": [{"room_id": "room_1", "access": true, "publish": true, "subscribe": false}]
+    "display_name": "Studio PC"
   }]
 }
 ```
 
-The placeholder hash is **not valid configuration**. The same executable's
-admin-only `create-invite` subcommand creates a 256-bit random secret and a random
+The placeholder hash is **not valid configuration**; `display_name` is optional.
+The same executable's admin-only `create-invite` subcommand creates a 256-bit
+random secret and a random
 16-byte salt. It writes an invite document and a separate credential file using
 create-new, mode 0600; it never prints the credential. Argon2id v19 is fixed to
 19,456 KiB, two passes, one lane, and a 32-byte output. Loading rejects other
 hash algorithms, salt/output lengths and costs before any verification. At most
 two blocking verifications run at once, including after a timed login is cancelled.
+Version-1 files or records still containing the removed fields fail closed; see
+the migration section in [lan-accounts.md](lan-accounts.md).
 
 After the locked build succeeds, create two distinct client invites:
 
 ```sh
 mkdir -m 700 .secrets
-export DASS_INVITE_EXPIRES="$(date -d '+1 day' +%s)"
-docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/workspace" dass-rust-tools cargo run --locked -p dass-backend -- create-invite .secrets/publisher-record.json .secrets/publisher-credential.txt publisher_invite room_1 publisher "$DASS_INVITE_EXPIRES"
-docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/workspace" dass-rust-tools cargo run --locked -p dass-backend -- create-invite .secrets/viewer-record.json .secrets/viewer-credential.txt viewer_invite room_1 viewer "$DASS_INVITE_EXPIRES"
-bun -e 'const fs = require("node:fs"); const documents = ["publisher", "viewer"].map(name => JSON.parse(fs.readFileSync(`.secrets/${name}-record.json`, "utf8"))); fs.writeFileSync(".secrets/invites.json", JSON.stringify({version: 1, invites: documents.flatMap(document => document.invites)}, null, 2), {mode: 0o600, flag: "wx"});'
+docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/workspace" dass-rust-tools cargo run --locked -p dass-backend -- create-invite .secrets/publisher-record.json .secrets/publisher-credential.txt publisher_invite "Publisher"
+docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/workspace" dass-rust-tools cargo run --locked -p dass-backend -- create-invite .secrets/viewer-record.json .secrets/viewer-credential.txt viewer_invite "Viewer"
+bun -e 'const fs = require("node:fs"); const documents = ["publisher", "viewer"].map(name => JSON.parse(fs.readFileSync(`.secrets/${name}-record.json`, "utf8"))); fs.writeFileSync(".secrets/invites.json", JSON.stringify({version: 2, invites: documents.flatMap(document => document.invites)}, null, 2), {mode: 0o600, flag: "wx"});'
 ```
 
 If `.secrets` already exists, retain it rather than overwriting/deleting anything.
@@ -154,12 +159,14 @@ Discord messages or command-line arguments. `.secrets/` is ignored by Git, but
 that is not a substitute for filesystem permissions or secure delivery. Do not
 mount the plaintext credential files into the backend.
 
-Credentials are scoped **reusable bearer credentials**, not identity proofs or
+Credentials are **reusable bearer credentials**, not identity proofs or
 single-use WebSocket tickets. One live connection per invite prevents concurrent
 credential reuse; duplicate request IDs and second login operations are rejected.
-Reconnect with a new WebSocket after the old lease closes is intentional. A stolen
-valid bearer credential can impersonate its holder once the lease is free; TLS,
-private distribution, short expiration and revocation remain essential. Do not
+Reconnect with a new WebSocket after the old lease closes is intentional. Sessions
+expire a fixed 600 seconds after authentication; containment is account removal
+or password reset, which disconnects every session. A stolen
+valid bearer credential can impersonate its holder once the lease is free; TLS
+and private distribution remain essential. Do not
 claim protection against bearer theft or arbitrary cross-connection credential replay.
 
 ## Configuration and local TLS testing
@@ -216,8 +223,12 @@ No GUI login/capture flow is wired to this server yet.
   cookies or Authorization header, and the `dass.v1` subprotocol. Credentials go
   only in a text `login` operation within five seconds of upgrade. Binary media,
   malformed/oversized JSON and unknown wire fields are rejected.
-- Room access, publish and subscribe permissions are checked separately on every
-  relevant operation. Required E2EE fails closed. By default authorized
+- Rooms are discovery grouping only; any authenticated session may join or list
+  any room. Stream admission is publisher-controlled: a viewer's `request_view`
+  is pushed to the owning publisher, whose `view_decision` (`approve`, `deny`,
+  `block`) is enforced single-use by the backend. Only an approval's opaque
+  `approval_id` permits `subscribe`; `remove_viewer` withdraws an account's
+  access. Required E2EE fails closed. By default authorized
   publish/subscribe, SDP and ICE operations return `transport_unavailable`.
   The subsequent explicit receive-only [RTC spike](rtc-spike.md) can reserve a
   publisher transport and process SDP/ICE, with passing Docker automated tests;
@@ -226,8 +237,11 @@ No GUI login/capture flow is wired to this server yet.
   locked builds were subsequently confirmed by the user, while real-client
   interoperability remains unverified.
 - Limits: 128 TCP connections including upgrades, 16 pending TLS handshakes,
-  128 WebSockets, 16 unauthenticated WebSockets, 256 invite records, 16 grants per
-  invite, 16 members per room, and one joined session per connection.
+  128 WebSockets, 16 unauthenticated WebSockets, 256 invite records,
+  16 members per room, and one joined session per connection. View-request
+  bounds are listed in [protocol.md](protocol.md) (64 global pending, 8 per
+  publisher, 4 per viewer account, 16 unused approvals per publisher, 60 s
+  request lifetime, 30 s deny cooldown).
 - TLS handshake and initial HTTP I/O deadlines are five seconds each. An entire
   connection I/O has a ten-minute maximum lifetime after TLS/plaintext acceptance
   (in addition to the bounded TLS handshake). HTTP handler
@@ -246,13 +260,15 @@ No GUI login/capture flow is wired to this server yet.
   (32,768 bytes by default). The new RTC spike independently bounds its temporary
   UDP batches. RAII releases room, invite and admission
   leases on disconnect/error/cancellation.
-- Expiration is checked on each operation and every 250 ms while idle, using both
-  wall time and a login-time monotonic deadline. Close delivery can add bounded
+- Session expiration is fixed at 600 seconds from authentication and checked on
+  each operation and every tick while idle, using both
+  wall time and a login-time monotonic deadline. There is no scheduled
+  account expiration or per-record revocation flag. Close delivery can add bounded
   send delays; the socket is then dropped even if the peer does not acknowledge.
 
-## Revocation and reload
+## Containment and reload
 
-Set `revoked: true`, remove a record, or reduce its grants in the admin file and
+Remove a record or change its hash in the admin file and
 signal the backend:
 
 ```sh

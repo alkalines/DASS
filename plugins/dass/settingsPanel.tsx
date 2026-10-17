@@ -99,6 +99,22 @@ export function SettingsPanel({ session, publisher, watching, discovery, localCa
         {advanced && <div className="vc-dass-advanced">
             <Paragraph>Advanced diagnostics only. The native watch tile/player hook is not implemented; this temporary test player is not the replacement UI.</Paragraph>
             <Paragraph role="status">{publishStatus.message}</Paragraph>
+            {(publishStatus.pendingViewers.length > 0 || publishStatus.approvedViewers.length > 0) && <div className="vc-dass-viewers">
+                {publishStatus.pendingViewers.map(pending => <div key={pending.requestId} className="vc-dass-viewer-row">
+                    <Paragraph>{pending.displayName} wants to watch your stream.</Paragraph>
+                    <div className="vc-dass-actions">
+                        <Button size="small" onClick={() => void publisher.decideView(pending.requestId, "approve")}>Approve</Button>
+                        <Button size="small" variant="secondary" onClick={() => void publisher.decideView(pending.requestId, "deny")}>Deny</Button>
+                        <Button size="small" variant="dangerPrimary" onClick={() => void publisher.decideView(pending.requestId, "block")}>Block</Button>
+                    </div>
+                </div>)}
+                {publishStatus.approvedViewers.map(viewer => <div key={viewer.viewerId} className="vc-dass-viewer-row">
+                    <Paragraph>{viewer.viewerId} is approved for this stream.</Paragraph>
+                    <div className="vc-dass-actions">
+                        <Button size="small" variant="dangerPrimary" onClick={() => void publisher.removeViewer(viewer.viewerId)}>Remove</Button>
+                    </div>
+                </div>)}
+            </div>}
             <div className="vc-dass-actions">
                 <Button disabled={["idle", "failed"].includes(publishStatus.phase)} onClick={() => publisher.reset()}>Stop capture</Button>
                 <Button onClick={() => { beforeAction(); session.clear(); void session.start(backendUrl); }}>Reconnect saved account</Button>

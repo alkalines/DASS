@@ -6,9 +6,11 @@ endpoint is implemented and passes user-run Docker control-plane tests; see
 [control-plane.md](control-plane.md). An opt-in authenticated RTC experiment now
 exists; its directory/viewer increment is described in [watching.md](watching.md).
 The control contract also defines an authenticated, publisher-scoped
-`viewer_presence` notification for accepted subscriptions and their cleanup.
-These types alone do not enable capture, authorize clients or establish
-readiness.
+`viewer_presence` notification for accepted subscriptions and their cleanup,
+plus a publisher-controlled admission flow (`request_view`, `view_decision`,
+`remove_viewer`) where the backend relays and enforces decisions but never
+grants viewership itself. These types alone do not enable capture, authorize
+clients or establish readiness.
 
 ## Generate and validate
 
@@ -49,22 +51,53 @@ or message bodies in logs or error text.
 
 The intended connection sequence is:
 
-1. Send `login` as the first operation within five seconds, with a separate DASS
-   credential in the body, never in the URL. Credential syntax here is only a
-   bounded string; the new server increment adds issuance, verification, expiration
-   and revocation, covered by passing Docker control-plane tests.
-2. After `authenticated`, request `join` with a room ID and explicit
-   `require_e2ee`. Room access must be authorized separately from publishing and
-   subscribing. Required E2EE must be rejected while E2EE is unavailable.
-   Before joining, `directory` with `room_id` returns up to 64 `publisher_ids`
-   only with access and subscribe grants. The response echoes the room and request
-   ID. There is no client update operation. Entries come from connected,
-   server-owned publishers; expired/unauthorized publishers are filtered.
-3. After `joined`, use its session ID for `publish` or `subscribe`. A subscription
-   targets a server-issued publisher ID in the authorized room. Recheck credential
-   validity and the specific permission on **every** operation. No client-provided
-   Discord/channel identity participates in permission decisions. A publisher
-   opts in on its authenticated connection after `publish` is accepted:
+1. Send `login` or `account_login` as the first operation within five seconds,
+   with a separate DASS credential in the body, never in the URL. Authentication
+   is service-wide: there are no room grants, roles, scheduled expirations,
+   revocation flags or login IP allowlists. Sessions last at most
+   `SESSION_LIFETIME_SECONDS` (600 s) from authentication; account removal or
+   password reset is the only containment, and any policy reload closes all
+   sessions.
+2. After `authenticated`, request `join` with an opaque room ID and explicit
+   `require_e2ee`. Rooms are discovery grouping only; any authenticated client
+   may join or list any room. Required E2EE must be rejected while E2EE is
+   unavailable. `directory` with `room_id` returns up to 64 live
+   `publisher_ids` with display names in that room. There is no client update
+   operation. Entries come from connected, server-owned publishers.
+3. After `joined`, use its session ID for `publish` or the admission flow.
+   Publishing registers a live stream entry keyed to the publisher's session
+   and account. Watching is **publisher-controlled**:
+
+   - The viewer sends `request_view` with its session ID and a target
+     `publisher_id` in the same room. The backend answers
+     `view_request_pending` with a server-generated pending request ID and
+     pushes the publisher an unsolicited `view_request` (stable envelope ID
+     `server_view_request`) carrying the viewer's account ID and display name.
+     Pending requests expire after `VIEW_REQUEST_TIMEOUT_SECONDS` (60 s), are
+     bounded globally (64), per publisher (8) and per viewer account (4), and
+     duplicate prompts from one account to one stream never queue.
+   - Only the publisher session owning the stream may send `view_decision`
+     referencing that pending request ID: `approve`, `deny` or `block`. The
+     decision is single-use. The viewer receives a pushed `view_decision`
+     (stable envelope ID `server_view_decision`); on `approve` it carries an
+     opaque `approval_id`. `deny` imposes a 30 s cooldown on further requests
+     from that account on this stream; `block` additionally refuses all future
+     requests and terminates that account's existing viewer sessions, unused
+     approvals and pending prompts on this stream. An expired or withdrawn
+     request pushes `view_request_closed` (stable envelope ID
+     `server_view_request_closed`) to the publisher.
+   - `subscribe` requires the `approval_id`. The backend consumes it exactly
+     once and only for the stream, viewer session and account it names; a
+     forged, stale or mismatched ID is rejected. The publisher can withdraw an
+     account at any time with `remove_viewer` (`viewer_id` is the viewer's
+     account ID), which terminates that account's viewer sessions, unused
+     approvals and pending prompts and drops its media route immediately.
+   - A publisher going offline or ending its session closes every pending
+     request (viewers see a denial), every approved viewer connection and the
+     forwarding route. Approvals never transfer to a new stream instance.
+
+   A publisher opts in on its authenticated connection after `publish` is
+   accepted:
 
    ```json
    {"type":"enable_viewer_presence","session_id":"publisher_session"}
@@ -125,16 +158,26 @@ structural parsers.
 | Members per room | 16 |
 | Directory entries | 64 (one live publisher in the current RTC experiment) |
 | Queued presence messages per publisher | 32 |
+| Pending view requests backend-wide | 64 |
+| Pending view requests per publisher | 8 |
+| Pending view requests per viewer account | 4 |
+| Unused approvals per publisher | 16 |
+| View request lifetime | 60 s |
+| Deny cooldown per account per stream | 30 s |
+| Session lifetime from authentication | 600 s |
 | Login deadline | 5,000 ms |
 | RTC setup deadline after acceptance | 15,000 ms |
 
 Strings must be nonempty and contain no NUL. The parsers enforce message and field
 bounds only. The new server owner implements session/room admission, bounded
-replay storage, login/reservation deadlines and lease cleanup, covered by passing
-Docker control-plane tests. Request responses are sent synchronously with a
-one-second send bound; publisher presence uses the bounded queue above. If that
+replay storage, login/reservation deadlines, publisher-owned view-request
+lifecycle and lease cleanup, covered by passing Docker control-plane tests.
+Request responses are sent synchronously with a
+one-second send bound; publisher pushes (presence, view requests, decisions,
+request closes) share the bounded queue above. If that
 queue fills, the owning publisher connection is closed as overloaded rather than
-silently losing count changes. RTC queues/setup remain experimental. Connection
+silently losing count changes or admission events. RTC queues/setup remain
+experimental. Connection
 admission counts unauthenticated connections and bounds socket/handshake lifetime;
 see [control-plane.md](control-plane.md) for the exact current limits.
 

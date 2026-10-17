@@ -3,8 +3,8 @@
 
 use crate::{
     auth::{
-        InviteStore, MAX_USERS, MAX_USERS_FILE_BYTES, RoomGrant, User, UsersFile, create_user,
-        valid_identifier, validate_user_fields, validated_hash,
+        InviteStore, MAX_USERS, MAX_USERS_FILE_BYTES, User, UsersFile, create_user,
+        validate_user_fields, validated_hash,
     },
     signaling::SignalingState,
 };
@@ -19,10 +19,9 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     fs::{File, OpenOptions},
     io::{Read, Write},
-    net::IpAddr,
     os::unix::fs::OpenOptionsExt,
     path::PathBuf,
     sync::{Arc, Mutex},
@@ -37,7 +36,6 @@ const MAX_DOCUMENT_BYTES: usize = MAX_USERS_FILE_BYTES + 32_768;
 pub struct AdminDocument {
     version: u16,
     users: Vec<User>,
-    blocked_rooms: HashSet<String>,
 }
 
 impl AdminDocument {
@@ -59,7 +57,6 @@ impl AdminDocument {
                 let document = Self {
                     version: file.version,
                     users: file.users,
-                    blocked_rooms: HashSet::new(),
                 };
                 document.store()?;
                 document.save(path)?;
@@ -72,21 +69,17 @@ impl AdminDocument {
     }
 
     pub fn store(&self) -> Result<InviteStore, &'static str> {
-        if self.version != 1
-            || self.blocked_rooms.len() > 256
-            || self
-                .blocked_rooms
-                .iter()
-                .any(|room| !valid_identifier(room))
-        {
-            return Err("invalid panel room policy");
+        // Version 2 removes room grants and the removed login controls; older
+        // documents fail closed rather than silently changing access.
+        if self.version != 2 {
+            return Err("invalid panel data version");
         }
         let bytes = serde_json::to_vec(&UsersFile {
-            version: 1,
+            version: 2,
             users: self.users.clone(),
         })
         .map_err(|_| "invalid account policy")?;
-        Ok(InviteStore::from_users_bytes(&bytes)?.with_blocked_rooms(self.blocked_rooms.clone()))
+        InviteStore::from_users_bytes(&bytes)
     }
 
     fn save(&self, path: &std::path::Path) -> Result<(), &'static str> {
@@ -204,7 +197,6 @@ pub fn router(state: AdminState) -> Router {
             axum::routing::put(save_user).delete(remove_user),
         )
         .route("/admin/api/status", get(status))
-        .route("/admin/api/rooms/{room_id}", axum::routing::put(save_room))
         .route("/admin/api/disconnect", post(disconnect))
         .route_layer(middleware::from_fn_with_state(state.clone(), authenticate))
         .with_state(state)
@@ -387,29 +379,15 @@ async fn users(State(state): State<AdminState>) -> Response {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
     let users: Vec<_> = document.users.iter().map(|user| serde_json::json!({
-        "username": user.username, "display_name": user.display_name, "expires_at_unix_seconds": user.expires_at_unix_seconds,
-        "revoked": user.revoked, "rooms": user.rooms, "allowed_ips": user.allowed_ips,
+        "username": user.username, "display_name": user.display_name,
     })).collect();
     Json(users).into_response()
 }
 
 async fn status(State(state): State<AdminState>) -> Response {
-    let Ok(mut snapshot) = state.signaling.admin_snapshot() else {
+    let Ok(snapshot) = state.signaling.admin_snapshot() else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
-    let Ok(document) = state.document.try_lock() else {
-        return StatusCode::SERVICE_UNAVAILABLE.into_response();
-    };
-    snapshot["blocked_rooms"] = serde_json::json!(document.blocked_rooms);
-    snapshot["configured_rooms"] = serde_json::json!(
-        document
-            .users
-            .iter()
-            .flat_map(|user| user.rooms.iter())
-            .filter(|grant| grant.room_id != "*")
-            .map(|grant| &grant.room_id)
-            .collect::<HashSet<_>>()
-    );
     Json(snapshot).into_response()
 }
 
@@ -418,10 +396,6 @@ async fn status(State(state): State<AdminState>) -> Response {
 struct UserEdit {
     password: Option<String>,
     display_name: Option<String>,
-    expires_at_unix_seconds: u32,
-    revoked: bool,
-    rooms: Vec<RoomGrant>,
-    allowed_ips: Vec<IpAddr>,
 }
 
 async fn save_user(
@@ -429,13 +403,7 @@ async fn save_user(
     Path(username): Path<String>,
     Json(edit): Json<UserEdit>,
 ) -> Response {
-    if let Err(error) = validate_user_fields(
-        &username,
-        edit.display_name.as_deref(),
-        &edit.rooms,
-        edit.expires_at_unix_seconds,
-        &edit.allowed_ips,
-    ) {
+    if let Err(error) = validate_user_fields(&username, edit.display_name.as_deref()) {
         return (StatusCode::BAD_REQUEST, error).into_response();
     }
     mutate(state, move |document| {
@@ -448,23 +416,13 @@ async fn save_user(
         }
         let mut user = if let Some(password) = edit.password.filter(|password| !password.is_empty())
         {
-            create_user(
-                username,
-                &password,
-                edit.display_name.clone(),
-                edit.rooms.clone(),
-                edit.expires_at_unix_seconds,
-            )?
+            create_user(username, &password, edit.display_name.clone())?
         } else {
             position
                 .map(|index| document.users[index].clone())
                 .ok_or("new users require a password")?
         };
         user.display_name = edit.display_name;
-        user.expires_at_unix_seconds = edit.expires_at_unix_seconds;
-        user.revoked = edit.revoked;
-        user.rooms = edit.rooms;
-        user.allowed_ips = edit.allowed_ips;
         if let Some(index) = position {
             document.users[index] = user;
         } else {
@@ -483,31 +441,6 @@ async fn remove_user(State(state): State<AdminState>, Path(username): Path<Strin
             .position(|user| user.username == username)
             .ok_or("user not found")?;
         document.users.remove(index);
-        Ok(())
-    })
-    .await
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RoomEdit {
-    blocked: bool,
-}
-
-async fn save_room(
-    State(state): State<AdminState>,
-    Path(room_id): Path<String>,
-    Json(edit): Json<RoomEdit>,
-) -> Response {
-    if !valid_identifier(&room_id) {
-        return StatusCode::BAD_REQUEST.into_response();
-    }
-    mutate(state, move |document| {
-        if edit.blocked {
-            document.blocked_rooms.insert(room_id);
-        } else {
-            document.blocked_rooms.remove(&room_id);
-        }
         Ok(())
     })
     .await
@@ -565,16 +498,9 @@ mod tests {
     fn fixture() -> (TestDirectory, AdminState, watch::Receiver<Arc<InviteStore>>) {
         let directory = TestDirectory::new();
         let path = directory.0.join("policy.json");
-        let document = AdminDocument::load_or_seed(&path, r#"{"version":1,"users":[]}"#).unwrap();
+        let document = AdminDocument::load_or_seed(&path, r#"{"version":2,"users":[]}"#).unwrap();
         let (sender, receiver) = watch::channel(Arc::new(document.store().unwrap()));
-        let user = create_user(
-            "admin".into(),
-            "a long admin password",
-            None,
-            vec![],
-            u32::MAX,
-        )
-        .unwrap();
+        let user = create_user("admin".into(), "a long admin password", None).unwrap();
         let state = AdminState::new(
             HashMap::from([("admin".into(), user.password_hash)]),
             document,
@@ -664,9 +590,7 @@ mod tests {
         let (directory, state, receiver) = fixture();
         let app = router(state);
         let edit = serde_json::json!({
-            "password": "short-value", "display_name": "Test", "expires_at_unix_seconds": u32::MAX,
-            "revoked": false, "allowed_ips": [],
-            "rooms": [{"room_id": "*", "access": true, "publish": true, "subscribe": true}]
+            "password": "short-value", "display_name": "Test"
         });
         let response = app
             .clone()
@@ -687,7 +611,7 @@ mod tests {
         assert!(!receiver.has_changed().unwrap());
         let restored = AdminDocument::load_or_seed(
             &directory.0.join("policy.json"),
-            r#"{"version":1,"users":[]}"#,
+            r#"{"version":2,"users":[]}"#,
         )
         .unwrap();
         assert!(restored.users.is_empty());
@@ -697,8 +621,7 @@ mod tests {
     async fn account_crud_persists_without_exposing_passwords_and_notifies_sessions() {
         let (directory, state, mut receiver) = fixture();
         let app = router(state);
-        let edit = serde_json::json!({"password":"a long user password", "display_name":"Alice", "expires_at_unix_seconds":u32::MAX,
-            "revoked":false, "rooms":[{"room_id":"room_1","access":true,"publish":true,"subscribe":true}], "allowed_ips":["192.168.1.20"]});
+        let edit = serde_json::json!({"password":"a long user password", "display_name":"Alice"});
         let response = app
             .clone()
             .oneshot(request(
@@ -712,12 +635,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
         assert!(receiver.has_changed().unwrap());
         let store = receiver.borrow_and_update().clone();
-        assert!(
-            store
-                .verify_account("alice", "a long user password", 99)
-                .is_ok()
-        );
-        assert!(!store.permits_ip("alice", Some("192.168.1.21".parse().unwrap())));
+        assert!(store.verify_account("alice", "a long user password").is_ok());
         let response = app
             .clone()
             .oneshot(request("/admin/api/users", "GET", true, ""))
@@ -729,19 +647,19 @@ mod tests {
         assert!(!text.contains("argon2"));
         let restored = AdminDocument::load_or_seed(
             &directory.0.join("policy.json"),
-            r#"{"version":1,"users":[]}"#,
+            r#"{"version":2,"users":[]}"#,
         )
         .unwrap();
         assert!(
             restored
                 .store()
                 .unwrap()
-                .verify_account("alice", "a long user password", 99)
+                .verify_account("alice", "a long user password")
                 .is_ok()
         );
+        // Password reset replaces the credential and closes live sessions.
         let mut edit = edit;
-        edit["password"] = serde_json::Value::Null;
-        edit["revoked"] = true.into();
+        edit["password"] = serde_json::json!("a better user password");
         assert_eq!(
             app.clone()
                 .oneshot(request(
@@ -755,12 +673,9 @@ mod tests {
                 .status(),
             StatusCode::NO_CONTENT
         );
-        assert!(
-            receiver
-                .borrow_and_update()
-                .verify_account("alice", "a long user password", 99)
-                .is_err()
-        );
+        let store = receiver.borrow_and_update().clone();
+        assert!(store.verify_account("alice", "a long user password").is_err());
+        assert!(store.verify_account("alice", "a better user password").is_ok());
         assert_eq!(
             app.oneshot(request("/admin/api/users/alice", "DELETE", true, ""))
                 .await
@@ -771,7 +686,7 @@ mod tests {
         assert!(
             AdminDocument::load_or_seed(
                 &directory.0.join("policy.json"),
-                r#"{"version":1,"users":[]}"#
+                r#"{"version":2,"users":[]}"#
             )
             .unwrap()
             .users
@@ -780,42 +695,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn room_blocks_persist_and_disconnect_notifications_are_explicit() {
-        let (directory, state, mut receiver) = fixture();
+    async fn disconnect_notifications_are_explicit_and_room_controls_are_gone() {
+        let (_directory, state, mut receiver) = fixture();
         let app = router(state);
-        let response = app
-            .clone()
-            .oneshot(request(
-                "/admin/api/rooms/room_1",
-                "PUT",
-                true,
-                r#"{"blocked":true}"#,
-            ))
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::NO_CONTENT);
-        assert!(receiver.has_changed().unwrap());
-        receiver.borrow_and_update();
-        let restored = AdminDocument::load_or_seed(
-            &directory.0.join("policy.json"),
-            r#"{"version":1,"users":[]}"#,
-        )
-        .unwrap();
-        assert!(restored.blocked_rooms.contains("room_1"));
+        // Room block/unblock controls were removed with room authority; rooms
+        // are a read-only grouping view.
         assert_eq!(
             app.clone()
                 .oneshot(request(
                     "/admin/api/rooms/room_1",
                     "PUT",
                     true,
-                    r#"{"blocked":false}"#
+                    r#"{"blocked":true}"#,
                 ))
                 .await
                 .unwrap()
                 .status(),
-            StatusCode::NO_CONTENT
+            StatusCode::NOT_FOUND
         );
-        receiver.borrow_and_update();
         assert!(!receiver.has_changed().unwrap());
         assert_eq!(
             // Keep the router's watch sender alive through the notification assertion.
@@ -834,8 +731,23 @@ mod tests {
         let directory = TestDirectory::new();
         let path = directory.0.join("policy.json");
         std::fs::write(&path, "not-json").unwrap();
-        assert!(AdminDocument::load_or_seed(&path, r#"{"version":1,"users":[]}"#).is_err());
+        assert!(AdminDocument::load_or_seed(&path, r#"{"version":2,"users":[]}"#).is_err());
         assert_eq!(std::fs::read_to_string(path).unwrap(), "not-json");
+    }
+
+    #[test]
+    fn legacy_policy_documents_fail_closed_instead_of_silent_migration() {
+        let directory = TestDirectory::new();
+        let path = directory.0.join("policy.json");
+        // Version-1 documents carried room grants, expiration, revocation and
+        // login IP allowlists. They must not be reinterpreted or widened.
+        for body in [
+            r#"{"version":1,"users":[],"blocked_rooms":[]}"#,
+            r#"{"version":2,"users":[],"blocked_rooms":[]}"#,
+        ] {
+            std::fs::write(&path, body).unwrap();
+            assert!(AdminDocument::load_or_seed(&path, r#"{"version":2,"users":[]}"#).is_err());
+        }
     }
 
     #[test]
@@ -864,14 +776,7 @@ mod tests {
 
     #[test]
     fn admin_hashes_require_fixed_cost_and_unique_identities() {
-        let user = create_user(
-            "admin".into(),
-            "a long admin password",
-            None,
-            vec![],
-            u32::MAX,
-        )
-        .unwrap();
+        let user = create_user("admin".into(), "a long admin password", None).unwrap();
         let pair = format!("admin:{}", user.password_hash);
         assert_eq!(parse_credentials(&pair).unwrap().len(), 1);
         for input in [

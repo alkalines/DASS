@@ -15,8 +15,15 @@ function fixture() {
     let deny = false;
     let failure: SpikeSignalingError | undefined;
     let presenceListener: ((presence: ViewerPresence) => void) | undefined;
+    let viewRequestListener: ((request: { request_id: string; viewer_id: string; viewer_display_name: string; }) => void) | undefined;
+    const decisions: Array<{ requestId: string; decision: string; }> = [];
+    const removals: string[] = [];
     const signalingClosed = new AbortController();
-    const signaling = { closed: signalingClosed.signal, close: () => signalingClosed.abort() } as unknown as SpikeSignaling;
+    const signaling = { closed: signalingClosed.signal, close: () => signalingClosed.abort(),
+        onViewRequests: (_session: string, listener: typeof viewRequestListener) => { viewRequestListener = listener; },
+        decideView: async (_session: string, requestId: string, decision: string) => { decisions.push({ requestId, decision }); },
+        removeViewer: async (_session: string, viewerId: string) => { removals.push(viewerId); }
+    } as unknown as SpikeSignaling;
     const peerClosed = new AbortController();
     const peer = { closed: peerClosed.signal, candidates: ["candidate:1 1 UDP 1 192.168.1.2 50000 typ host"],
         closeMessage: "Source ended.", close: () => peerClosed.abort(), activate: async (options: any) => {
@@ -41,6 +48,8 @@ function fixture() {
     controller.start();
     return { session, controller, bridge, events, peer, lease, signalingClosed, releases: () => releases,
         presence: (change: ViewerPresence["change"], viewerCount: number) => presenceListener?.({ type: "viewer_presence", session_id: "publisher_session", change, viewer_count: viewerCount }),
+        request: (request: { request_id: string; viewer_id: string; viewer_display_name: string; }) => viewRequestListener?.(request),
+        decisions, removals,
         deny: () => { deny = true; }, failConnection: (error: SpikeSignalingError) => { failure = error; }, exit: () => { context = undefined; controller.reset(); } };
 }
 
@@ -314,4 +323,23 @@ test("DASS selection consumes native callback even when publishing fails", () =>
     select("discord");
     expect(dass).toBe(1);
     expect(native).toBe(0);
+});
+
+test("publisher sees pending view requests and decides them manually", async () => {
+    const f = fixture();
+    try {
+        await f.controller.publish("https://dass.example", f.bridge);
+        expect(f.controller.getSnapshot().phase).toBe("publishing");
+        f.request({ request_id: "req_1", viewer_id: "alice", viewer_display_name: "Alice" });
+        expect(f.controller.getSnapshot().pendingViewers).toEqual([
+            { requestId: "req_1", viewerId: "alice", displayName: "Alice" }
+        ]);
+        await f.controller.decideView("req_1", "approve");
+        expect(f.decisions).toEqual([{ requestId: "req_1", decision: "approve" }]);
+        expect(f.controller.getSnapshot().pendingViewers).toEqual([]);
+        expect(f.controller.getSnapshot().approvedViewers).toEqual([{ viewerId: "alice" }]);
+        await f.controller.removeViewer("alice");
+        expect(f.removals).toEqual(["alice"]);
+        expect(f.controller.getSnapshot().approvedViewers).toEqual([]);
+    } finally { f.controller.stop(); }
 });

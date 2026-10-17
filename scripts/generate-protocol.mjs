@@ -18,14 +18,17 @@ const discovery = readFileSync(new URL("../crates/protocol/src/lib.rs", import.m
 const version = /pub const PROTOCOL_VERSION: u16 = (\d+);/.exec(discovery);
 if (!version) throw new Error("Missing protocol version");
 output += `export const PROTOCOL_VERSION = ${version[1]};\n`;
-for (const match of source.matchAll(/pub const (\w+): usize = ([\d_]+);/g)) {
+for (const match of source.matchAll(/pub const (\w+): (?:usize|u32) = ([\d_]+);/g)) {
     output += `export const ${match[1]} = ${match[2].replaceAll("_", "")};\n`;
 }
 for (const match of source.matchAll(/pub struct (\w+) \{([^}]+)\}/g)) {
     output += `\nexport type ${match[1]} = { ${fields(match[2])} };\n`;
 }
 for (const match of source.matchAll(/pub enum (\w+) \{([\s\S]*?)\n\}/g)) {
-    const variants = [...match[2].matchAll(/(\w+)(?: \{([^}]+)\})?,/g)];
+    // Enum bodies contain no braces, so only the struct regex's `[^}]+` can
+    // over-read into a following enum. Stop at the first pub-item line.
+    const body = match[2].split(/\n\s*(?:pub |#\[)/)[0];
+    const variants = [...body.matchAll(/^\s*(\w+)(?: \{([^}]+)\})?,/gm)];
     const tagged = variants.some(variant => variant[2]);
     output += `\nexport type ${match[1]} =\n${variants.map(variant => tagged
         ? `    | { type: "${snakeCase(variant[1])}"; ${fields(variant[2] ?? "")} }`

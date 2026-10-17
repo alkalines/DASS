@@ -1,5 +1,7 @@
 import { type ClientMessage, MAX_DIRECTORY_SHARES, MAX_LOGIN_PASSWORD_BYTES, MAX_MESSAGE_BYTES, MAX_PUBLISHER_DISPLAY_NAME_BYTES, MAX_ROOM_MEMBERS, PROTOCOL_VERSION, type ServerMessage } from "./signaling";
 
+const pushedRequestIds = ["server_view_request", "server_view_decision", "server_view_request_closed", "server_viewer_presence"];
+
 const encoder = new TextEncoder();
 const identifier = (value: unknown) => typeof value === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(value);
 const text = (maximumBytes: number) => (value: unknown) => typeof value === "string"
@@ -20,7 +22,10 @@ const clientShapes: Record<string, Shape> = {
     directory: { room_id: identifier },
     publish: { session_id: identifier },
     enable_viewer_presence: { session_id: identifier },
-    subscribe: { session_id: identifier, publisher_id: identifier },
+    request_view: { session_id: identifier, publisher_id: identifier },
+    view_decision: { session_id: identifier, request_id: identifier, decision: member(["approve", "deny", "block"]) },
+    subscribe: { session_id: identifier, publisher_id: identifier, approval_id: identifier },
+    remove_viewer: { session_id: identifier, viewer_id: identifier },
     offer: { session_id: identifier, sdp: text(12288) },
     ice: { session_id: identifier, candidate: text(2048) },
     leave: { session_id: identifier }
@@ -35,12 +40,18 @@ const serverShapes: Record<string, Shape> = {
             publisher_id: identifier,
             display_name: displayName
         })) },
+    view_request_pending: { session_id: identifier, request_id: identifier },
+    view_request: { session_id: identifier, request_id: identifier, viewer_id: identifier,
+        viewer_display_name: displayName },
+    view_decision: { session_id: identifier, request_id: identifier,
+        decision: member(["approve", "deny", "block"]), approval_id: value => value === "" || identifier(value) },
+    view_request_closed: { session_id: identifier, request_id: identifier },
     accepted: { session_id: identifier },
     answer: { session_id: identifier, sdp: text(12288) },
     ice: { session_id: identifier, candidate: text(2048) },
     viewer_presence: { session_id: identifier, change: member(["joined", "left"]), viewer_count: viewerCount },
     closed: { session_id: identifier, reason: member(["left", "expired", "revoked", "setup_timeout", "overloaded", "transport_failed"]) },
-    rejected: { code: member(["invalid_message", "unsupported_version", "unauthorized", "replay", "e2ee_unavailable", "overloaded", "invalid_state", "transport_unavailable"]) }
+    rejected: { code: member(["invalid_message", "unsupported_version", "unauthorized", "replay", "e2ee_unavailable", "overloaded", "invalid_state", "denied", "transport_unavailable"]) }
 };
 
 function record(value: unknown): value is Record<string, unknown> {
@@ -70,6 +81,9 @@ function parse(message: string, shapes: Record<string, Shape>): unknown {
                 const publishers = operation.publishers as Array<{ publisher_id: string; display_name: string; }>;
                 return ids.length === publishers.length
                     && ids.every((id, index) => id === publishers[index].publisher_id);
+            }
+            if (shapes === serverShapes && operation.type === "view_decision") {
+                return operation.decision !== "approve" || (operation.approval_id as string).length > 0;
             }
             if (shapes === serverShapes && operation.type === "viewer_presence") {
                 return operation.change !== "joined" || (operation.viewer_count as number) > 0;

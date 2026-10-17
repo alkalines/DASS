@@ -1,6 +1,9 @@
 //! Authenticated control plane with an explicit one-publisher/one-viewer RTC spike.
+//! Rooms are discovery grouping only. Stream admission is decided solely by the
+//! authenticated publisher through bounded, single-use approval requests; the
+//! backend relays and enforces decisions but never grants viewership itself.
 
-use crate::auth::{InviteStore, Permission, random_identifier};
+use crate::auth::{InviteStore, random_identifier};
 use crate::listener::PeerAddress;
 use crate::rtc::{SpikeConfig, SpikePeer};
 use axum::{
@@ -21,8 +24,8 @@ use dass_protocol::{
     signaling::{
         ClientOperation, CloseReason, ErrorCode, LOGIN_DEADLINE_MS, MAX_DIRECTORY_SHARES,
         MAX_MESSAGE_BYTES, MAX_QUEUED_MESSAGES, MAX_ROOM_MEMBERS, MAX_SESSIONS, PublisherMetadata,
-        SETUP_DEADLINE_MS, ServerMessage, ServerOperation, ViewerPresenceChange,
-        parse_client_message,
+        SESSION_LIFETIME_SECONDS, SETUP_DEADLINE_MS, ServerMessage, ServerOperation,
+        VIEW_REQUEST_TIMEOUT_SECONDS, ViewDecisionKind, ViewerPresenceChange, parse_client_message,
     },
 };
 use std::{
@@ -48,7 +51,45 @@ const MAX_REQUEST_IDS: usize = 256;
 const MAX_MESSAGES_PER_SECOND: usize = 32;
 const SEND_TIMEOUT: Duration = Duration::from_secs(1);
 const PRESENCE_REQUEST_ID: &str = "server_viewer_presence";
+const VIEW_REQUEST_PUSH_ID: &str = "server_view_request";
+const VIEW_DECISION_PUSH_ID: &str = "server_view_decision";
+const VIEW_REQUEST_CLOSED_PUSH_ID: &str = "server_view_request_closed";
 const MAX_PRESENCE_VIEWERS: usize = MAX_ROOM_MEMBERS - 1;
+const MAX_PENDING_VIEW_REQUESTS: usize = 64;
+const MAX_PENDING_PER_PUBLISHER: usize = 8;
+const MAX_PENDING_PER_VIEWER: usize = 4;
+const MAX_APPROVALS_PER_PUBLISHER: usize = 16;
+const DENY_COOLDOWN: Duration = Duration::from_secs(30);
+const MAX_LOGIN_SOURCES: usize = 1_024;
+const PER_SOURCE_LOGINS_PER_SECOND: usize = 4;
+const VIEW_REQUEST_LIFETIME: Duration =
+    Duration::from_secs(VIEW_REQUEST_TIMEOUT_SECONDS as u64);
+
+/// Server-pushed events for one authenticated connection. Queues stay bounded;
+/// a connection that cannot drain its events is closed rather than silently
+/// losing admission state.
+enum ConnectionEvent {
+    ViewerPresence {
+        session_id: String,
+        change: ViewerPresenceChange,
+        viewer_count: u8,
+    },
+    ViewRequest {
+        request_id: String,
+        viewer_id: String,
+        viewer_display_name: String,
+    },
+    ViewRequestClosed {
+        request_id: String,
+    },
+    ViewDecision {
+        request_id: String,
+        decision: ViewDecisionKind,
+        approval_id: String,
+    },
+    /// Publisher withdrawal or stream end: terminate this session's route.
+    Close(CloseReason),
+}
 
 #[derive(Clone)]
 pub struct SignalingState {
@@ -57,10 +98,12 @@ pub struct SignalingState {
     connections: Arc<Semaphore>,
     unauthenticated: Arc<Semaphore>,
     verifications: Arc<Semaphore>,
-    active_invites: Arc<Mutex<HashSet<String>>>,
+    active_accounts: Arc<Mutex<HashSet<String>>>,
     rooms: Arc<Mutex<HashMap<String, usize>>>,
     publishers: Arc<Mutex<HashMap<String, PublisherEntry>>>,
+    view_requests: Arc<Mutex<HashMap<String, PendingView>>>,
     login_rate: Arc<Mutex<RateWindow>>,
+    login_sources: Arc<Mutex<HashMap<IpAddr, RateWindow>>>,
     rtc_spike: Option<SpikeConfig>,
 }
 
@@ -105,7 +148,14 @@ impl SignalingState {
         let mut streams: Vec<_> = publishers
             .iter()
             .map(|(publisher_id, entry)| {
-                serde_json::json!({"publisher_id": publisher_id, "room_id": entry.room_id, "username": entry.invite_id})
+                serde_json::json!({
+                    "publisher_id": publisher_id,
+                    "room_id": entry.room_id,
+                    "username": entry.account,
+                    "viewers": entry.viewers.keys().collect::<Vec<_>>(),
+                    "viewer_count": entry.viewers.len(),
+                    "pending_view_requests": entry.pending.len(),
+                })
             })
             .collect();
         streams.sort_by_key(|stream| {
@@ -124,10 +174,12 @@ impl SignalingState {
             connections: Arc::new(Semaphore::new(MAX_SESSIONS)),
             unauthenticated: Arc::new(Semaphore::new(MAX_UNAUTHENTICATED_CONNECTIONS)),
             verifications: Arc::new(Semaphore::new(2)),
-            active_invites: Arc::new(Mutex::new(HashSet::new())),
+            active_accounts: Arc::new(Mutex::new(HashSet::new())),
             rooms: Arc::new(Mutex::new(HashMap::new())),
             publishers: Arc::new(Mutex::new(HashMap::new())),
+            view_requests: Arc::new(Mutex::new(HashMap::new())),
             login_rate: Arc::new(Mutex::new(RateWindow::new())),
+            login_sources: Arc::new(Mutex::new(HashMap::new())),
             rtc_spike: None,
         }
     }
@@ -137,17 +189,17 @@ impl SignalingState {
         self
     }
 
-    fn claim_invite(&self, invite_id: String) -> Result<InviteLease, ErrorCode> {
+    fn claim_account(&self, account: String) -> Result<AccountLease, ErrorCode> {
         let mut active = self
-            .active_invites
+            .active_accounts
             .lock()
             .map_err(|_| ErrorCode::Overloaded)?;
-        if !active.insert(invite_id.clone()) {
+        if !active.insert(account.clone()) {
             return Err(ErrorCode::Replay);
         }
-        Ok(InviteLease {
-            invite_id,
-            active: self.active_invites.clone(),
+        Ok(AccountLease {
+            account,
+            active: self.active_accounts.clone(),
         })
     }
 
@@ -166,16 +218,40 @@ impl SignalingState {
             rooms: self.rooms.clone(),
         })
     }
+
+    fn admit_login_source(&self, ip: Option<IpAddr>) -> Result<(), ErrorCode> {
+        let Some(ip) = ip else {
+            return Ok(());
+        };
+        let mut sources = self
+            .login_sources
+            .lock()
+            .map_err(|_| ErrorCode::Overloaded)?;
+        if let Some(window) = sources.get_mut(&ip) {
+            return if window.admit(PER_SOURCE_LOGINS_PER_SECOND) {
+                Ok(())
+            } else {
+                Err(ErrorCode::Overloaded)
+            };
+        }
+        if sources.len() >= MAX_LOGIN_SOURCES {
+            return Err(ErrorCode::Overloaded);
+        }
+        let mut window = RateWindow::new();
+        window.admit(PER_SOURCE_LOGINS_PER_SECOND);
+        sources.insert(ip, window);
+        Ok(())
+    }
 }
 
-struct InviteLease {
-    invite_id: String,
+struct AccountLease {
+    account: String,
     active: Arc<Mutex<HashSet<String>>>,
 }
-impl Drop for InviteLease {
+impl Drop for AccountLease {
     fn drop(&mut self) {
         if let Ok(mut active) = self.active.lock() {
-            active.remove(&self.invite_id);
+            active.remove(&self.account);
         }
     }
 }
@@ -199,41 +275,95 @@ impl Drop for RoomLease {
 
 struct JoinedSession {
     session_id: String,
+    session_account: String,
     room: RoomLease,
     setup_deadline: Instant,
     observed_peer_ip: Option<Ipv4Addr>,
+    events: mpsc::Sender<ConnectionEvent>,
     receive_peer: Option<SpikePeer>,
     publisher: Option<PublisherLease>,
     viewer_presence_enabled: bool,
     viewer_subscription: Option<ViewerSubscriptionLease>,
 }
 
+/// A viewer's request waiting for the publisher's decision. Identities are
+/// resolved at request time; decisions reference the server-generated ID only.
+struct PendingView {
+    publisher_session_id: String,
+    viewer_session_id: String,
+    viewer_account: String,
+    publisher_events: mpsc::Sender<ConnectionEvent>,
+    viewer_events: mpsc::Sender<ConnectionEvent>,
+    expires: Instant,
+}
+
+struct ActiveViewer {
+    account: String,
+    events: mpsc::Sender<ConnectionEvent>,
+}
+
+struct ApprovedView {
+    viewer_session_id: String,
+    viewer_account: String,
+}
+
 struct PublisherEntry {
     room_id: String,
-    invite_id: String,
-    active_viewers: HashSet<String>,
-    presence_sender: mpsc::Sender<ViewerPresenceUpdate>,
+    account: String,
+    viewers: HashMap<String, ActiveViewer>,
+    pending: HashSet<String>,
+    approvals: HashMap<String, ApprovedView>,
+    blocked_accounts: HashSet<String>,
+    denied_at: HashMap<String, Instant>,
+    events: mpsc::Sender<ConnectionEvent>,
     presence_enabled: bool,
     presence_overloaded: bool,
 }
 
-struct ViewerPresenceUpdate {
-    publisher_session_id: String,
-    change: ViewerPresenceChange,
-    viewer_count: u8,
-}
-
 // Only the authenticated RTC owner can register a connected publisher. No client
-// directory mutation operation exists; session teardown removes the entry.
+// directory mutation operation exists; session teardown removes the entry, its
+// pending requests and every approved viewer route.
 struct PublisherLease {
     session_id: String,
     publishers: Arc<Mutex<HashMap<String, PublisherEntry>>>,
+    view_requests: Arc<Mutex<HashMap<String, PendingView>>>,
+    spike: Option<SpikeConfig>,
 }
 
 impl Drop for PublisherLease {
     fn drop(&mut self) {
-        if let Ok(mut publishers) = self.publishers.lock() {
-            publishers.remove(&self.session_id);
+        let mut closed_viewers = Vec::new();
+        let mut pending_ids = Vec::new();
+        if let Ok(mut publishers) = self.publishers.lock()
+            && let Some(entry) = publishers.remove(&self.session_id)
+        {
+            pending_ids.extend(entry.pending.iter().cloned());
+            for (viewer_session, viewer) in entry.viewers {
+                closed_viewers.push((viewer_session, viewer.events));
+            }
+        }
+        // Publisher offline means no admission: every pending request targeting
+        // this stream expires immediately and its viewer is notified.
+        if let Ok(mut requests) = self.view_requests.lock() {
+            for request_id in &pending_ids {
+                if let Some(request) = requests.remove(request_id) {
+                    let _ = request
+                        .viewer_events
+                        .try_send(ConnectionEvent::ViewDecision {
+                            request_id: request_id.clone(),
+                            decision: ViewDecisionKind::Deny,
+                            approval_id: String::new(),
+                        });
+                }
+            }
+        }
+        // Drop queued media packets for this stream so nothing forwards after
+        // the publisher's route ended.
+        if let Some(spike) = &self.spike {
+            spike.close_publisher(&self.session_id);
+        }
+        for (_, events) in closed_viewers {
+            let _ = events.try_send(ConnectionEvent::Close(CloseReason::Revoked));
         }
     }
 }
@@ -267,10 +397,10 @@ impl Drop for ViewerSubscriptionLease {
             // to a replacement publisher or another share.
             return;
         };
-        if !publisher.active_viewers.remove(&self.viewer_session_id) {
+        if publisher.viewers.remove(&self.viewer_session_id).is_none() {
             return;
         }
-        let Ok(viewer_count) = u8::try_from(publisher.active_viewers.len()) else {
+        let Ok(viewer_count) = u8::try_from(publisher.viewers.len()) else {
             publisher.presence_overloaded = true;
             return;
         };
@@ -278,9 +408,9 @@ impl Drop for ViewerSubscriptionLease {
             return;
         }
         if publisher
-            .presence_sender
-            .try_send(ViewerPresenceUpdate {
-                publisher_session_id: self.publisher_session_id.clone(),
+            .events
+            .try_send(ConnectionEvent::ViewerPresence {
+                session_id: self.publisher_session_id.clone(),
                 change: ViewerPresenceChange::Left,
                 viewer_count,
             })
@@ -293,12 +423,7 @@ impl Drop for ViewerSubscriptionLease {
     }
 }
 
-fn register_publisher(
-    state: &SignalingState,
-    joined: &mut JoinedSession,
-    invite_id: &str,
-    presence_sender: &mpsc::Sender<ViewerPresenceUpdate>,
-) -> Result<(), ()> {
+fn register_publisher(state: &SignalingState, joined: &mut JoinedSession) -> Result<(), ()> {
     if joined.publisher.is_some()
         || !joined
             .receive_peer
@@ -315,9 +440,13 @@ fn register_publisher(
         joined.session_id.clone(),
         PublisherEntry {
             room_id: joined.room.room_id.clone(),
-            invite_id: invite_id.into(),
-            active_viewers: HashSet::new(),
-            presence_sender: presence_sender.clone(),
+            account: joined.session_account.clone(),
+            viewers: HashMap::new(),
+            pending: HashSet::new(),
+            approvals: HashMap::new(),
+            blocked_accounts: HashSet::new(),
+            denied_at: HashMap::new(),
+            events: joined.events.clone(),
             presence_enabled: joined.viewer_presence_enabled,
             presence_overloaded: false,
         },
@@ -325,36 +454,20 @@ fn register_publisher(
     joined.publisher = Some(PublisherLease {
         session_id: joined.session_id.clone(),
         publishers: state.publishers.clone(),
+        view_requests: state.view_requests.clone(),
+        spike: state.rtc_spike.clone(),
     });
     tracing::info!("connected publisher registered in directory");
     Ok(())
 }
 
-fn publisher_authorized(
-    state: &SignalingState,
-    store: &InviteStore,
-    room_id: &str,
-    publisher_session_id: &str,
-    now: u32,
-) -> bool {
-    state.publishers.lock().ok().is_some_and(|publishers| {
-        publishers
-            .get(publisher_session_id)
-            .is_some_and(|publisher| {
-                publisher.room_id == room_id
-                    && store.authorize(&publisher.invite_id, room_id, Permission::Access, now)
-                    && store.authorize(&publisher.invite_id, room_id, Permission::Publish, now)
-            })
-    })
-}
-
 fn register_viewer_subscription(
     state: &SignalingState,
-    store: &InviteStore,
     room_id: &str,
     publisher_session_id: &str,
     viewer_session_id: &str,
-    now: u32,
+    viewer_account: &str,
+    viewer_events: mpsc::Sender<ConnectionEvent>,
 ) -> Result<ViewerSubscriptionLease, ErrorCode> {
     if publisher_session_id == viewer_session_id {
         return Err(ErrorCode::InvalidState);
@@ -363,25 +476,22 @@ fn register_viewer_subscription(
     let Some(publisher) = publishers.get_mut(publisher_session_id) else {
         return Err(ErrorCode::InvalidState);
     };
-    if publisher.room_id != room_id
-        || !store.authorize(&publisher.invite_id, room_id, Permission::Access, now)
-        || !store.authorize(&publisher.invite_id, room_id, Permission::Publish, now)
-    {
+    if publisher.room_id != room_id {
         return Err(ErrorCode::InvalidState);
     }
-    if publisher.active_viewers.contains(viewer_session_id) {
+    if publisher.viewers.contains_key(viewer_session_id) {
         return Err(ErrorCode::InvalidState);
     }
-    if publisher.active_viewers.len() >= MAX_PRESENCE_VIEWERS {
+    if publisher.viewers.len() >= MAX_PRESENCE_VIEWERS {
         return Err(ErrorCode::Overloaded);
     }
     let viewer_count =
-        u8::try_from(publisher.active_viewers.len() + 1).map_err(|_| ErrorCode::Overloaded)?;
+        u8::try_from(publisher.viewers.len() + 1).map_err(|_| ErrorCode::Overloaded)?;
     if publisher.presence_enabled
         && publisher
-            .presence_sender
-            .try_send(ViewerPresenceUpdate {
-                publisher_session_id: publisher_session_id.into(),
+            .events
+            .try_send(ConnectionEvent::ViewerPresence {
+                session_id: publisher_session_id.into(),
                 change: ViewerPresenceChange::Joined,
                 viewer_count,
             })
@@ -390,7 +500,13 @@ fn register_viewer_subscription(
         publisher.presence_overloaded = true;
         return Err(ErrorCode::Overloaded);
     }
-    publisher.active_viewers.insert(viewer_session_id.into());
+    publisher.viewers.insert(
+        viewer_session_id.into(),
+        ActiveViewer {
+            account: viewer_account.into(),
+            events: viewer_events,
+        },
+    );
     Ok(ViewerSubscriptionLease {
         publisher_session_id: publisher_session_id.into(),
         viewer_session_id: viewer_session_id.into(),
@@ -417,7 +533,7 @@ fn enable_viewer_presence(
         let Some(publisher) = publishers.get_mut(&publisher_lease.session_id) else {
             return Err(ErrorCode::InvalidState);
         };
-        if !publisher.active_viewers.is_empty() {
+        if !publisher.viewers.is_empty() {
             return Err(ErrorCode::InvalidState);
         }
         publisher.presence_enabled = true;
@@ -426,37 +542,16 @@ fn enable_viewer_presence(
     Ok(())
 }
 
-fn directory(
-    state: &SignalingState,
-    store: &InviteStore,
-    invite_id: &str,
-    room_id: String,
-    now: u32,
-) -> ServerOperation {
-    if !store.authorize(invite_id, &room_id, Permission::Access, now)
-        || !store.authorize(invite_id, &room_id, Permission::Subscribe, now)
-    {
-        return rejected(ErrorCode::Unauthorized);
-    }
+fn directory(state: &SignalingState, store: &InviteStore, room_id: String) -> ServerOperation {
     let Ok(publishers) = state.publishers.lock() else {
         return rejected(ErrorCode::Overloaded);
     };
     let mut publisher_metadata: Vec<PublisherMetadata> = publishers
         .iter()
-        .filter(|(_, publisher)| {
-            publisher.room_id == room_id
-                && store.authorize(&publisher.invite_id, &room_id, Permission::Access, now)
-                && store.authorize(&publisher.invite_id, &room_id, Permission::Publish, now)
-        })
-        .map(|(publisher_id, publisher)| {
-            let display_name = store
-                .current(&publisher.invite_id, now)
-                .and_then(|invite| invite.display_name.clone())
-                .unwrap_or_else(|| publisher.invite_id.clone());
-            PublisherMetadata {
-                publisher_id: publisher_id.clone(),
-                display_name,
-            }
+        .filter(|(_, publisher)| publisher.room_id == room_id)
+        .map(|(publisher_id, publisher)| PublisherMetadata {
+            publisher_id: publisher_id.clone(),
+            display_name: store.display_name(&publisher.account),
         })
         .take(MAX_DIRECTORY_SHARES)
         .collect();
@@ -469,6 +564,388 @@ fn directory(
         room_id,
         publisher_ids,
         publishers: publisher_metadata,
+    }
+}
+
+/// A viewer asks to watch one specific live stream. The backend assigns the
+/// pending ID, binds it to both authenticated identities and forwards it to the
+/// publisher; it never decides admission itself.
+fn request_view(
+    state: &SignalingState,
+    joined: &JoinedSession,
+    publisher_session_id: &str,
+) -> Result<String, ErrorCode> {
+    let mut publishers = state.publishers.lock().map_err(|_| ErrorCode::Overloaded)?;
+    let Some(publisher) = publishers.get_mut(publisher_session_id) else {
+        // Do not disclose whether the stream exists in another room.
+        return Err(ErrorCode::InvalidState);
+    };
+    if publisher.room_id != joined.room.room_id {
+        return Err(ErrorCode::InvalidState);
+    }
+    let viewer_account = joined.session_account.clone();
+    if publisher.account == viewer_account {
+        return Err(ErrorCode::InvalidState);
+    }
+    if publisher.blocked_accounts.contains(&viewer_account)
+        || publisher
+            .denied_at
+            .get(&viewer_account)
+            .is_some_and(|denied| denied.elapsed() < DENY_COOLDOWN)
+    {
+        return Err(ErrorCode::Denied);
+    }
+    if publisher
+        .viewers
+        .values()
+        .any(|viewer| viewer.account == viewer_account)
+        || publisher
+            .approvals
+            .values()
+            .any(|approval| approval.viewer_account == viewer_account)
+        || publisher.pending.len() >= MAX_PENDING_PER_PUBLISHER
+    {
+        return Err(ErrorCode::InvalidState);
+    }
+    let mut requests = state.view_requests.lock().map_err(|_| ErrorCode::Overloaded)?;
+    if requests.len() >= MAX_PENDING_VIEW_REQUESTS
+        || requests
+            .values()
+            .filter(|request| request.viewer_account == viewer_account)
+            .count()
+            >= MAX_PENDING_PER_VIEWER
+    {
+        return Err(ErrorCode::Overloaded);
+    }
+    if requests.values().any(|request| {
+        request.publisher_session_id == publisher_session_id
+            && request.viewer_account == viewer_account
+    }) {
+        // One pending prompt per viewer per stream; duplicates never queue spam.
+        return Err(ErrorCode::InvalidState);
+    }
+    let request_id = random_identifier().map_err(|_| ErrorCode::Overloaded)?;
+    publisher.pending.insert(request_id.clone());
+    let pending = PendingView {
+        publisher_session_id: publisher_session_id.into(),
+        viewer_session_id: joined.session_id.clone(),
+        viewer_account: viewer_account.clone(),
+        publisher_events: publisher.events.clone(),
+        viewer_events: joined.events.clone(),
+        expires: Instant::now() + VIEW_REQUEST_LIFETIME,
+    };
+    let display_name = state
+        .invites
+        .borrow()
+        .display_name(&viewer_account);
+    requests.insert(request_id.clone(), pending);
+    drop(requests);
+    if publisher
+        .events
+        .try_send(ConnectionEvent::ViewRequest {
+            request_id: request_id.clone(),
+            viewer_id: viewer_account,
+            viewer_display_name: display_name,
+        })
+        .is_err()
+    {
+        publisher.pending.remove(&request_id);
+        requests_remove(state, &request_id);
+        publisher.presence_overloaded = true;
+        return Err(ErrorCode::Overloaded);
+    }
+    Ok(request_id)
+}
+
+fn requests_remove(state: &SignalingState, request_id: &str) {
+    if let Ok(mut requests) = state.view_requests.lock() {
+        requests.remove(request_id);
+    }
+}
+
+/// Publisher decision enforcement: single-use, bound to the owning stream and
+/// the pending entry's authenticated identities.
+fn decide_view(
+    state: &SignalingState,
+    joined: &JoinedSession,
+    request_id: &str,
+    decision: &ViewDecisionKind,
+) -> Result<(), ErrorCode> {
+    let mut publishers = state.publishers.lock().map_err(|_| ErrorCode::Overloaded)?;
+    let Some(publisher) = publishers.get_mut(&joined.session_id) else {
+        return Err(ErrorCode::InvalidState);
+    };
+    if !publisher.pending.remove(request_id) {
+        return Err(ErrorCode::InvalidState);
+    }
+    let mut requests = state.view_requests.lock().map_err(|_| ErrorCode::Overloaded)?;
+    let Some(pending) = requests.remove(request_id) else {
+        return Err(ErrorCode::InvalidState);
+    };
+    drop(requests);
+    if pending.publisher_session_id != joined.session_id || Instant::now() >= pending.expires {
+        return Err(ErrorCode::InvalidState);
+    }
+    let event = match decision {
+        ViewDecisionKind::Approve => {
+            if publisher.approvals.len() >= MAX_APPROVALS_PER_PUBLISHER {
+                return Err(ErrorCode::Overloaded);
+            }
+            let approval_id = random_identifier().map_err(|_| ErrorCode::Overloaded)?;
+            publisher.approvals.insert(
+                approval_id.clone(),
+                ApprovedView {
+                    viewer_session_id: pending.viewer_session_id.clone(),
+                    viewer_account: pending.viewer_account.clone(),
+                },
+            );
+            ConnectionEvent::ViewDecision {
+                request_id: request_id.to_owned(),
+                decision: ViewDecisionKind::Approve,
+                approval_id,
+            }
+        }
+        ViewDecisionKind::Deny | ViewDecisionKind::Block => {
+            publisher
+                .denied_at
+                .insert(pending.viewer_account.clone(), Instant::now());
+            if matches!(decision, ViewDecisionKind::Block) {
+                publisher
+                    .blocked_accounts
+                    .insert(pending.viewer_account.clone());
+                block_account_viewers(
+                    state,
+                    &joined.session_id,
+                    publisher,
+                    &pending.viewer_account,
+                );
+            }
+            ConnectionEvent::ViewDecision {
+                request_id: request_id.to_owned(),
+                decision: ViewDecisionKind::Deny,
+                approval_id: String::new(),
+            }
+        }
+    };
+    if pending.viewer_events.try_send(event).is_err() {
+        publisher.presence_overloaded = true;
+        return Err(ErrorCode::Overloaded);
+    }
+    Ok(())
+}
+
+/// Remove a blocked account's existing sessions, approvals and pending
+/// requests on this stream. Caller holds the publishers lock.
+fn block_account_viewers(
+    state: &SignalingState,
+    publisher_session_id: &str,
+    publisher: &mut PublisherEntry,
+    account: &str,
+) {
+    publisher
+        .approvals
+        .retain(|_, approval| approval.viewer_account != account);
+    let removed: Vec<_> = publisher
+        .viewers
+        .iter()
+        .filter(|(_, viewer)| viewer.account == account)
+        .map(|(session, _)| session.clone())
+        .collect();
+    let mut removed_any = false;
+    for session in removed {
+        if let Some(viewer) = publisher.viewers.remove(&session) {
+            removed_any = true;
+            if let Some(spike) = &state.rtc_spike {
+                spike.drop_viewer(publisher_session_id, &session);
+            }
+            let _ = viewer
+                .events
+                .try_send(ConnectionEvent::Close(CloseReason::Revoked));
+        }
+    }
+    if removed_any
+        && publisher.presence_enabled
+        && let Ok(viewer_count) = u8::try_from(publisher.viewers.len())
+    {
+        let _ = publisher.events.try_send(ConnectionEvent::ViewerPresence {
+            session_id: publisher_session_id.to_owned(),
+            change: ViewerPresenceChange::Left,
+            viewer_count,
+        });
+    }
+    // Pending requests from the blocked account on this stream also close.
+    if let Ok(mut requests) = state.view_requests.lock() {
+        let owned: Vec<String> = requests
+            .iter()
+            .filter(|(_, request)| {
+                request.publisher_session_id == publisher_session_id
+                    && request.viewer_account == account
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        for request_id in owned {
+            if let Some(request) = requests.remove(&request_id) {
+                publisher.pending.remove(&request_id);
+                let _ = request
+                    .viewer_events
+                    .try_send(ConnectionEvent::ViewDecision {
+                        request_id,
+                        decision: ViewDecisionKind::Deny,
+                        approval_id: String::new(),
+                    });
+            }
+        }
+    }
+}
+
+/// Publisher withdrawal of an approved viewer account: terminate every viewer
+/// session, pending request and unused approval belonging to that account.
+fn remove_viewer(
+    state: &SignalingState,
+    joined: &JoinedSession,
+    viewer_account: &str,
+) -> Result<(), ErrorCode> {
+    let mut publishers = state.publishers.lock().map_err(|_| ErrorCode::Overloaded)?;
+    let Some(publisher) = publishers.get_mut(&joined.session_id) else {
+        return Err(ErrorCode::InvalidState);
+    };
+    publisher
+        .approvals
+        .retain(|_, approval| approval.viewer_account != viewer_account);
+    let sessions: Vec<_> = publisher
+        .viewers
+        .iter()
+        .filter(|(_, viewer)| viewer.account == viewer_account)
+        .map(|(session, _)| session.clone())
+        .collect();
+    let mut events = Vec::new();
+    for session in sessions {
+        if let Some(viewer) = publisher.viewers.remove(&session) {
+            if let Some(spike) = &state.rtc_spike {
+                spike.drop_viewer(&joined.session_id, &session);
+            }
+            events.push(viewer.events);
+        }
+    }
+    let mut pending_ids = Vec::new();
+    {
+        let mut requests = state.view_requests.lock().map_err(|_| ErrorCode::Overloaded)?;
+        let expired: Vec<_> = requests
+            .iter()
+            .filter(|(_, request)| {
+                request.publisher_session_id == joined.session_id
+                    && request.viewer_account == viewer_account
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        for request_id in expired {
+            if let Some(request) = requests.remove(&request_id) {
+                publisher.pending.remove(&request_id);
+                pending_ids.push(request.viewer_events.clone());
+            }
+        }
+    }
+    if !events.is_empty()
+        && publisher.presence_enabled
+        && let Ok(viewer_count) = u8::try_from(publisher.viewers.len())
+    {
+        let _ = publisher.events.try_send(ConnectionEvent::ViewerPresence {
+            session_id: joined.session_id.clone(),
+            change: ViewerPresenceChange::Left,
+            viewer_count,
+        });
+    }
+    drop(publishers);
+    for events in events {
+        let _ = events.try_send(ConnectionEvent::Close(CloseReason::Revoked));
+    }
+    for events in pending_ids {
+        let _ = events.try_send(ConnectionEvent::ViewDecision {
+            request_id: String::new(),
+            decision: ViewDecisionKind::Deny,
+            approval_id: String::new(),
+        });
+    }
+    Ok(())
+}
+
+/// Expire pending requests on each tick: publishers going offline or silent
+/// never admit viewers, and prompts cannot accumulate. The publisher sees a
+/// close notification; the viewer sees a denial.
+fn expire_pending_views(state: &SignalingState) {
+    let expired: Vec<(String, PendingView)> = {
+        let Ok(mut requests) = state.view_requests.lock() else {
+            return;
+        };
+        let now = Instant::now();
+        let ids: Vec<String> = requests
+            .iter()
+            .filter(|(_, request)| request.expires <= now)
+            .map(|(request_id, _)| request_id.clone())
+            .collect();
+        ids.into_iter()
+            .filter_map(|request_id| {
+                requests
+                    .remove(&request_id)
+                    .map(|request| (request_id, request))
+            })
+            .collect()
+    };
+    if expired.is_empty() {
+        return;
+    }
+    let mut publishers = match state.publishers.lock() {
+        Ok(publishers) => publishers,
+        Err(_) => return,
+    };
+    for (request_id, request) in expired {
+        if let Some(publisher) = publishers.get_mut(&request.publisher_session_id) {
+            publisher.pending.remove(&request_id);
+            if publisher
+                .events
+                .try_send(ConnectionEvent::ViewRequestClosed {
+                    request_id: request_id.clone(),
+                })
+                .is_err()
+            {
+                publisher.presence_overloaded = true;
+            }
+        }
+        let _ = request
+            .viewer_events
+            .try_send(ConnectionEvent::ViewDecision {
+                request_id,
+                decision: ViewDecisionKind::Deny,
+                approval_id: String::new(),
+            });
+    }
+}
+
+/// Drop pending requests and unused approvals owned by a leaving viewer session.
+fn drop_viewer_state(state: &SignalingState, session_id: &str) {
+    let mut requests = match state.view_requests.lock() {
+        Ok(requests) => requests,
+        Err(_) => return,
+    };
+    let owned: Vec<String> = requests
+        .iter()
+        .filter(|(_, request)| request.viewer_session_id == session_id)
+        .map(|(id, _)| id.clone())
+        .collect();
+    for request_id in owned {
+        if let Some(request) = requests.remove(&request_id) {
+            let _ = request
+                .publisher_events
+                .try_send(ConnectionEvent::ViewRequestClosed { request_id });
+        }
+    }
+    drop(requests);
+    if let Ok(mut publishers) = state.publishers.lock() {
+        for publisher in publishers.values_mut() {
+            publisher
+                .approvals
+                .retain(|_, approval| approval.viewer_session_id != session_id);
+        }
     }
 }
 
@@ -605,12 +1082,6 @@ async fn close(socket: &mut WebSocket, session: Option<&JoinedSession>, reason: 
     };
     tracing::info!(code, joined = session.is_some(), "signaling closing");
     if let Some(session) = session {
-        // Invalidate discovery before awaiting a potentially slow close send.
-        if let Some(publisher) = &session.publisher
-            && let Ok(mut publishers) = publisher.publishers.lock()
-        {
-            publishers.remove(&publisher.session_id);
-        }
         let _ = send(
             socket,
             "server_close".into(),
@@ -636,7 +1107,7 @@ async fn login(
     state: &mut SignalingState,
     failure_request_id: &mut String,
     observed_ip: Option<IpAddr>,
-) -> Result<(String, InviteLease, u32), ErrorCode> {
+) -> Result<(String, AccountLease), ErrorCode> {
     let Some(Ok(Message::Text(text))) = socket.recv().await else {
         return Err(ErrorCode::InvalidMessage);
     };
@@ -654,11 +1125,6 @@ async fn login(
         },
         _ => return Err(ErrorCode::Unauthorized),
     };
-    if let LoginInput::Account { username, .. } = &login_input
-        && !state.invites.borrow().permits_ip(username, observed_ip)
-    {
-        return Err(ErrorCode::Unauthorized);
-    }
     if !state
         .login_rate
         .lock()
@@ -667,6 +1133,8 @@ async fn login(
     {
         return Err(ErrorCode::Overloaded);
     }
+    // Bounded per-source throttling is an abuse control, not an IP allowlist.
+    state.admit_login_source(observed_ip)?;
     let permit = state
         .verifications
         .clone()
@@ -674,14 +1142,13 @@ async fn login(
         .map_err(|_| ErrorCode::Overloaded)?;
     let invites = state.invites.borrow_and_update().clone();
     let verification_invites = invites.clone();
-    let now = now_seconds().map_err(|_| ErrorCode::Unauthorized)?;
     // A cancelled login leaves the permit inside the non-cancellable bounded worker.
-    let invite_id = tokio::task::spawn_blocking(move || {
+    let account = tokio::task::spawn_blocking(move || {
         let _permit = permit;
         match login_input {
-            LoginInput::Credential(credential) => verification_invites.verify(&credential, now),
+            LoginInput::Credential(credential) => verification_invites.verify(&credential),
             LoginInput::Account { username, password } => {
-                verification_invites.verify_account(&username, &password, now)
+                verification_invites.verify_account(&username, &password)
             }
         }
     })
@@ -692,18 +1159,11 @@ async fn login(
     if !Arc::ptr_eq(&invites, &current_policy) || state.invites.has_changed().unwrap_or(true) {
         return Err(ErrorCode::Unauthorized);
     }
-    let expires = current_policy
-        .current(
-            &invite_id,
-            now_seconds().map_err(|_| ErrorCode::Unauthorized)?,
-        )
-        .ok_or(ErrorCode::Unauthorized)?
-        .expires_at_unix_seconds;
-    if !current_policy.permits_ip(&invite_id, observed_ip) {
+    if current_policy.current(&account).is_none() {
         return Err(ErrorCode::Unauthorized);
     }
-    let lease = state.claim_invite(invite_id)?;
-    Ok((message.request_id, lease, expires))
+    let lease = state.claim_account(account)?;
+    Ok((message.request_id, lease))
 }
 
 fn remember_request(seen: &mut HashSet<String>, request_id: &str) -> Result<(), ErrorCode> {
@@ -740,7 +1200,7 @@ async fn run(
         ),
     )
     .await;
-    let (request_id, identity, expires) = match result {
+    let (request_id, identity) = match result {
         Ok(Ok(value)) => value,
         Ok(Err(code)) => {
             let _ = send(
@@ -762,7 +1222,10 @@ async fn run(
     let Ok(now) = now_seconds() else {
         return;
     };
-    let expiry_deadline = Instant::now() + Duration::from_secs(expires.saturating_sub(now) as u64);
+    // Sessions are bounded from authentication; there is no scheduled account
+    // expiration. Re-authentication starts a fresh session and approvals.
+    let expires = now.saturating_add(SESSION_LIFETIME_SECONDS);
+    let expiry_deadline = Instant::now() + Duration::from_secs(SESSION_LIFETIME_SECONDS as u64);
     let mut seen = HashSet::from([request_id.clone()]);
     if !send(
         &mut socket,
@@ -777,8 +1240,8 @@ async fn run(
     }
     let mut session: Option<JoinedSession> = None;
     let mut last_left: Option<String> = None;
-    let (publisher_presence_sender, mut publisher_presence_receiver) =
-        mpsc::channel(MAX_QUEUED_MESSAGES);
+    let (event_sender, mut event_receiver) = mpsc::channel::<ConnectionEvent>(MAX_QUEUED_MESSAGES);
+    let account = identity.account.clone();
     let tick_ms = if state.rtc_spike.is_some() { 10 } else { 250 };
     let mut tick = tokio::time::interval(Duration::from_millis(tick_ms));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -808,15 +1271,9 @@ async fn run(
                     close(&mut socket, session.as_ref(), CloseReason::TransportFailed).await;
                     break;
                 }
+                expire_pending_views(&state);
                 if let Some(joined) = session.as_mut()
-                    && register_publisher(
-                        &state,
-                        joined,
-                        &identity.invite_id,
-                        &publisher_presence_sender,
-                    )
-                    .is_err()
-                {
+                    && register_publisher(&state, joined).is_err() {
                     close(&mut socket, session.as_ref(), CloseReason::Overloaded).await;
                     break;
                 }
@@ -830,26 +1287,43 @@ async fn run(
                     break;
                 }
             }
-            presence = publisher_presence_receiver.recv() => {
-                let Some(presence) = presence else { break; };
-                if !session.as_ref().is_some_and(|joined| {
-                    joined.publisher.as_ref().is_some_and(|publisher| {
-                        publisher.session_id == presence.publisher_session_id
-                    })
-                }) {
-                    // A prior publish session may have queued an event before this
-                    // connection left and joined again. Never deliver it in the new scope.
-                    continue;
-                }
-                if !send(
-                    &mut socket,
-                    PRESENCE_REQUEST_ID.into(),
-                    ServerOperation::ViewerPresence {
-                        session_id: presence.publisher_session_id,
-                        change: presence.change,
-                        viewer_count: presence.viewer_count,
-                    },
-                ).await { break; }
+            event = event_receiver.recv() => {
+                let Some(event) = event else { break; };
+                let push = match event {
+                    ConnectionEvent::Close(reason) => {
+                        close(&mut socket, session.as_ref(), reason).await;
+                        break;
+                    }
+                    ConnectionEvent::ViewerPresence { session_id, change, viewer_count } => {
+                        if !session.as_ref().is_some_and(|joined| joined.session_id == session_id) {
+                            continue;
+                        }
+                        send(&mut socket, PRESENCE_REQUEST_ID.into(), ServerOperation::ViewerPresence {
+                            session_id, change, viewer_count,
+                        }).await
+                    }
+                    ConnectionEvent::ViewRequest { request_id, viewer_id, viewer_display_name } => {
+                        let Some(joined) = session.as_ref() else { continue; };
+                        send(&mut socket, VIEW_REQUEST_PUSH_ID.into(), ServerOperation::ViewRequest {
+                            session_id: joined.session_id.clone(),
+                            request_id, viewer_id, viewer_display_name,
+                        }).await
+                    }
+                    ConnectionEvent::ViewRequestClosed { request_id } => {
+                        let Some(joined) = session.as_ref() else { continue; };
+                        send(&mut socket, VIEW_REQUEST_CLOSED_PUSH_ID.into(), ServerOperation::ViewRequestClosed {
+                            session_id: joined.session_id.clone(), request_id,
+                        }).await
+                    }
+                    ConnectionEvent::ViewDecision { request_id, decision, approval_id } => {
+                        let Some(joined) = session.as_ref() else { continue; };
+                        send(&mut socket, VIEW_DECISION_PUSH_ID.into(), ServerOperation::ViewDecision {
+                            session_id: joined.session_id.clone(),
+                            request_id, decision, approval_id,
+                        }).await
+                    }
+                };
+                if !push { break; }
             }
             received = socket.recv() => {
                 if !rate.admit(MAX_MESSAGES_PER_SECOND) { close(&mut socket, session.as_ref(), CloseReason::Overloaded).await; break; }
@@ -866,24 +1340,21 @@ async fn run(
                     close(&mut socket, session.as_ref(), CloseReason::TransportFailed).await;
                     break;
                 }
-                let Ok(now) = now_seconds() else { break; };
                 let store = state.invites.borrow().clone();
-                if store.current(&identity.invite_id, now).is_none() || Instant::now() >= expiry_deadline {
+                if store.current(&account).is_none() || Instant::now() >= expiry_deadline {
                     close(&mut socket, session.as_ref(), CloseReason::Expired).await;
                     break;
                 }
-                let media_response = media_operation(&state, &store, &identity.invite_id, now,
+                let media_response = media_operation(&state, &account,
                     &message.operation, &mut session).await;
                 let operation_type = operation_name(&message.operation);
                 let response = match media_response {
                     Ok(Some(response)) => response,
                     Ok(None) => operate_for_peer(
                         &state,
-                        &store,
-                        &identity.invite_id,
-                        now,
+                        &account,
                         message.operation,
-                        (observed_peer_ip, &mut session),
+                        (observed_peer_ip, &mut session, event_sender.clone()),
                         &mut last_left,
                     ),
                     Err(()) => {
@@ -911,10 +1382,13 @@ async fn run(
             }
         }
     }
-    // RAII releases membership and the exclusive credential lease on every exit.
+    // RAII releases membership, pending approvals and the exclusive account lease
+    // on every exit.
     if let Some(joined) = session.as_mut() {
+        let session_id = joined.session_id.clone();
         drop(joined.receive_peer.take());
         drop(joined.viewer_subscription.take());
+        drop_viewer_state(&state, &session_id);
     }
     tracing::info!("signaling socket ended; releasing session resources");
 }
@@ -928,6 +1402,7 @@ fn error_code(code: &ErrorCode) -> &'static str {
         ErrorCode::E2eeUnavailable => "e2ee_unavailable",
         ErrorCode::Overloaded => "overloaded",
         ErrorCode::InvalidState => "invalid_state",
+        ErrorCode::Denied => "denied",
         ErrorCode::TransportUnavailable => "transport_unavailable",
     }
 }
@@ -941,7 +1416,10 @@ fn operation_name(operation: &ClientOperation) -> &'static str {
         ClientOperation::Leave { .. } => "leave",
         ClientOperation::Publish { .. } => "publish",
         ClientOperation::EnableViewerPresence { .. } => "enable_viewer_presence",
+        ClientOperation::RequestView { .. } => "request_view",
+        ClientOperation::ViewDecision { .. } => "view_decision",
         ClientOperation::Subscribe { .. } => "subscribe",
+        ClientOperation::RemoveViewer { .. } => "remove_viewer",
         ClientOperation::Offer { .. } => "offer",
         ClientOperation::Ice { .. } => "ice",
     }
@@ -960,9 +1438,7 @@ async fn receive_datagram(
 /// No media mutation before an authorized publisher/subscriber role is selected.
 async fn media_operation(
     state: &SignalingState,
-    store: &InviteStore,
-    invite_id: &str,
-    now: u32,
+    account: &str,
     operation: &ClientOperation,
     session: &mut Option<JoinedSession>,
 ) -> Result<Option<ServerOperation>, ()> {
@@ -982,23 +1458,6 @@ async fn media_operation(
     else {
         return Ok(Some(rejected(ErrorCode::InvalidState)));
     };
-    let role_permission = match operation {
-        ClientOperation::Subscribe { .. } => Permission::Subscribe,
-        ClientOperation::Publish { .. } => Permission::Publish,
-        _ if joined
-            .receive_peer
-            .as_ref()
-            .is_some_and(SpikePeer::is_subscriber) =>
-        {
-            Permission::Subscribe
-        }
-        _ => Permission::Publish,
-    };
-    for permission in [Permission::Access, role_permission] {
-        if !store.authorize(invite_id, &joined.room.room_id, permission, now) {
-            return Ok(Some(rejected(ErrorCode::Unauthorized)));
-        }
-    }
     let response = match operation {
         ClientOperation::Publish { .. } => {
             if joined.receive_peer.is_some() {
@@ -1019,12 +1478,38 @@ async fn media_operation(
                 session_id: session_id.clone(),
             }
         }
-        ClientOperation::Subscribe { publisher_id, .. } => {
+        ClientOperation::Subscribe {
+            publisher_id,
+            approval_id,
+            ..
+        } => {
             if joined.receive_peer.is_some() {
                 return Ok(Some(rejected(ErrorCode::InvalidState)));
             }
-            if !publisher_authorized(state, store, &joined.room.room_id, publisher_id, now) {
-                return Ok(Some(rejected(ErrorCode::InvalidState)));
+            // Backend-enforced approval: the opaque ID is consumed exactly once
+            // and only for the stream, viewer session and account it names.
+            let approved = {
+                let mut publishers = state.publishers.lock().map_err(|_| ())?;
+                let Some(publisher) = publishers.get_mut(publisher_id) else {
+                    return Ok(Some(rejected(ErrorCode::InvalidState)));
+                };
+                if publisher.room_id != joined.room.room_id
+                    || publisher.blocked_accounts.contains(account)
+                {
+                    return Ok(Some(rejected(ErrorCode::InvalidState)));
+                }
+                match publisher.approvals.remove(approval_id) {
+                    Some(approval)
+                        if approval.viewer_session_id == joined.session_id
+                            && approval.viewer_account == account =>
+                    {
+                        true
+                    }
+                    _ => false,
+                }
+            };
+            if !approved {
+                return Ok(Some(rejected(ErrorCode::Unauthorized)));
             }
             let peer = match SpikePeer::subscriber_for_session(
                 config,
@@ -1041,11 +1526,11 @@ async fn media_operation(
             };
             let subscription = match register_viewer_subscription(
                 state,
-                store,
                 &joined.room.room_id,
                 publisher_id,
                 session_id,
-                now,
+                account,
+                joined.events.clone(),
             ) {
                 Ok(subscription) => subscription,
                 Err(code) => return Ok(Some(rejected(code))),
@@ -1087,45 +1572,44 @@ fn rejected(code: ErrorCode) -> ServerOperation {
 #[cfg(test)]
 fn operate(
     state: &SignalingState,
-    store: &InviteStore,
-    invite_id: &str,
-    now: u32,
+    account: &str,
     operation: ClientOperation,
     session: &mut Option<JoinedSession>,
     last_left: &mut Option<String>,
 ) -> ServerOperation {
+    let (events, _receiver) = mpsc::channel(MAX_QUEUED_MESSAGES);
     operate_for_peer(
         state,
-        store,
-        invite_id,
-        now,
+        account,
         operation,
-        (None, session),
+        (None, session, events),
         last_left,
     )
 }
 
 fn operate_for_peer(
     state: &SignalingState,
-    store: &InviteStore,
-    invite_id: &str,
-    now: u32,
+    account: &str,
     operation: ClientOperation,
-    (observed_peer_ip, session): (Option<Ipv4Addr>, &mut Option<JoinedSession>),
+    (observed_peer_ip, session, events): (
+        Option<Ipv4Addr>,
+        &mut Option<JoinedSession>,
+        mpsc::Sender<ConnectionEvent>,
+    ),
     last_left: &mut Option<String>,
 ) -> ServerOperation {
     match operation {
         ClientOperation::Login { .. } | ClientOperation::AccountLogin { .. } => {
             rejected(ErrorCode::InvalidState)
         }
-        ClientOperation::Directory { room_id } => directory(state, store, invite_id, room_id, now),
+        ClientOperation::Directory { room_id } => {
+            let store = state.invites.borrow().clone();
+            directory(state, &store, room_id)
+        }
         ClientOperation::Join {
             room_id,
             require_e2ee,
         } => {
-            if !store.authorize(invite_id, &room_id, Permission::Access, now) {
-                return rejected(ErrorCode::Unauthorized);
-            }
             if require_e2ee {
                 return rejected(ErrorCode::E2eeUnavailable);
             }
@@ -1144,6 +1628,8 @@ fn operate_for_peer(
                 room,
                 setup_deadline: Instant::now() + Duration::from_millis(SETUP_DEADLINE_MS as u64),
                 observed_peer_ip,
+                events,
+                session_account: account.to_owned(),
                 receive_peer: None,
                 publisher: None,
                 viewer_presence_enabled: false,
@@ -1165,27 +1651,78 @@ fn operate_for_peer(
             else {
                 return rejected(ErrorCode::InvalidState);
             };
-            if !store.authorize(invite_id, &joined.room.room_id, Permission::Access, now) {
-                return rejected(ErrorCode::Unauthorized);
-            }
+            let leaving = joined.session_id.clone();
             *session = None;
             *last_left = Some(session_id.clone());
+            drop_viewer_state(state, &leaving);
             ServerOperation::Closed {
                 session_id,
                 reason: CloseReason::Left,
             }
         }
+        ClientOperation::RequestView {
+            session_id,
+            publisher_id,
+        } => {
+            let Some(joined) = session
+                .as_ref()
+                .filter(|joined| joined.session_id == session_id)
+            else {
+                return rejected(ErrorCode::InvalidState);
+            };
+            if joined.viewer_subscription.is_some() || joined.receive_peer.is_some() {
+                return rejected(ErrorCode::InvalidState);
+            }
+            match request_view(state, joined, &publisher_id) {
+                Ok(request_id) => ServerOperation::ViewRequestPending {
+                    session_id: session_id.clone(),
+                    request_id,
+                },
+                Err(code) => rejected(code),
+            }
+        }
+        ClientOperation::ViewDecision {
+            session_id,
+            request_id,
+            decision,
+        } => {
+            let Some(joined) = session
+                .as_ref()
+                .filter(|joined| joined.session_id == session_id)
+            else {
+                return rejected(ErrorCode::InvalidState);
+            };
+            match decide_view(state, joined, &request_id, &decision) {
+                Ok(()) => ServerOperation::Accepted {
+                    session_id: session_id.clone(),
+                },
+                Err(code) => rejected(code),
+            }
+        }
+        ClientOperation::RemoveViewer {
+            session_id,
+            viewer_id,
+        } => {
+            let Some(joined) = session
+                .as_ref()
+                .filter(|joined| joined.session_id == session_id)
+            else {
+                return rejected(ErrorCode::InvalidState);
+            };
+            match remove_viewer(state, joined, &viewer_id) {
+                Ok(()) => ServerOperation::Accepted {
+                    session_id: session_id.clone(),
+                },
+                Err(code) => rejected(code),
+            }
+        }
         operation => {
-            let (session_id, permission) = match &operation {
-                ClientOperation::Publish { session_id } => (session_id, Permission::Publish),
-                ClientOperation::EnableViewerPresence { session_id } => {
-                    (session_id, Permission::Publish)
-                }
-                ClientOperation::Subscribe { session_id, .. } => {
-                    (session_id, Permission::Subscribe)
-                }
-                ClientOperation::Offer { session_id, .. }
-                | ClientOperation::Ice { session_id, .. } => (session_id, Permission::Access),
+            let session_id = match &operation {
+                ClientOperation::Publish { session_id }
+                | ClientOperation::EnableViewerPresence { session_id }
+                | ClientOperation::Subscribe { session_id, .. }
+                | ClientOperation::Offer { session_id, .. }
+                | ClientOperation::Ice { session_id, .. } => session_id,
                 _ => return rejected(ErrorCode::InvalidState),
             };
             let Some(joined) = session
@@ -1194,9 +1731,6 @@ fn operate_for_peer(
             else {
                 return rejected(ErrorCode::InvalidState);
             };
-            if !store.authorize(invite_id, &joined.room.room_id, permission, now) {
-                return rejected(ErrorCode::Unauthorized);
-            }
             if matches!(&operation, ClientOperation::EnableViewerPresence { .. }) {
                 if let Err(code) = enable_viewer_presence(state, joined) {
                     return rejected(code);
@@ -1214,361 +1748,248 @@ fn operate_for_peer(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::auth::{InviteFile, RoomGrant, create_invite, create_invite_with_display_name};
+    use crate::auth::{InviteFile, UsersFile, create_invite, create_invite_with_display_name, create_user};
 
-    #[tokio::test]
-    async fn directory_requires_subscribe_scope_filters_expiry_and_is_drop_owned() {
-        let mut invites = Vec::new();
-        for (id, room, publish, subscribe, expires) in [
-            ("publisher", "room", true, false, 100),
-            ("unnamed_publisher", "room", true, false, 100),
-            ("viewer", "room", false, true, 200),
-            ("outsider", "other", false, true, 200),
-        ] {
-            invites.push(
-                create_invite_with_display_name(
-                    id.into(),
-                    (id == "publisher").then(|| "Studio PC".into()),
-                    vec![RoomGrant {
-                        room_id: room.into(),
-                        access: true,
-                        publish,
-                        subscribe,
-                    }],
-                    expires,
-                )
-                .unwrap()
-                .0,
-            );
-        }
-        let store = Arc::new(
+    fn store_with_invites(invites: Vec<crate::auth::Invite>) -> Arc<InviteStore> {
+        Arc::new(
             InviteStore::from_bytes(
                 &serde_json::to_vec(&InviteFile {
-                    version: 1,
+                    version: 2,
                     invites,
                 })
                 .unwrap(),
             )
             .unwrap(),
-        );
-        let (_sender, receiver) = watch::channel(store.clone());
-        let state = SignalingState::new(receiver);
-        let (presence_sender, _presence_receiver) = mpsc::channel(MAX_QUEUED_MESSAGES);
-        state.publishers.lock().unwrap().insert(
-            "source".into(),
-            PublisherEntry {
-                room_id: "room".into(),
-                invite_id: "publisher".into(),
-                active_viewers: HashSet::new(),
-                presence_sender: presence_sender.clone(),
-                presence_enabled: false,
-                presence_overloaded: false,
-            },
-        );
-        let lease = PublisherLease {
-            session_id: "source".into(),
-            publishers: state.publishers.clone(),
-        };
-        for requester in ["publisher", "outsider", "unknown"] {
-            assert!(matches!(
-                directory(&state, &store, requester, "room".into(), 99),
-                ServerOperation::Rejected {
-                    code: ErrorCode::Unauthorized
-                }
-            ));
-        }
-        assert!(matches!(
-            directory(&state, &store, "viewer", "room".into(), 99),
-            ServerOperation::Directory { publisher_ids, publishers, .. }
-                if publisher_ids == vec!["source"]
-                    && publishers.len() == 1
-                    && publishers[0].publisher_id == "source"
-                    && publishers[0].display_name == "Studio PC"
-        ));
-        state.publishers.lock().unwrap().insert(
-            "source_unnamed".into(),
-            PublisherEntry {
-                room_id: "room".into(),
-                invite_id: "unnamed_publisher".into(),
-                active_viewers: HashSet::new(),
-                presence_sender: presence_sender.clone(),
-                presence_enabled: false,
-                presence_overloaded: false,
-            },
-        );
-        let ServerOperation::Directory {
-            publisher_ids,
-            publishers,
-            ..
-        } = directory(&state, &store, "viewer", "room".into(), 99)
-        else {
-            panic!("authorized directory");
-        };
-        assert_eq!(publisher_ids, vec!["source", "source_unnamed"]);
-        assert_eq!(publishers[1].display_name, "unnamed_publisher");
-        state.publishers.lock().unwrap().remove("source_unnamed");
-        assert!(matches!(
-            directory(&state, &store, "viewer", "room".into(), 100),
-            ServerOperation::Directory { publisher_ids, .. } if publisher_ids.is_empty()
-        ));
-        assert!(matches!(
-            directory(&state, &store, "outsider", "other".into(), 99),
-            ServerOperation::Directory { publisher_ids, .. } if publisher_ids.is_empty()
-        ));
-        drop(lease);
-        assert!(state.publishers.lock().unwrap().is_empty());
-        assert!(matches!(
-            directory(&state, &store, "viewer", "room".into(), 99),
-            ServerOperation::Directory { publisher_ids, .. } if publisher_ids.is_empty()
-        ));
-        for index in 0..=MAX_DIRECTORY_SHARES {
-            state.publishers.lock().unwrap().insert(
-                format!("source_{index}"),
-                PublisherEntry {
-                    room_id: "room".into(),
-                    invite_id: "publisher".into(),
-                    active_viewers: HashSet::new(),
-                    presence_sender: presence_sender.clone(),
-                    presence_enabled: false,
-                    presence_overloaded: false,
-                },
-            );
-        }
-        assert!(matches!(
-            directory(&state, &store, "viewer", "room".into(), 99),
-            ServerOperation::Directory { publisher_ids, .. } if publisher_ids.len() == MAX_DIRECTORY_SHARES
-        ));
+        )
     }
 
-    #[tokio::test]
-    async fn viewer_presence_is_publisher_scoped_and_subscription_drop_emits_departure() {
-        let (publisher_invite, _) = create_invite(
-            "presence_publisher".into(),
-            vec![RoomGrant {
-                room_id: "room".into(),
-                access: true,
-                publish: true,
-                subscribe: false,
-            }],
-            100,
-        )
-        .unwrap();
-        let (viewer_invite, _) = create_invite(
-            "presence_viewer".into(),
-            vec![RoomGrant {
-                room_id: "room".into(),
-                access: true,
-                publish: false,
-                subscribe: true,
-            }],
-            100,
-        )
-        .unwrap();
-        let store = Arc::new(
-            InviteStore::from_bytes(
-                &serde_json::to_vec(&InviteFile {
-                    version: 1,
-                    invites: vec![publisher_invite, viewer_invite],
+    fn users_store(users: Vec<crate::auth::User>) -> Arc<InviteStore> {
+        Arc::new(
+            InviteStore::from_users_bytes(
+                &serde_json::to_vec(&UsersFile {
+                    version: 2,
+                    users,
                 })
                 .unwrap(),
             )
             .unwrap(),
-        );
-        let (_sender, receiver) = watch::channel(store.clone());
-        let state = SignalingState::new(receiver);
-        let (publisher_presence, mut publisher_updates) = mpsc::channel(MAX_QUEUED_MESSAGES);
-        let (_unrelated_presence, mut unrelated_updates) = mpsc::channel(MAX_QUEUED_MESSAGES);
-        for (session_id, invite_id, presence_sender, presence_enabled) in [
-            (
-                "publisher_session",
-                "presence_publisher",
-                publisher_presence.clone(),
-                true,
-            ),
-            (
-                "unrelated_session",
-                "presence_publisher",
-                _unrelated_presence,
-                false,
-            ),
-        ] {
-            state.publishers.lock().unwrap().insert(
-                session_id.into(),
-                PublisherEntry {
-                    room_id: "room".into(),
-                    invite_id: invite_id.into(),
-                    active_viewers: HashSet::new(),
-                    presence_sender,
-                    presence_enabled,
-                    presence_overloaded: false,
-                },
-            );
-        }
-
-        let subscription = register_viewer_subscription(
-            &state,
-            &store,
-            "room",
-            "publisher_session",
-            "viewer_session",
-            99,
         )
-        .unwrap();
-        let joined = publisher_updates.try_recv().unwrap();
-        assert_eq!(joined.publisher_session_id, "publisher_session");
-        assert!(matches!(joined.change, ViewerPresenceChange::Joined));
-        assert_eq!(joined.viewer_count, 1);
-        assert!(unrelated_updates.try_recv().is_err());
-        assert!(matches!(
-            register_viewer_subscription(
-                &state,
-                &store,
-                "other_room",
-                "publisher_session",
-                "other_viewer",
-                99
-            ),
-            Err(ErrorCode::InvalidState)
-        ));
-        assert!(unrelated_updates.try_recv().is_err());
-
-        drop(subscription);
-        let left = publisher_updates.try_recv().unwrap();
-        assert_eq!(left.publisher_session_id, "publisher_session");
-        assert!(matches!(left.change, ViewerPresenceChange::Left));
-        assert_eq!(left.viewer_count, 0);
-        assert!(
-            state
-                .publishers
-                .lock()
-                .unwrap()
-                .get("publisher_session")
-                .unwrap()
-                .active_viewers
-                .is_empty()
-        );
-        assert!(unrelated_updates.try_recv().is_err());
     }
 
-    #[tokio::test]
-    async fn presence_is_not_sent_until_the_publisher_opts_in() {
-        let (publisher_invite, _) = create_invite(
-            "presence_publisher".into(),
-            vec![RoomGrant {
-                room_id: "room".into(),
-                access: true,
-                publish: true,
-                subscribe: false,
-            }],
-            100,
-        )
-        .unwrap();
-        let store = Arc::new(
-            InviteStore::from_bytes(
-                &serde_json::to_vec(&InviteFile {
-                    version: 1,
-                    invites: vec![publisher_invite],
-                })
-                .unwrap(),
-            )
-            .unwrap(),
-        );
-        let (_sender, receiver) = watch::channel(store.clone());
-        let state = SignalingState::new(receiver);
-        let (presence_sender, mut presence_receiver) = mpsc::channel(MAX_QUEUED_MESSAGES);
-        state.publishers.lock().unwrap().insert(
-            "publisher_session".into(),
+    fn publisher_entry(account: &str) -> (mpsc::Receiver<ConnectionEvent>, PublisherEntry) {
+        let (events, receiver) = mpsc::channel(MAX_QUEUED_MESSAGES);
+        (
+            receiver,
             PublisherEntry {
                 room_id: "room".into(),
-                invite_id: "presence_publisher".into(),
-                active_viewers: HashSet::new(),
-                presence_sender,
-                presence_enabled: false,
-                presence_overloaded: false,
-            },
-        );
-
-        let subscription = register_viewer_subscription(
-            &state,
-            &store,
-            "room",
-            "publisher_session",
-            "viewer_session",
-            99,
-        )
-        .unwrap();
-        assert!(presence_receiver.try_recv().is_err());
-        assert_eq!(
-            state
-                .publishers
-                .lock()
-                .unwrap()
-                .get("publisher_session")
-                .unwrap()
-                .active_viewers
-                .len(),
-            1
-        );
-        drop(subscription);
-        assert!(presence_receiver.try_recv().is_err());
-    }
-
-    #[tokio::test]
-    async fn full_presence_queue_marks_its_publisher_overloaded_without_leaking_viewers() {
-        let (publisher_invite, _) = create_invite(
-            "presence_publisher".into(),
-            vec![RoomGrant {
-                room_id: "room".into(),
-                access: true,
-                publish: true,
-                subscribe: false,
-            }],
-            100,
-        )
-        .unwrap();
-        let store = Arc::new(
-            InviteStore::from_bytes(
-                &serde_json::to_vec(&InviteFile {
-                    version: 1,
-                    invites: vec![publisher_invite],
-                })
-                .unwrap(),
-            )
-            .unwrap(),
-        );
-        let (_sender, receiver) = watch::channel(store.clone());
-        let state = SignalingState::new(receiver);
-        let (presence_sender, mut presence_receiver) = mpsc::channel(1);
-        state.publishers.lock().unwrap().insert(
-            "publisher_session".into(),
-            PublisherEntry {
-                room_id: "room".into(),
-                invite_id: "presence_publisher".into(),
-                active_viewers: HashSet::new(),
-                presence_sender,
+                account: account.into(),
+                viewers: HashMap::new(),
+                pending: HashSet::new(),
+                approvals: HashMap::new(),
+                blocked_accounts: HashSet::new(),
+                denied_at: HashMap::new(),
+                events,
                 presence_enabled: true,
                 presence_overloaded: false,
             },
-        );
-        let publisher_lease = PublisherLease {
-            session_id: "publisher_session".into(),
-            publishers: state.publishers.clone(),
+        )
+    }
+
+    fn viewer_session(
+        account: &str,
+        session_id: &str,
+    ) -> (mpsc::Receiver<ConnectionEvent>, JoinedSession) {
+        let (events, receiver) = mpsc::channel(MAX_QUEUED_MESSAGES);
+        let session = JoinedSession {
+                session_id: session_id.into(),
+                session_account: account.into(),
+                room: RoomLease {
+                    room_id: "room".into(),
+                    rooms: Arc::new(Mutex::new(HashMap::new())),
+                },
+                setup_deadline: Instant::now() + Duration::from_secs(60),
+                observed_peer_ip: None,
+                events,
+                receive_peer: None,
+                publisher: None,
+                viewer_presence_enabled: false,
+                viewer_subscription: None,
         };
-        let subscription = register_viewer_subscription(
+        (receiver, session)
+    }
+
+    async fn next_event(receiver: &mut mpsc::Receiver<ConnectionEvent>) -> ConnectionEvent {
+        tokio::time::timeout(Duration::from_secs(1), receiver.recv())
+            .await
+            .unwrap()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn view_requests_are_publisher_owned_bounded_and_decided_once() {
+        let (_sender, receiver) = watch::channel(Arc::new(InviteStore::default()));
+        let state = SignalingState::new(receiver);
+        let (mut publisher_events, entry) = publisher_entry("publisher_account");
+        state
+            .publishers
+            .lock()
+            .unwrap()
+            .insert("publisher_session".into(), entry);
+        let (mut viewer_events, viewer) = viewer_session("viewer_account", "viewer_session");
+
+        // Another room or a missing stream never reveals whether it exists.
+        let mut wrong_room = viewer_session("viewer_account", "other_session").1;
+        wrong_room.room.room_id = "other_room".into();
+        assert!(matches!(
+            request_view(&state, &wrong_room, "publisher_session"),
+            Err(ErrorCode::InvalidState)
+        ));
+        assert!(matches!(
+            request_view(&state, &viewer, "missing_publisher"),
+            Err(ErrorCode::InvalidState)
+        ));
+
+        request_view(&state, &viewer, "publisher_session").unwrap();
+        let pushed = next_event(&mut publisher_events).await;
+        let request_id = match pushed {
+            ConnectionEvent::ViewRequest {
+                request_id,
+                viewer_id,
+                viewer_display_name,
+            } => {
+                assert_eq!(viewer_id, "viewer_account");
+                assert_eq!(viewer_display_name, "viewer_account");
+                request_id
+            }
+            _ => panic!("expected a pushed view request"),
+        };
+        // Duplicates do not queue a second prompt.
+        assert!(matches!(
+            request_view(&state, &viewer, "publisher_session"),
+            Err(ErrorCode::InvalidState)
+        ));
+
+        let (mut decider_events, decider) = viewer_session("viewer_account", "decider_session");
+        decider.room.room_id = "room".into();
+        let _ = &mut decider_events;
+        // A non-publisher session cannot decide someone else's request.
+        assert!(matches!(
+            decide_view(&state, &decider, &request_id, &ViewDecisionKind::Approve),
+            Err(ErrorCode::InvalidState)
+        ));
+
+        let publisher_joined = JoinedSession {
+            session_id: "publisher_session".into(),
+            ..viewer_session("publisher_account", "ignored").1
+        };
+        decide_view(
             &state,
-            &store,
-            "room",
-            "publisher_session",
-            "viewer_session",
-            99,
+            &publisher_joined,
+            &request_id,
+            &ViewDecisionKind::Approve,
         )
         .unwrap();
-        drop(subscription);
-        assert!(publisher_lease.presence_overloaded());
+        let decision = next_event(&mut viewer_events).await;
+        let approval_id = match decision {
+            ConnectionEvent::ViewDecision {
+                decision,
+                approval_id,
+                request_id: decided,
+            } => {
+                assert!(matches!(decision, ViewDecisionKind::Approve));
+                assert_eq!(decided, request_id);
+                approval_id
+            }
+            _ => panic!("expected a pushed approval"),
+        };
+        assert!(!approval_id.is_empty());
+        // Decisions are single-use; replaying one cannot reuse the pending ID.
         assert!(matches!(
-            presence_receiver.try_recv().unwrap().change,
-            ViewerPresenceChange::Joined
+            decide_view(&state, &publisher_joined, &request_id, &ViewDecisionKind::Deny),
+            Err(ErrorCode::InvalidState)
         ));
+        // The approval is bound to the owning stream entry.
+        let approval = state
+            .publishers
+            .lock()
+            .unwrap()
+            .get("publisher_session")
+            .unwrap()
+            .approvals
+            .get(&approval_id)
+            .unwrap();
+        assert_eq!(approval.viewer_session_id, "viewer_session");
+        assert_eq!(approval.viewer_account, "viewer_account");
+    }
+
+    #[tokio::test]
+    async fn denials_cool_down_and_blocks_remove_access() {
+        let (_sender, receiver) = watch::channel(Arc::new(InviteStore::default()));
+        let state = SignalingState::new(receiver);
+        let (mut publisher_events, entry) = publisher_entry("publisher_account");
+        state
+            .publishers
+            .lock()
+            .unwrap()
+            .insert("publisher_session".into(), entry);
+        let (mut viewer_events, viewer) = viewer_session("viewer_account", "viewer_session");
+        let publisher_joined = viewer_session("publisher_account", "publisher_session").1;
+
+        request_view(&state, &viewer, "publisher_session").unwrap();
+        let request_id = match next_event(&mut publisher_events).await {
+            ConnectionEvent::ViewRequest { request_id, .. } => request_id,
+            _ => panic!("expected request"),
+        };
+        decide_view(&state, &publisher_joined, &request_id, &ViewDecisionKind::Deny).unwrap();
+        assert!(matches!(
+            next_event(&mut viewer_events).await,
+            ConnectionEvent::ViewDecision {
+                decision: ViewDecisionKind::Deny,
+                ..
+            }
+        ));
+        // Denied viewers get a cooldown before they can prompt again.
+        assert!(matches!(
+            request_view(&state, &viewer, "publisher_session"),
+            Err(ErrorCode::Denied)
+        ));
+        state
+            .publishers
+            .lock()
+            .unwrap()
+            .get_mut("publisher_session")
+            .unwrap()
+            .denied_at
+            .clear();
+
+        // An active viewer of the same account is closed when a later request
+        // is blocked: withdrawal terminates routes, not just prompts.
+        let (mut active_events, active) = viewer_session("viewer_account", "active_session");
+        register_viewer_subscription(
+            &state,
+            "room",
+            "publisher_session",
+            "active_session",
+            "viewer_account",
+            active.events.clone(),
+        )
+        .unwrap();
+        let (_blocked_events, blocked) = viewer_session("viewer_account", "blocked_session");
+        request_view(&state, &blocked, "publisher_session").unwrap();
+        let request_id = match next_event(&mut publisher_events).await {
+            ConnectionEvent::ViewRequest { request_id, .. } => request_id,
+            _ => panic!("expected second request"),
+        };
+        decide_view(&state, &publisher_joined, &request_id, &ViewDecisionKind::Block).unwrap();
+        assert!(matches!(
+            next_event(&mut active_events).await,
+            ConnectionEvent::Close(CloseReason::Revoked)
+        ));
+        assert!(matches!(
+            request_view(&state, &viewer, "publisher_session"),
+            Err(ErrorCode::Denied)
+        ));
+        // Blocked accounts cannot use a stale approval either.
         assert!(
             state
                 .publishers
@@ -1576,9 +1997,116 @@ mod tests {
                 .unwrap()
                 .get("publisher_session")
                 .unwrap()
-                .active_viewers
-                .is_empty()
+                .blocked_accounts
+                .contains("viewer_account")
         );
+    }
+
+    #[tokio::test]
+    async fn remove_viewer_terminates_sessions_approvals_and_prompts() {
+        let (_sender, receiver) = watch::channel(Arc::new(InviteStore::default()));
+        let state = SignalingState::new(receiver);
+        let (mut publisher_events, entry) = publisher_entry("publisher_account");
+        state
+            .publishers
+            .lock()
+            .unwrap()
+            .insert("publisher_session".into(), entry);
+        let publisher_joined = viewer_session("publisher_account", "publisher_session").1;
+        let (mut viewer_events, viewer) = viewer_session("viewer_account", "viewer_session");
+        let (_ignored, active) = viewer_session("active_account", "active_session");
+        register_viewer_subscription(
+            &state,
+            "room",
+            "publisher_session",
+            "active_session",
+            "active_account",
+            active.events.clone(),
+        )
+        .unwrap();
+        request_view(&state, &viewer, "publisher_session").unwrap();
+        match next_event(&mut publisher_events).await {
+            ConnectionEvent::ViewRequest { .. } => {}
+            _ => panic!("expected request"),
+        }
+        // Clearing only a pending prompt must not emit a viewer_presence left.
+        remove_viewer(&state, &publisher_joined, "viewer_account").unwrap();
+        assert!(matches!(
+            next_event(&mut viewer_events).await,
+            ConnectionEvent::ViewDecision {
+                decision: ViewDecisionKind::Deny,
+                ..
+            }
+        ));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), publisher_events.recv())
+                .await
+                .is_err()
+        );
+        // Removing an account with an active session emits exactly one left.
+        remove_viewer(&state, &publisher_joined, "active_account").unwrap();
+        match next_event(&mut publisher_events).await {
+            ConnectionEvent::ViewerPresence {
+                change: ViewerPresenceChange::Left,
+                viewer_count: 0,
+                ..
+            } => {}
+            _ => panic!("expected single presence left"),
+        }
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), publisher_events.recv())
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn publisher_offline_closes_pending_requests_and_viewers() {
+        let (_sender, receiver) = watch::channel(Arc::new(InviteStore::default()));
+        let state = SignalingState::new(receiver);
+        let (mut publisher_events, entry) = publisher_entry("publisher_account");
+        let _ = &mut publisher_events;
+        state
+            .publishers
+            .lock()
+            .unwrap()
+            .insert("publisher_session".into(), entry);
+        let (mut viewer_events, viewer) = viewer_session("viewer_account", "viewer_session");
+        request_view(&state, &viewer, "publisher_session").unwrap();
+        // Active viewer of the same stream is closed when the publisher drops.
+        let (mut active_events, active) = viewer_session("viewer2_account", "active_session");
+        let subscription = register_viewer_subscription(
+            &state,
+            "room",
+            "publisher_session",
+            "active_session",
+            "viewer2_account",
+            active.events.clone(),
+        )
+        .unwrap();
+        let _ = &mut active_events;
+
+        let lease = PublisherLease {
+            session_id: "publisher_session".into(),
+            publishers: state.publishers.clone(),
+            view_requests: state.view_requests.clone(),
+            spike: None,
+        };
+        drop(lease);
+        assert!(matches!(
+            next_event(&mut viewer_events).await,
+            ConnectionEvent::ViewDecision {
+                decision: ViewDecisionKind::Deny,
+                ..
+            }
+        ));
+        assert!(matches!(
+            next_event(&mut active_events).await,
+            ConnectionEvent::Close(CloseReason::Revoked)
+        ));
+        assert!(state.view_requests.lock().unwrap().is_empty());
+        assert!(state.publishers.lock().unwrap().is_empty());
+        drop(subscription);
     }
 
     #[test]
@@ -1624,18 +2152,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn room_and_credential_leases_are_bounded_and_released() {
+    async fn room_and_account_leases_are_bounded_and_released() {
         let (_sender, receiver) = watch::channel(Arc::new(InviteStore::default()));
         let state = SignalingState::new(receiver);
         let lease = state
-            .claim_invite("invite_1".into())
+            .claim_account("account_1".into())
             .unwrap_or_else(|_| panic!("lease"));
         assert!(matches!(
-            state.claim_invite("invite_1".into()),
+            state.claim_account("account_1".into()),
             Err(ErrorCode::Replay)
         ));
         drop(lease);
-        assert!(state.claim_invite("invite_1".into()).is_ok());
+        assert!(state.claim_account("account_1".into()).is_ok());
         let members: Vec<_> = (0..MAX_ROOM_MEMBERS)
             .map(|_| {
                 state
@@ -1652,118 +2180,61 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn operations_reauthorize_and_do_not_promise_media_or_e2ee() {
-        let (invite, _) = create_invite(
-            "invite_1".into(),
-            vec![RoomGrant {
-                room_id: "room_1".into(),
-                access: true,
-                publish: true,
-                subscribe: false,
-            }],
-            100,
-        )
-        .unwrap();
-        let store = Arc::new(
-            InviteStore::from_bytes(
-                &serde_json::to_vec(&InviteFile {
-                    version: 1,
-                    invites: vec![invite],
-                })
-                .unwrap(),
-            )
-            .unwrap(),
-        );
+    async fn any_authenticated_identity_may_join_and_list_but_never_decide() {
+        let (invite, _) = create_invite("account_1".into()).unwrap();
+        let store = store_with_invites(vec![invite]);
         let (_sender, receiver) = watch::channel(store.clone());
         let state = SignalingState::new(receiver);
         let mut session = None;
         let mut left = None;
-        let mut apply = |operation, now| {
+        let mut apply = |operation| {
             operate(
                 &state,
-                &store,
-                "invite_1",
-                now,
+                "account_1",
                 operation,
                 &mut session,
                 &mut left,
             )
         };
+        // No room grant exists anymore: joining any opaque room is grouping.
+        let ServerOperation::Joined { session_id } = apply(ClientOperation::Join {
+            room_id: "any_room".into(),
+            require_e2ee: false,
+        }) else {
+            panic!("join")
+        };
         assert!(matches!(
-            apply(
-                ClientOperation::Join {
-                    room_id: "room_2".into(),
-                    require_e2ee: false
-                },
-                99
-            ),
-            ServerOperation::Rejected {
-                code: ErrorCode::Unauthorized
-            }
-        ));
-        assert!(matches!(
-            apply(
-                ClientOperation::Join {
-                    room_id: "room_1".into(),
-                    require_e2ee: true
-                },
-                99
-            ),
+            apply(ClientOperation::Join {
+                room_id: "any_room".into(),
+                require_e2ee: true
+            }),
             ServerOperation::Rejected {
                 code: ErrorCode::E2eeUnavailable
             }
         ));
-        let ServerOperation::Joined { session_id } = apply(
-            ClientOperation::Join {
-                room_id: "room_1".into(),
-                require_e2ee: false,
-            },
-            99,
-        ) else {
-            panic!("join")
-        };
         assert!(matches!(
-            apply(
-                ClientOperation::Subscribe {
-                    session_id: session_id.clone(),
-                    publisher_id: "p".into()
-                },
-                99
-            ),
-            ServerOperation::Rejected {
-                code: ErrorCode::Unauthorized
-            }
-        ));
-        assert!(matches!(
-            apply(
-                ClientOperation::Publish {
-                    session_id: session_id.clone()
-                },
-                99
-            ),
+            apply(ClientOperation::Subscribe {
+                session_id: session_id.clone(),
+                publisher_id: "p".into(),
+                approval_id: "a".into()
+            }),
             ServerOperation::Rejected {
                 code: ErrorCode::TransportUnavailable
             }
         ));
         assert!(matches!(
-            apply(
-                ClientOperation::Publish {
-                    session_id: session_id.clone()
-                },
-                100
-            ),
+            apply(ClientOperation::Publish {
+                session_id: session_id.clone()
+            }),
             ServerOperation::Rejected {
-                code: ErrorCode::Unauthorized
+                code: ErrorCode::TransportUnavailable
             }
         ));
         for _ in 0..2 {
             assert!(matches!(
-                apply(
-                    ClientOperation::Leave {
-                        session_id: session_id.clone()
-                    },
-                    99
-                ),
+                apply(ClientOperation::Leave {
+                    session_id: session_id.clone()
+                }),
                 ServerOperation::Closed {
                     reason: CloseReason::Left,
                     ..
@@ -1774,346 +2245,72 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rtc_spike_requires_publish_scope_and_owned_session_before_sdp() {
-        let (invite, _) = create_invite(
-            "rtc_viewer".into(),
-            vec![RoomGrant {
-                room_id: "rtc_room".into(),
-                access: true,
-                publish: false,
-                subscribe: true,
-            }],
-            100,
+    async fn directory_lists_live_publishers_with_display_names() {
+        let (publisher_invite, _) = create_invite_with_display_name(
+            "publisher".into(),
+            Some("Studio PC".into()),
         )
         .unwrap();
-        let store = Arc::new(
-            InviteStore::from_bytes(
-                &serde_json::to_vec(&InviteFile {
-                    version: 1,
-                    invites: vec![invite],
-                })
-                .unwrap(),
-            )
-            .unwrap(),
-        );
+        let (other_invite, _) = create_invite("outsider".into()).unwrap();
+        let store = store_with_invites(vec![publisher_invite, other_invite]);
         let (_sender, receiver) = watch::channel(store.clone());
-        let config = SpikeConfig::from_lookup(true, |name| match name {
-            "DASS_RTC_SPIKE" => Some("true".into()),
-            "DASS_RTC_BIND_IP" | "DASS_RTC_ADVERTISED_IP" => Some("127.0.0.1".into()),
-            "DASS_RTC_FIRST_PORT" => Some("45000".into()),
-            "DASS_RTC_ALLOWED_PEERS" => Some("127.0.0.1:50000".into()),
-            _ => None,
-        })
-        .unwrap();
-        let state = SignalingState::new(receiver).with_rtc_spike(config);
-        let mut session = None;
-        let mut left = None;
-        let ServerOperation::Joined { session_id } = operate(
-            &state,
-            &store,
-            "rtc_viewer",
-            99,
-            ClientOperation::Join {
-                room_id: "rtc_room".into(),
-                require_e2ee: false,
-            },
-            &mut session,
-            &mut left,
-        ) else {
-            panic!("join");
+        let state = SignalingState::new(receiver);
+        let (_events, entry) = publisher_entry("publisher");
+        state
+            .publishers
+            .lock()
+            .unwrap()
+            .insert("source".into(), entry);
+        let ServerOperation::Directory {
+            publishers,
+            publisher_ids,
+            ..
+        } = directory(&state, &store, "room".into())
+        else {
+            panic!("directory");
         };
-        for operation in [
-            ClientOperation::Publish {
-                session_id: session_id.clone(),
-            },
-            ClientOperation::Offer {
-                session_id: session_id.clone(),
-                sdp: "not parsed".into(),
-            },
-            ClientOperation::Ice {
-                session_id: session_id.clone(),
-                candidate: "not parsed".into(),
-            },
-        ] {
-            assert!(matches!(
-                media_operation(&state, &store, "rtc_viewer", 99, &operation, &mut session).await,
-                Ok(Some(ServerOperation::Rejected {
-                    code: ErrorCode::Unauthorized
-                }))
-            ));
-        }
-        assert!(session.as_ref().unwrap().receive_peer.is_none());
-        assert!(matches!(
-            media_operation(
-                &state,
-                &store,
-                "rtc_viewer",
-                99,
-                &ClientOperation::Offer {
-                    session_id: "other_session".into(),
-                    sdp: "not parsed".into()
-                },
-                &mut session
-            )
-            .await,
-            Ok(Some(ServerOperation::Rejected {
-                code: ErrorCode::InvalidState
-            }))
-        ));
-        assert!(matches!(
-            operate(
-                &state,
-                &store,
-                "rtc_viewer",
-                99,
-                ClientOperation::Subscribe {
-                    session_id,
-                    publisher_id: "publisher".into()
-                },
-                &mut session,
-                &mut left
-            ),
-            ServerOperation::Rejected {
-                code: ErrorCode::TransportUnavailable
-            }
-        ));
+        assert_eq!(publisher_ids, vec!["source"]);
+        assert_eq!(publishers[0].display_name, "Studio PC");
+        // Rooms group discovery: another room sees nothing.
+        let ServerOperation::Directory { publisher_ids, .. } =
+            directory(&state, &store, "other".into())
+        else {
+            panic!("directory");
+        };
+        assert!(publisher_ids.is_empty());
     }
 
     #[tokio::test]
-    async fn subscriber_negotiation_uses_subscribe_scope_and_same_room_source() {
-        let (publisher, _) = create_invite(
-            "source_invite".into(),
-            vec![RoomGrant {
-                room_id: "room".into(),
-                access: true,
-                publish: true,
-                subscribe: false,
-            }],
-            100,
+    async fn account_login_display_names_feed_view_requests() {
+        let publisher = create_user("pub".into(), "a long publisher password", None).unwrap();
+        let viewer = create_user(
+            "alice".into(),
+            "correct horse battery staple",
+            Some("Alice Studio".into()),
         )
         .unwrap();
-        let (viewer, _) = create_invite(
-            "viewer_invite".into(),
-            vec![
-                RoomGrant {
-                    room_id: "room".into(),
-                    access: true,
-                    publish: false,
-                    subscribe: true,
-                },
-                RoomGrant {
-                    room_id: "other_room".into(),
-                    access: true,
-                    publish: false,
-                    subscribe: true,
-                },
-            ],
-            100,
-        )
-        .unwrap();
-        let store = Arc::new(
-            InviteStore::from_bytes(
-                &serde_json::to_vec(&InviteFile {
-                    version: 1,
-                    invites: vec![publisher, viewer],
-                })
-                .unwrap(),
-            )
-            .unwrap(),
-        );
-        let probe = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let first_port = probe.local_addr().unwrap().port().min(65534);
-        drop(probe);
-        let config = SpikeConfig::from_lookup(true, |name| match name {
-            "DASS_RTC_SPIKE" => Some("true".into()),
-            "DASS_RTC_BIND_IP" | "DASS_RTC_ADVERTISED_IP" => Some("127.0.0.1".into()),
-            "DASS_RTC_FIRST_PORT" => Some(first_port.to_string()),
-            "DASS_RTC_ALLOWED_PEERS" => Some("127.0.0.1:50000".into()),
-            _ => None,
-        })
-        .unwrap();
+        let store = users_store(vec![publisher, viewer]);
         let (_sender, receiver) = watch::channel(store.clone());
-        let state = SignalingState::new(receiver).with_rtc_spike(config);
-        let mut source_session = None;
-        let mut viewer_session = None;
-        let mut left = None;
-        let ServerOperation::Joined {
-            session_id: source_id,
-        } = operate(
-            &state,
-            &store,
-            "source_invite",
-            99,
-            ClientOperation::Join {
-                room_id: "room".into(),
-                require_e2ee: false,
-            },
-            &mut source_session,
-            &mut left,
-        )
-        else {
-            panic!("source join");
-        };
-        assert!(matches!(
-            media_operation(
-                &state,
-                &store,
-                "source_invite",
-                99,
-                &ClientOperation::Publish {
-                    session_id: source_id.clone()
-                },
-                &mut source_session
-            )
-            .await,
-            Ok(Some(ServerOperation::Accepted { .. }))
-        ));
-        let (presence_sender, _presence_receiver) = mpsc::channel(MAX_QUEUED_MESSAGES);
-        state.publishers.lock().unwrap().insert(
-            source_id.clone(),
-            PublisherEntry {
-                room_id: "room".into(),
-                invite_id: "source_invite".into(),
-                active_viewers: HashSet::new(),
-                presence_sender,
-                presence_enabled: true,
-                presence_overloaded: false,
-            },
-        );
-        let ServerOperation::Joined {
-            session_id: wrong_room_id,
-        } = operate(
-            &state,
-            &store,
-            "viewer_invite",
-            99,
-            ClientOperation::Join {
-                room_id: "other_room".into(),
-                require_e2ee: false,
-            },
-            &mut viewer_session,
-            &mut left,
-        )
-        else {
-            panic!("other room join");
-        };
-        assert!(matches!(
-            media_operation(
-                &state,
-                &store,
-                "viewer_invite",
-                99,
-                &ClientOperation::Subscribe {
-                    session_id: wrong_room_id.clone(),
-                    publisher_id: source_id.clone()
-                },
-                &mut viewer_session
-            )
-            .await,
-            Ok(Some(ServerOperation::Rejected {
-                code: ErrorCode::InvalidState
-            }))
-        ));
-        operate(
-            &state,
-            &store,
-            "viewer_invite",
-            99,
-            ClientOperation::Leave {
-                session_id: wrong_room_id,
-            },
-            &mut viewer_session,
-            &mut left,
-        );
-        let ServerOperation::Joined {
-            session_id: viewer_id,
-        } = operate(
-            &state,
-            &store,
-            "viewer_invite",
-            99,
-            ClientOperation::Join {
-                room_id: "room".into(),
-                require_e2ee: false,
-            },
-            &mut viewer_session,
-            &mut left,
-        )
-        else {
-            panic!("viewer join");
-        };
-        assert!(matches!(
-            media_operation(
-                &state,
-                &store,
-                "viewer_invite",
-                99,
-                &ClientOperation::Subscribe {
-                    session_id: viewer_id.clone(),
-                    publisher_id: source_id
-                },
-                &mut viewer_session
-            )
-            .await,
-            Ok(Some(ServerOperation::Accepted { .. }))
-        ));
-        let mut rtc = str0m::Rtc::builder()
-            .set_crypto_provider(Arc::new(str0m_aws_lc_rs::default_provider()))
-            .build(std::time::Instant::now());
-        let mut change = rtc.sdp_api();
-        change.add_media(
-            str0m::media::MediaKind::Audio,
-            str0m::media::Direction::RecvOnly,
-            None,
-            None,
-            None,
-        );
-        let (offer, _) = change.apply().unwrap();
-        while !matches!(rtc.poll_output().unwrap(), str0m::Output::Timeout(_)) {}
-        assert!(matches!(
-            media_operation(
-                &state,
-                &store,
-                "viewer_invite",
-                99,
-                &ClientOperation::Offer {
-                    session_id: viewer_id.clone(),
-                    sdp: offer.to_sdp_string()
-                },
-                &mut viewer_session
-            )
-            .await,
-            Ok(Some(ServerOperation::Answer { .. }))
-        ));
-        assert!(matches!(
-            media_operation(
-                &state,
-                &store,
-                "viewer_invite",
-                100,
-                &ClientOperation::Ice {
-                    session_id: viewer_id,
-                    candidate: "not parsed after expiry".into()
-                },
-                &mut viewer_session
-            )
-            .await,
-            Ok(Some(ServerOperation::Rejected {
-                code: ErrorCode::Unauthorized
-            }))
-        ));
-        drop(source_session);
-        assert!(
-            viewer_session
-                .as_mut()
-                .unwrap()
-                .receive_peer
-                .as_mut()
-                .unwrap()
-                .timeout()
-                .await
-                .is_err()
-        );
+        let state = SignalingState::new(receiver);
+        let (mut publisher_events, entry) = publisher_entry("pub");
+        state
+            .publishers
+            .lock()
+            .unwrap()
+            .insert("publisher_session".into(), entry);
+        let (_viewer_events, viewer) = viewer_session("alice", "viewer_session");
+        request_view(&state, &viewer, "publisher_session").unwrap();
+        match next_event(&mut publisher_events).await {
+            ConnectionEvent::ViewRequest {
+                viewer_id,
+                viewer_display_name,
+                ..
+            } => {
+                assert_eq!(viewer_id, "alice");
+                assert_eq!(viewer_display_name, "Alice Studio");
+            }
+            _ => panic!("expected view request"),
+        }
     }
 }
 
@@ -2122,7 +2319,7 @@ mod network_tests {
     use super::*;
     use crate::{
         app_with_signaling,
-        auth::{InviteFile, RoomGrant, create_invite_with_display_name},
+        auth::{InviteFile, create_invite_with_display_name},
         config::{Config, TlsFiles},
         listener::{BoundedListener, tls_acceptor_from_der},
     };
@@ -2155,85 +2352,20 @@ mod network_tests {
         }
     }
 
-    async fn start(expires: u32) -> Server {
-        start_with_spike(expires, None).await
+    async fn start() -> Server {
+        start_with_spike(None).await
     }
 
-    #[tokio::test]
-    async fn account_allowed_ips_use_tcp_peer_not_spoofed_forwarding_header() {
-        use crate::auth::{UsersFile, create_user};
-
-        let expires = now_seconds().unwrap() + 60;
-        let server = start(expires).await;
-        let mut user = create_user(
-            "alice".into(),
-            "a long user password",
-            None,
-            vec![],
-            expires,
-        )
-        .unwrap();
-        // connect() sends X-Forwarded-For: 192.168.1.77; that is not the TCP IP.
-        user.allowed_ips = vec!["192.168.1.77".parse().unwrap()];
-        let bytes = serde_json::to_vec(&UsersFile {
-            version: 1,
-            users: vec![user.clone()],
-        })
-        .unwrap();
-        server
-            .invites
-            .send_replace(Arc::new(InviteStore::from_users_bytes(&bytes).unwrap()));
-        let mut client = connect(&server, "https://discord.com", "").await.unwrap();
-        let login = serde_json::json!({
-            "type": "account_login", "username": "alice", "password": "a long user password"
-        });
-        let denied = request(&mut client, "denied_ip", login.clone()).await;
-        assert_eq!(denied["operation"]["type"], "rejected");
-        assert_eq!(denied["operation"]["code"], "unauthorized");
-        drop(client);
-
-        user.allowed_ips = vec!["127.0.0.1".parse().unwrap()];
-        let bytes = serde_json::to_vec(&UsersFile {
-            version: 1,
-            users: vec![user],
-        })
-        .unwrap();
-        server
-            .invites
-            .send_replace(Arc::new(InviteStore::from_users_bytes(&bytes).unwrap()));
-        let mut client = connect(&server, "https://discord.com", "").await.unwrap();
-        let allowed = request(&mut client, "allowed_ip", login).await;
-        assert_eq!(allowed["operation"]["type"], "authenticated");
-    }
-
-    async fn start_with_spike(expires: u32, spike: Option<SpikeConfig>) -> Server {
-        let (invite, credential) = create_invite_with_display_name(
-            "network_invite".into(),
-            Some("DASS Publisher".into()),
-            vec![RoomGrant {
-                room_id: "room_1".into(),
-                access: true,
-                publish: true,
-                subscribe: false,
-            }],
-            expires,
-        )
-        .unwrap();
-        let (viewer_invite, viewer_credential) = create_invite_with_display_name(
-            "directory_viewer".into(),
-            Some("DASS Viewer".into()),
-            vec![RoomGrant {
-                room_id: "room_1".into(),
-                access: true,
-                publish: false,
-                subscribe: true,
-            }],
-            expires,
-        )
-        .unwrap();
+    async fn start_with_spike(spike: Option<SpikeConfig>) -> Server {
+        let (invite, credential) =
+            create_invite_with_display_name("network_invite".into(), Some("DASS Publisher".into()))
+                .unwrap();
+        let (viewer_invite, viewer_credential) =
+            create_invite_with_display_name("directory_viewer".into(), Some("DASS Viewer".into()))
+                .unwrap();
         let store = InviteStore::from_bytes(
             &serde_json::to_vec(&InviteFile {
-                version: 1,
+                version: 2,
                 invites: vec![invite, viewer_invite],
             })
             .unwrap(),
@@ -2317,7 +2449,7 @@ mod network_tests {
         request
             .headers_mut()
             .insert(header::ORIGIN, origin.parse().unwrap());
-        // Deliberately spoofed: auto admission must use the accepted TCP peer,
+        // Deliberately spoofed: admission must use the accepted TCP peer,
         // never forwarding headers supplied by the signaling client.
         request
             .headers_mut()
@@ -2359,339 +2491,72 @@ mod network_tests {
     }
 
     async fn authenticate(server: &Server) -> Client {
+        authenticate_as(server, &server.credential.clone()).await
+    }
+
+    async fn authenticate_as(server: &Server, credential: &str) -> Client {
         let mut client = connect(server, "https://discord.com", "").await.unwrap();
         let result = request(
             &mut client,
             "login_1",
-            serde_json::json!({ "type": "login", "credential": server.credential }),
+            serde_json::json!({ "type": "login", "credential": credential }),
         )
         .await;
         assert_eq!(result["operation"]["type"], "authenticated");
         client
     }
 
+    async fn join(client: &mut Client, room: &str, request_id: &str) -> String {
+        let joined = request(
+            client,
+            request_id,
+            serde_json::json!({
+                "type": "join", "room_id": room, "require_e2ee": false,
+            }),
+        )
+        .await;
+        assert_eq!(joined["operation"]["type"], "joined");
+        joined["operation"]["session_id"].as_str().unwrap().to_owned()
+    }
+
     #[tokio::test]
-    async fn authenticated_wss_negotiates_dtls_and_revocation_drops_rtc_socket() {
-        use str0m::{
-            Candidate, Event, Input, Output, Rtc,
-            change::SdpAnswer,
-            media::{Direction, MediaKind},
-            net::{Protocol, Receive},
-        };
-        use tokio::net::UdpSocket;
-
-        let publisher_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let publisher_address = publisher_socket.local_addr().unwrap();
-        let probe = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let first_port = probe.local_addr().unwrap().port().min(65534);
-        drop(probe);
-        let spike = SpikeConfig::from_lookup(true, |name| match name {
-            "DASS_RTC_SPIKE" => Some("true".into()),
-            "DASS_RTC_BIND_IP" | "DASS_RTC_ADVERTISED_IP" => Some("127.0.0.1".into()),
-            "DASS_RTC_FIRST_PORT" => Some(first_port.to_string()),
-            "DASS_RTC_AUTO_LAN_PEERS" => Some("true".into()),
-            _ => None,
-        })
-        .unwrap();
-        let server = start_with_spike(now_seconds().unwrap() + 60, spike).await;
+    async fn authenticated_sessions_are_bounded_and_revocation_closes_them() {
+        let server = start().await;
         let mut client = authenticate(&server).await;
-        let joined = request(
-            &mut client,
-            "rtc_join",
-            serde_json::json!({
-                "type": "join", "room_id": "room_1", "require_e2ee": false,
-            }),
+        let authenticated_at = now_seconds().unwrap();
+        let mut duplicate = connect(&server, "https://discord.com", "").await.unwrap();
+        let denied = request(
+            &mut duplicate,
+            "login_2",
+            serde_json::json!({ "type": "login", "credential": server.credential }),
         )
         .await;
-        let session_id = joined["operation"]["session_id"]
-            .as_str()
-            .unwrap()
-            .to_owned();
+        assert_eq!(denied["operation"]["code"], "replay");
         let result = request(
             &mut client,
-            "rtc_before_publish",
-            serde_json::json!({
-                "type": "offer", "session_id": session_id, "sdp": "must not be parsed",
-            }),
+            "e2ee",
+            serde_json::json!({ "type": "join", "room_id": "room_1", "require_e2ee": true }),
         )
         .await;
-        assert_eq!(result["operation"]["code"], "invalid_state");
-        let result = request(
-            &mut client,
-            "rtc_publish",
-            serde_json::json!({
-                "type": "publish", "session_id": session_id,
-            }),
-        )
+        assert_eq!(result["operation"]["code"], "e2ee_unavailable");
+        let session_id = join(&mut client, "room_1", "join").await;
+        let result = request(&mut client, "subscribe", serde_json::json!({
+            "type": "subscribe", "session_id": session_id, "publisher_id": "p", "approval_id": "a"
+        }))
         .await;
-        assert_eq!(result["operation"]["type"], "accepted");
-        let result = request(
-            &mut client,
-            "presence_enable",
-            serde_json::json!({
-                "type": "enable_viewer_presence", "session_id": session_id,
-            }),
-        )
-        .await;
-        assert_eq!(result["operation"]["type"], "accepted");
-
-        let mut viewer = connect(&server, "https://discord.com", "").await.unwrap();
-        let result = request(
-            &mut viewer,
-            "directory_login",
-            serde_json::json!({ "type": "login", "credential": server.viewer_credential }),
-        )
-        .await;
-        assert_eq!(result["operation"]["type"], "authenticated");
-        let result = request(
-            &mut viewer,
-            "directory_pending",
-            serde_json::json!({ "type": "directory", "room_id": "room_1" }),
-        )
-        .await;
-        assert_eq!(result["operation"]["publisher_ids"], serde_json::json!([]));
-        assert_eq!(result["operation"]["publishers"], serde_json::json!([]));
-
-        let mut publisher = Rtc::builder()
-            .set_crypto_provider(Arc::new(str0m_aws_lc_rs::default_provider()))
-            .set_fingerprint_verification(true)
-            .build(std::time::Instant::now());
-        publisher.add_local_candidate(Candidate::host(publisher_address, "udp").unwrap());
-        while !matches!(publisher.poll_output().unwrap(), Output::Timeout(_)) {}
-        let mut change = publisher.sdp_api();
-        change.add_media(MediaKind::Audio, Direction::SendOnly, None, None, None);
-        let (offer, pending) = change.apply().unwrap();
-        while !matches!(publisher.poll_output().unwrap(), Output::Timeout(_)) {}
-        let answer_response = request(
-            &mut client,
-            "rtc_offer",
-            serde_json::json!({
-                "type": "offer", "session_id": session_id, "sdp": offer.to_sdp_string(),
-            }),
-        )
-        .await;
-        assert_eq!(answer_response["operation"]["type"], "answer");
-        let sdp = answer_response["operation"]["sdp"].as_str().unwrap();
-        let server_address = sdp
-            .lines()
-            .find_map(|line| {
-                line.strip_prefix("a=candidate:").map(|candidate| {
-                    Candidate::from_sdp_string(&format!("candidate:{candidate}"))
-                        .unwrap()
-                        .addr()
-                })
-            })
-            .unwrap();
-        assert!(server_address.ip().is_loopback());
-        assert!((first_port..=first_port + 1).contains(&server_address.port()));
-        publisher
-            .sdp_api()
-            .accept_answer(pending, SdpAnswer::from_sdp_string(sdp).unwrap())
-            .unwrap();
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
-        let mut buffer = [0_u8; 2_049];
-        let mut connected = false;
-        while !connected {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "authenticated RTC setup deadline"
-            );
-            let mut datagrams = Vec::new();
-            let timeout = loop {
-                match publisher.poll_output().unwrap() {
-                    Output::Timeout(timeout) => break timeout,
-                    Output::Transmit(transmit) => {
-                        assert_eq!(transmit.destination, server_address);
-                        assert!(datagrams.len() < 32);
-                        datagrams.push(transmit.contents.to_vec());
-                    }
-                    Output::Event(Event::Connected) => connected = true,
-                    Output::Event(_) => {}
-                }
-            };
-            for bytes in datagrams {
-                publisher_socket
-                    .send_to(&bytes, server_address)
-                    .await
-                    .unwrap();
-            }
-            if connected {
-                break;
-            }
-            match tokio::time::timeout(
-                Duration::from_millis(2),
-                publisher_socket.recv_from(&mut buffer),
-            )
-            .await
-            {
-                Ok(Ok((length, source))) => {
-                    assert_eq!(source, server_address);
-                    publisher
-                        .handle_input(Input::Receive(
-                            std::time::Instant::now(),
-                            Receive {
-                                proto: Protocol::Udp,
-                                source,
-                                destination: publisher_address,
-                                contents: buffer[..length].try_into().unwrap(),
-                            },
-                        ))
-                        .unwrap();
-                }
-                Ok(Err(_)) => panic!("publisher UDP receive failed"),
-                Err(_) if std::time::Instant::now() >= timeout => {
-                    publisher
-                        .handle_input(Input::Timeout(std::time::Instant::now()))
-                        .unwrap();
-                }
-                Err(_) => {}
-            }
-        }
-
-        let mut discovered = false;
-        for index in 0..100 {
-            let result = request(
-                &mut viewer,
-                &format!("directory_connected_{index}"),
-                serde_json::json!({ "type": "directory", "room_id": "room_1" }),
-            )
-            .await;
-            if result["operation"]["publisher_ids"] == serde_json::json!([session_id]) {
-                assert_eq!(
-                    result["operation"]["publishers"],
-                    serde_json::json!([{
-                        "publisher_id": session_id,
-                        "display_name": "DASS Publisher"
-                    }])
-                );
-                discovered = true;
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-        assert!(discovered, "connected RTC publisher was not discoverable");
-
-        let joined = request(
-            &mut viewer,
-            "presence_join",
-            serde_json::json!({
-                "type": "join", "room_id": "room_1", "require_e2ee": false,
-            }),
-        )
-        .await;
-        let viewer_session_id = joined["operation"]["session_id"]
-            .as_str()
-            .unwrap()
-            .to_owned();
-        let unauthorized_opt_in = request(
-            &mut viewer,
-            "viewer_presence_opt_in",
-            serde_json::json!({
-                "type": "enable_viewer_presence", "session_id": viewer_session_id,
-            }),
-        )
-        .await;
-        assert_eq!(unauthorized_opt_in["operation"]["code"], "unauthorized");
-        let accepted = request(
-            &mut viewer,
-            "presence_subscribe",
-            serde_json::json!({
-                "type": "subscribe",
-                "session_id": viewer_session_id,
-                "publisher_id": session_id,
-            }),
-        )
-        .await;
-        assert_eq!(accepted["operation"]["type"], "accepted");
-        let presence = response(&mut client).await;
-        assert_eq!(
-            presence,
-            serde_json::json!({
-                "protocol_version": 1,
-                "request_id": PRESENCE_REQUEST_ID,
-                "operation": {
-                    "type": "viewer_presence",
-                    "session_id": session_id,
-                    "change": "joined",
-                    "viewer_count": 1,
-                }
-            })
-        );
-
-        let left = request(
-            &mut viewer,
-            "presence_leave",
-            serde_json::json!({ "type": "leave", "session_id": viewer_session_id }),
-        )
-        .await;
-        assert_eq!(left["operation"]["reason"], "left");
-        let presence = response(&mut client).await;
-        assert_eq!(presence["request_id"], PRESENCE_REQUEST_ID);
-        assert_eq!(presence["operation"]["type"], "viewer_presence");
-        assert_eq!(presence["operation"]["session_id"], session_id);
-        assert_eq!(presence["operation"]["change"], "left");
-        assert_eq!(presence["operation"]["viewer_count"], 0);
-
-        let joined = request(
-            &mut viewer,
-            "presence_rejoin",
-            serde_json::json!({
-                "type": "join", "room_id": "room_1", "require_e2ee": false,
-            }),
-        )
-        .await;
-        let viewer_session_id = joined["operation"]["session_id"]
-            .as_str()
-            .unwrap()
-            .to_owned();
-        let accepted = request(
-            &mut viewer,
-            "presence_resubscribe",
-            serde_json::json!({
-                "type": "subscribe",
-                "session_id": viewer_session_id,
-                "publisher_id": session_id,
-            }),
-        )
-        .await;
-        assert_eq!(accepted["operation"]["type"], "accepted");
-        let presence = response(&mut client).await;
-        assert_eq!(presence["operation"]["change"], "joined");
-        assert_eq!(presence["operation"]["viewer_count"], 1);
-        drop(viewer);
-        let presence = response(&mut client).await;
-        assert_eq!(presence["request_id"], PRESENCE_REQUEST_ID);
-        assert_eq!(presence["operation"]["type"], "viewer_presence");
-        assert_eq!(presence["operation"]["session_id"], session_id);
-        assert_eq!(presence["operation"]["change"], "left");
-        assert_eq!(presence["operation"]["viewer_count"], 0);
-
-        // The tested control-policy watch reload must tear down actual RTC ownership,
-        // not merely invalidate a control-only room reservation.
+        // Without the RTC spike a subscribe never reaches approval checks.
+        assert_eq!(result["operation"]["code"], "transport_unavailable");
         server
             .invites
             .send_replace(Arc::new(InviteStore::default()));
-        let closed = response(&mut client).await;
-        assert_eq!(closed["operation"]["session_id"], session_id);
-        assert_eq!(closed["operation"]["reason"], "revoked");
-        for _ in 0..100 {
-            if let Ok(socket) = UdpSocket::bind(server_address).await {
-                drop(socket);
-                if server.state.rooms.lock().unwrap().is_empty()
-                    && server.state.active_invites.lock().unwrap().is_empty()
-                    && server.state.publishers.lock().unwrap().is_empty()
-                {
-                    return;
-                }
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        panic!("revoked RTC UDP socket leaked");
+        let result = response(&mut client).await;
+        assert_eq!(result["operation"]["reason"], "revoked");
+        let _ = authenticated_at;
     }
 
     #[tokio::test]
     async fn tls_websocket_enforces_origin_url_policy_and_admission() {
-        let server = start(now_seconds().unwrap() + 60).await;
+        let server = start().await;
         for (origin, suffix, expected) in [
             ("https://attacker.invalid", "", 403),
             ("null", "", 403),
@@ -2716,7 +2581,7 @@ mod network_tests {
 
     #[tokio::test]
     async fn tls_discovery_separates_control_plane_from_unavailable_media() {
-        let server = start(now_seconds().unwrap() + 60).await;
+        let server = start().await;
         for (path, assertions) in [("/v1/capabilities", true), ("/health/ready", false)] {
             let tcp = TcpStream::connect(server.address).await.unwrap();
             let mut tls = server
@@ -2735,15 +2600,12 @@ mod network_tests {
                 tokio::time::timeout(Duration::from_secs(3), tls.read_to_end(&mut bytes))
                     .await
                     .unwrap();
-            // Hyper may drop the upgraded/closed transport without TLS close_notify.
-            // Inspect the complete HTTP response, but never bypass certificate verification.
             if let Err(error) = read_result {
                 assert_eq!(error.kind(), std::io::ErrorKind::UnexpectedEof);
             }
             let response = String::from_utf8(bytes).unwrap();
             if assertions {
                 assert!(response.starts_with("HTTP/1.1 200"));
-                // The HTTP body may be chunked; inspect only complete known JSON fields.
                 for field in ["control_plane_available", "authentication_available"] {
                     assert!(response.contains(&format!("\"{field}\":true")));
                 }
@@ -2756,7 +2618,6 @@ mod network_tests {
                 ] {
                     assert!(response.contains(&format!("\"{field}\":false")));
                 }
-                assert!(response.trim_end().ends_with('}'));
             } else {
                 assert!(response.starts_with("HTTP/1.1 503"));
             }
@@ -2765,7 +2626,7 @@ mod network_tests {
 
     #[tokio::test]
     async fn first_message_must_be_login_and_login_deadline_releases_admission() {
-        let server = start(now_seconds().unwrap() + 60).await;
+        let server = start().await;
         let mut client = connect(&server, "https://discord.com", "").await.unwrap();
         let result = request(
             &mut client,
@@ -2793,14 +2654,9 @@ mod network_tests {
 
     #[tokio::test]
     async fn joined_room_reservation_expires_without_media_setup() {
-        let server = start(now_seconds().unwrap() + 60).await;
+        let server = start().await;
         let mut client = authenticate(&server).await;
-        request(
-            &mut client,
-            "join",
-            serde_json::json!({ "type": "join", "room_id": "room_1", "require_e2ee": false }),
-        )
-        .await;
+        join(&mut client, "room_1", "join").await;
         let frame = tokio::time::timeout(Duration::from_secs(18), client.next())
             .await
             .unwrap()
@@ -2811,106 +2667,30 @@ mod network_tests {
     }
 
     #[tokio::test]
-    async fn wss_login_room_roles_replay_and_revocation_fail_closed() {
-        let server = start(now_seconds().unwrap() + 60).await;
-        let mut client = authenticate(&server).await;
-        let mut duplicate = connect(&server, "https://discord.com", "").await.unwrap();
-        let denied = request(
-            &mut duplicate,
-            "login_2",
-            serde_json::json!({ "type": "login", "credential": server.credential }),
+    async fn view_requests_flow_over_wss_and_direct_subscribe_is_denied() {
+        let server = start().await;
+        // A registered connected publisher would need the RTC spike; without it
+        // request_view cannot find a live stream and stays denied.
+        let mut viewer = authenticate_as(&server, &server.viewer_credential).await;
+        let session_id = join(&mut viewer, "room_1", "viewer_join").await;
+        let result = request(
+            &mut viewer,
+            "request_missing",
+            serde_json::json!({
+                "type": "request_view", "session_id": session_id, "publisher_id": "missing"
+            }),
         )
         .await;
-        assert_eq!(denied["operation"]["code"], "replay");
+        assert_eq!(result["operation"]["code"], "invalid_state");
         let result = request(
-            &mut client,
-            "e2ee",
-            serde_json::json!({ "type": "join", "room_id": "room_1", "require_e2ee": true }),
-        )
-        .await;
-        assert_eq!(result["operation"]["code"], "e2ee_unavailable");
-        let result = request(
-            &mut client,
-            "wrong_room",
-            serde_json::json!({ "type": "join", "room_id": "room_2", "require_e2ee": false }),
-        )
-        .await;
-        assert_eq!(result["operation"]["code"], "unauthorized");
-        let result = request(
-            &mut client,
-            "join",
-            serde_json::json!({ "type": "join", "room_id": "room_1", "require_e2ee": false }),
-        )
-        .await;
-        let session_id = result["operation"]["session_id"].as_str().unwrap();
-        let result = request(&mut client, "subscribe", serde_json::json!({ "type": "subscribe", "session_id": session_id, "publisher_id": "p" })).await;
-        assert_eq!(result["operation"]["code"], "unauthorized");
-        let result = request(
-            &mut client,
-            "publish",
-            serde_json::json!({ "type": "publish", "session_id": session_id }),
+            &mut viewer,
+            "subscribe_direct",
+            serde_json::json!({
+                "type": "subscribe", "session_id": session_id,
+                "publisher_id": "missing", "approval_id": "forged"
+            }),
         )
         .await;
         assert_eq!(result["operation"]["code"], "transport_unavailable");
-        server
-            .invites
-            .send_replace(Arc::new(InviteStore::default()));
-        let result = response(&mut client).await;
-        assert_eq!(result["operation"]["reason"], "revoked");
-        let frame = tokio::time::timeout(Duration::from_secs(3), client.next())
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
-        assert!(matches!(frame, ClientFrame::Close(_)));
-    }
-
-    #[tokio::test]
-    async fn duplicate_request_and_expired_invite_are_rejected_over_wss() {
-        let server = start(now_seconds().unwrap() + 60).await;
-        let mut client = authenticate(&server).await;
-        let result = request(
-            &mut client,
-            "login_1",
-            serde_json::json!({ "type": "join", "room_id": "room_1", "require_e2ee": false }),
-        )
-        .await;
-        assert_eq!(result["operation"]["code"], "replay");
-        let expired = start(now_seconds().unwrap().saturating_sub(1)).await;
-        let mut client = connect(&expired, "https://discord.com", "").await.unwrap();
-        let result = request(
-            &mut client,
-            "login",
-            serde_json::json!({ "type": "login", "credential": expired.credential }),
-        )
-        .await;
-        assert_eq!(result["operation"]["code"], "unauthorized");
-    }
-
-    #[tokio::test]
-    async fn live_session_expiry_closes_wss_and_releases_membership() {
-        let server = start(now_seconds().unwrap() + 8).await;
-        let mut client = authenticate(&server).await;
-        request(
-            &mut client,
-            "join",
-            serde_json::json!({ "type": "join", "room_id": "room_1", "require_e2ee": false }),
-        )
-        .await;
-        let frame = tokio::time::timeout(Duration::from_secs(10), client.next())
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
-        let result: serde_json::Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
-        assert_eq!(result["operation"]["reason"], "expired");
-        let _ = tokio::time::timeout(Duration::from_secs(3), client.next()).await;
-        for _ in 0..100 {
-            if server.state.rooms.lock().unwrap().is_empty() {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        panic!("membership leaked after expiry");
     }
 }

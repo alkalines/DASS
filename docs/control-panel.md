@@ -4,18 +4,19 @@ Discord Alternative ScreenShare (DASS) has an optional black-and-white control
 panel served by the existing Rust backend, with no extra server or frontend
 runtime. It has exactly three pages:
 
-- **Users**: add, edit, reset passwords, revoke and remove DASS accounts; edit
-  display names, expiration, room permissions and allowed exact connection IPs.
-  The permission helper adds exact-room or explicitly confirmed all-room roles.
-  Validation is shown before saving, including the password's UTF-8 byte count;
-  a new password must contain 12–512 bytes. Empty room grants require confirming
-  that the user will have no media access.
-- **Rooms**: inspect active/configured rooms, block/unblock room IDs and disconnect
-  all DASS sessions. A blocked room overrides account wildcard grants.
-- **Streams**: list connected publishers. **Browser playback is unavailable**:
-  the experimental media implementation has one viewer slot backend-wide and
-  signaling accepts only the Discord client origin. Watch through a separately
-  authorized DASS client. Admin authentication never grants media permissions.
+- **Users**: add, edit, reset passwords and remove DASS accounts; edit display
+  names only. Validation is shown before saving, including the password's UTF-8
+  byte count; a new password must contain 12–512 bytes. Account management
+  grants no stream or room permissions: stream admission is decided live by
+  each publisher through approval prompts inside the client.
+- **Rooms**: a read-only grouping view of joined DASS sessions; rooms carry no
+  authority and cannot be blocked or granted. The page can disconnect all DASS
+  sessions as a blunt containment action.
+- **Streams**: list connected publishers with viewer and pending-request counts.
+  **Browser playback is unavailable**: the experimental media implementation
+  has one viewer slot backend-wide and signaling accepts only the Discord
+  client origin. Watch through a publisher-approved DASS client. Admin
+  authentication never grants media permissions.
 
 This is new implementation, **not runtime-accepted or production-ready**. Existing
 LAN transport limitations, lack of E2EE and readiness 503 remain unchanged.
@@ -72,8 +73,10 @@ chmod 600 .secrets/backend.env
 ```
 
 For a new setup, first follow [LAN account/TLS setup](lan-accounts.md). An empty
-bootstrap account configuration `DASS_USERS={"version":1,"users":[]}` is permitted
-so accounts can be created in the panel. Never enable LAN/public plaintext: Basic
+bootstrap account configuration `DASS_USERS={"version":2,"users":[]}` is permitted
+so accounts can be created in the panel. Version-1 documents with room grants,
+expiration, revocation or login IP allowlists fail closed; see the migration
+section in [lan-accounts.md](lan-accounts.md). Never enable LAN/public plaintext: Basic
 Auth is **encoding, not encryption**. Use trusted HTTPS certificates outside
 explicit loopback-only development. The existing backend TLS configuration is
 used; no proxy or forwarded IP trust is introduced.
@@ -93,8 +96,8 @@ it against the configured hash. Do not use the hash as the login password.
 
 - The named `backend-data` Docker volume holds `/var/lib/dass/policy.json`, writable
   only by backend UID/GID `10001:10001`. The root filesystem remains read-only,
-  capability-free and resource-bounded. Protect volume backups: they contain hashes
-  and authorization/IP metadata. There is no plaintext password persistence.
+  capability-free and resource-bounded. Protect volume backups: they contain
+  password hashes. There is no plaintext password persistence.
 - On first panel startup, `DASS_USERS` seeds the durable policy. Thereafter that
   file is authoritative: environment account edits **do not overwrite panel edits**.
   Admin login credentials still come only from the environment and changing them
@@ -111,17 +114,16 @@ it against the configured hash. Do not use the hash as the login password.
   stale authorization and releases RTC-owned UDP admission. Capture/viewer cleanup
   on real clients still needs acceptance. Normal Discord voice is independent;
   DASS streams are not restarted automatically.
-- Rooms are implicit client contexts, not persistent media instances. Blocking an
-  ID prevents access; it does not delete a Discord channel. Exact IDs and the `*`
-  account selector are additive grants, not proof of Discord membership.
-- `allowed_ips` is an optional account JSON array of at most 16 distinct exact
-  IPv4/IPv6 addresses. Empty means unrestricted by this extra login check; unknown
-  TCP IP fails closed when the list is nonempty. Multicast/unspecified addresses
-  and duplicates are rejected. The accepted TCP peer is authoritative;
-  `Forwarded`, `X-Forwarded-For`, and client claims are ignored. Docker/proxy/NAT
-  source translation can therefore cause denials. This does **not** change host
-  firewall rules or relax RTC safe-destination/LAN candidate policies. RTC automatic
-  admission still supports only private/loopback IPv4, not IPv6 media.
+- Rooms are implicit client contexts for discovery grouping only. They carry no
+  grants, block flags or persistent media state; a publisher's client decides
+  stream admission per request. Account removal or password reset is the only
+  administrative containment; every policy edit still disconnects all sessions.
+- Account `allowed_ips` login restrictions were removed. The accepted TCP peer
+  remains authoritative for login rate limiting and automatic RTC admission;
+  `Forwarded`, `X-Forwarded-For`, and client claims are ignored. This does
+  **not** change host firewall rules or relax RTC safe-destination/LAN candidate
+  policies. RTC automatic admission still supports only private/loopback IPv4,
+  not IPv6 media.
 - No admin CORS permissions are granted. Writes require JSON and a non-simple
   custom header; cross-site browser requests are denied. Responses disable caching,
   framing and inline scripts. Password hashes never appear in panel API responses.
@@ -131,7 +133,7 @@ it against the configured hash. Do not use the hash as the login password.
 
 ## Validation
 
-Frontend UI-logic tests passed with Bun 1.4.3: **10 tests, 50 assertions** using a
+Frontend UI-logic tests passed with Bun 1.4.3: **8 tests, 40 assertions** using a
 small fake DOM. The browser script also bundled successfully. This checks page
 rendering, request headers/payloads, validation and error handling, not real browser Basic Auth
 or backend/media behavior. Run locally with `bun test ./tests/admin`.
@@ -148,9 +150,10 @@ docker compose build backend
 
 The build checks formatting, denies Clippy warnings, runs locked workspace tests
 and builds the release image. New tests cover credential parsing, panel route
-authentication, CSRF refusal, durable account CRUD, hash redaction, IP restrictions,
-room blocking and policy-change notifications. They remain **unexecuted** here.
+authentication, CSRF refusal, durable account CRUD, hash redaction, legacy
+document fail-closed loading and policy-change notifications. They remain
+**unexecuted** here.
 GUI/runtime acceptance should additionally check browser Basic login, user password
-reset/removal, restart persistence, revocation during live media, actual TCP source
+reset/removal, restart persistence, containment during live media, actual TCP source
 addresses, release of UDP admission and unauthorized panel access. Build success
 alone is not runtime/security evidence.

@@ -129,12 +129,13 @@ any later local-only UDP publication must be explicit and host-loopback-bound.
 Do not expose this spike publicly or change the existing HTTP loopback policy.
 
 The validated receive-only checkpoint's client flow: WSS `dass.v1` with exact `https://discord.com` Origin → timed DASS
-login → authorized room join with `require_e2ee=false` → publish → send-only
+login → room join with `require_e2ee=false` → publish → send-only
 audio/video offer → answer → optional bounded trickle candidates. A publish
 `accepted` response reserves a receive transport, not proof of media delivery.
-Offer/ICE must reference that connection's session and require access **and**
-publish grants every time. That checkpoint refused viewer subscriptions; the
-new Docker-tested forwarding source enables a narrow subscribe role as documented
+Offer/ICE must reference that connection's authenticated session.
+That checkpoint refused viewer subscriptions; the
+new Docker-tested forwarding source enables a narrow, publisher-approved
+subscribe path as documented
 in [forwarding-spike.md](forwarding-spike.md). Duplicate request IDs and duplicate active credentials
 remain rejected as before.
 
@@ -161,13 +162,15 @@ actual candidates and arrange exact allowlisting without logging full SDP.
 - Small explicit send/reordering buffers; RTP mode avoids encoded-frame
   reassembly. No application media cache, decoding, transcoding or recording.
 - 15-second room-to-DTLS setup deadline; 30-second accepted-input inactivity
-  timeout; ten-minute maximum RTC lifetime, plus invite expiry/revocation.
+  timeout; ten-minute maximum RTC lifetime, plus the 600-second session lifetime
+  and policy-reload containment.
 - Drop-owned socket/RTC/admission cleanup on leave, WSS close, auth failure,
   shutdown/reload, setup failure and overload. No additional client processes.
 
 Application bounds and library buffer settings are not a complete adversarial
-resource audit. Peer allowlisting is not authorization; DASS room grants remain
-mandatory. Node failure/reconnect, SIGHUP delivery, malformed crypto packet
+resource audit. Peer allowlisting is not authorization; publisher approval is
+required before any subscribe allocates a route. Node failure/reconnect, SIGHUP
+delivery, malformed crypto packet
 stress tests and real Equibop integration remain to be exercised.
 
 After this checkpoint passes, add only the minimal authorized two-client

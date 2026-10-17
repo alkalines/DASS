@@ -94,6 +94,33 @@ impl SpikeHub {
             keyframes: publisher.keyframes.clone(),
         })
     }
+
+    /// Immediate route teardown: drop the registration and every queued media
+    /// packet so publisher stop/withdrawal leaves nothing to forward.
+    pub fn close_publisher(&self, publisher_id: &str) {
+        if let Ok(mut registration) = self.publisher.lock()
+            && registration
+                .as_ref()
+                .is_some_and(|publisher| publisher.publisher_id == publisher_id)
+        {
+            *registration = None;
+        }
+    }
+
+    /// Drop one viewer's route and its queued packets without waiting for the
+    /// viewer's connection loop. Used for publisher removal and blocking.
+    pub fn drop_viewer(&self, publisher_id: &str, subscriber_id: &str) {
+        if let Ok(mut registration) = self.publisher.lock()
+            && let Some(publisher) = registration.as_mut()
+            && publisher.publisher_id == publisher_id
+            && publisher
+                .viewer
+                .as_ref()
+                .is_some_and(|(id, _, _)| id == subscriber_id)
+        {
+            publisher.viewer = None;
+        }
+    }
 }
 
 impl PublisherEndpoint {

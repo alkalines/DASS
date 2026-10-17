@@ -68,7 +68,7 @@ async function setup(page, response) {
 
 describe("DASS control panel", () => {
     test("users render as text, not HTML, and editing does not reveal a hash", async () => {
-        const user = { username: "alice", display_name: "<img src=x>", expires_at_unix_seconds: 2000000000, revoked: false, allowed_ips: [], rooms: [] };
+        const user = { username: "alice", display_name: "<img src=x>" };
         const fixture = await setup("users", [user]);
         expect(fixture.title.textContent).toBe("Users");
         expect(fixture.content.textContent).toContain("<img src=x>");
@@ -82,7 +82,7 @@ describe("DASS control panel", () => {
         expect(editor.textContent).not.toContain("argon2");
     });
 
-    test("user writes use CSRF header and structured grants/IPs, then clear password input", async () => {
+    test("user writes use the CSRF header and only password/display-name fields", async () => {
         const fixture = await setup("users", []);
         fixture.context.editUser();
         const editor = fixture.document.querySelector("#user-editor");
@@ -90,39 +90,39 @@ describe("DASS control panel", () => {
         inputs[0].value = "alice";
         const password = inputs.find(input => input.type === "password");
         password.value = "a long user password";
-        const textareas = descendants(editor).filter(element => element.tag === "textarea");
-        textareas[0].value = "192.168.1.20\n::1";
-        textareas[1].value = "room_1 viewer\nroom_2 publisher";
+        // Version-2 editors contain no room grant, IP or role inputs at all.
+        expect(descendants(editor).filter(element => element.tag === "textarea").length).toBe(0);
+        expect(descendants(editor).filter(element => element.tag === "select").length).toBe(0);
         await editor.listeners.submit({ preventDefault() {} });
         const write = fixture.requests.find(request => request.method === "PUT");
         expect(write.url).toBe("/admin/api/users/alice");
         expect(write.headers["Content-Type"]).toBe("application/json");
         expect(write.headers["X-DASS-Admin"]).toBe("1");
         const body = JSON.parse(write.body);
-        expect(body.allowed_ips).toEqual(["192.168.1.20", "::1"]);
-        expect(body.rooms).toEqual([
-            { room_id: "room_1", access: true, publish: false, subscribe: true },
-            { room_id: "room_2", access: true, publish: true, subscribe: false }
-        ]);
+        expect(body).toEqual({ password: "a long user password", display_name: null });
         expect(password.value).toBe("");
         expect(fixture.message.textContent).toContain("User saved");
     });
 
-    test("room list combines configured, live and blocked IDs", async () => {
-        const fixture = await setup("rooms", { rooms: [{ room_id: "live", members: 2 }], blocked_rooms: ["blocked"], configured_rooms: ["configured"] });
+    test("rooms are a read-only grouping view without block controls", async () => {
+        const fixture = await setup("rooms", { rooms: [{ room_id: "live", members: 2 }], streams: [] });
         expect(fixture.title.textContent).toBe("Rooms");
         const rows = descendants(fixture.content).filter(element => element.tag === "tr");
-        expect(rows.length).toBe(4);
-        expect(fixture.content.textContent).toContain("Blocked");
+        expect(rows.length).toBe(2);
+        expect(fixture.content.textContent).toContain("read-only");
+        expect(fixture.content.textContent).not.toContain("Blocked");
         expect(fixture.content.textContent).toContain("Disconnect all DASS sessions");
+        // Only the disconnect endpoint remains; no room write request exists.
+        expect(fixture.requests.every(request => request.method === "GET")).toBe(true);
     });
 
-    test("stream page explicitly reports browser playback unavailable", async () => {
-        const fixture = await setup("streams", { streams: [{ username: "alice", room_id: "room_1", publisher_id: "stream_1" }], watch_available: false });
+    test("stream page reports browser playback unavailable and lists pending requests", async () => {
+        const fixture = await setup("streams", { streams: [{ username: "alice", room_id: "room_1", publisher_id: "stream_1", viewer_count: 1, pending_view_requests: 2 }], watch_available: false });
         expect(fixture.title.textContent).toBe("Streams");
         expect(fixture.content.textContent).toContain("Browser watching is not available");
         expect(fixture.content.textContent).toContain("alice");
         expect(fixture.content.textContent).toContain("stream_1");
+        expect(fixture.content.textContent).toContain("2");
         expect(descendants(fixture.content).some(element => element.tag === "video")).toBe(false);
     });
 
@@ -161,32 +161,6 @@ describe("DASS control panel", () => {
         await editor.listeners.submit({ preventDefault() {} });
         expect(fixture.requests.some(request => request.method === "PUT")).toBe(true);
         expect(fixture.message.textContent).toContain("User saved");
-    });
-
-    test("room and IP validation explains invalid input without sending changes", async () => {
-        const fixture = await setup("users", []);
-        expect(fixture.context.parseRoomGrants("* both")[0]).toEqual({ room_id: "*", access: true, publish: true, subscribe: true });
-        for (const input of ["room_1", "room_1 unknown", "room_1 both\nroom_1 viewer", "bad/id both"]) {
-            expect(() => fixture.context.parseRoomGrants(input)).toThrow();
-        }
-        expect(fixture.context.parseAllowedIps("192.168.1.20\n0:0:0:0:0:0:0:1")).toEqual(["192.168.1.20", "::1"]);
-        for (const input of ["example.org", "127.0.0.1/24", "256.1.1.1", "0.0.0.0", "::", "ff02::1", "::1 0:0:0:0:0:0:0:1"]) {
-            expect(() => fixture.context.parseAllowedIps(input)).toThrow();
-        }
-    });
-
-    test("permission helper adds an explicitly selected all-rooms role", async () => {
-        const fixture = await setup("users", []);
-        fixture.context.editUser();
-        const editor = fixture.document.querySelector("#user-editor");
-        const inputs = descendants(editor).filter(element => element.tag === "input");
-        inputs.at(-1).value = "*";
-        const role = descendants(editor).find(element => element.tag === "select");
-        role.value = "viewer";
-        const add = descendants(editor).find(element => element.tag === "button" && element.textContent === "Add permission");
-        await add.listeners.click();
-        const grants = descendants(editor).filter(element => element.tag === "textarea")[1];
-        expect(grants.value).toBe("* viewer");
     });
 
     test("a successful save followed by a failed refresh is not reported as a failed save", async () => {

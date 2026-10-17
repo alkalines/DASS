@@ -39,14 +39,15 @@ openssl req -x509 -newkey rsa:2048 -sha256 -nodes -days 2 \
 
 export LOCAL_UID="$(id -u)"
 export LOCAL_GID="$(id -g)"
-expires_unix_seconds="$(date -d '+1 day' +%s)"
+# Version-2 records carry no roles, room grants, expiration or login controls:
+# the publisher decides stream admission live through approval prompts.
 docker compose run --rm tooling cargo run --locked -p dass-backend -- \
     create-invite .secrets/lan-test/publisher-record.json .secrets/lan-test/publisher-credential.txt \
-    lan_publisher lan_test publisher "$expires_unix_seconds"
+    lan_publisher "LAN Publisher"
 docker compose run --rm tooling cargo run --locked -p dass-backend -- \
     create-invite .secrets/lan-test/viewer-record.json .secrets/lan-test/viewer-credential.txt \
-    lan_viewer lan_test viewer "$expires_unix_seconds"
-jq --slurp '{version: 1, invites: [.[].invites[]]}' \
+    lan_viewer "LAN Viewer"
+jq --slurp '{version: 2, invites: [.[].invites[]]}' \
     .secrets/lan-test/publisher-record.json .secrets/lan-test/viewer-record.json \
     > .secrets/lan-test/invites.json
 

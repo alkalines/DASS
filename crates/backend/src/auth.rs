@@ -1,14 +1,11 @@
-//! Invite and account DASS credentials, independent of Discord. No secret-bearing Debug.
+//! DASS account and legacy-invite credentials, independent of Discord.
+//! Rooms are discovery context only: authentication is service-wide and stream
+//! admission belongs to publisher approval, never to stored room grants,
+//! administrator flags or client network addresses. No secret-bearing Debug.
 
 use argon2::{Algorithm, Argon2, Params, PasswordHash, PasswordHasher, PasswordVerifier, Version};
 use serde::{Deserialize, Serialize};
-use std::{
-    collections::{HashMap, HashSet},
-    fs::File,
-    io::Read,
-    net::IpAddr,
-    path::Path,
-};
+use std::{collections::HashMap, fs::File, io::Read, path::Path};
 
 pub const MAX_INVITE_FILE_BYTES: usize = 131_072;
 pub const MAX_USERS_FILE_BYTES: usize = 131_072;
@@ -16,30 +13,15 @@ pub const MAX_INVITES: usize = 256;
 pub const MAX_USERS: usize = 256;
 pub const MAX_ACCOUNT_PASSWORD_BYTES: usize = dass_protocol::signaling::MAX_LOGIN_PASSWORD_BYTES;
 pub const MIN_ACCOUNT_PASSWORD_BYTES: usize = 12;
-const MAX_GRANTS: usize = 16;
 const MAX_DISPLAY_NAME_BYTES: usize = dass_protocol::signaling::MAX_PUBLISHER_DISPLAY_NAME_BYTES;
-const ALL_ROOMS_GRANT: &str = "*";
-
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RoomGrant {
-    /// Exact room ID, or "*" for explicit backend-wide account access (not invites).
-    pub room_id: String,
-    pub access: bool,
-    pub publish: bool,
-    pub subscribe: bool,
-}
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Invite {
     pub invite_id: String,
     pub password_hash: String,
-    pub expires_at_unix_seconds: u32,
-    pub revoked: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
-    pub rooms: Vec<RoomGrant>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -54,14 +36,8 @@ pub struct InviteFile {
 pub struct User {
     pub username: String,
     pub password_hash: String,
-    pub expires_at_unix_seconds: u32,
-    pub revoked: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
-    pub rooms: Vec<RoomGrant>,
-    /// Empty permits any observed TCP peer; otherwise only these exact IPs.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub allowed_ips: Vec<IpAddr>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -73,20 +49,11 @@ pub struct UsersFile {
 
 #[derive(Default)]
 pub struct InviteStore {
-    // Accounts share the authorization identity map so rooms, expiry, revocation
-    // and display names work identically. This set keeps account hashes out of
-    // the legacy invitation credential verifier.
+    // Accounts share the authentication identity map so display names work
+    // identically. This set keeps account hashes out of the legacy invitation
+    // credential verifier.
     invites: HashMap<String, Invite>,
-    account_ids: HashSet<String>,
-    allowed_ips: HashMap<String, Vec<IpAddr>>,
-    blocked_rooms: HashSet<String>,
-}
-
-#[derive(Clone, Copy)]
-pub enum Permission {
-    Access,
-    Publish,
-    Subscribe,
+    account_ids: std::collections::HashSet<String>,
 }
 
 pub fn valid_identifier(value: &str) -> bool {
@@ -103,18 +70,6 @@ fn valid_display_name(value: &str) -> bool {
         && !value.chars().any(char::is_control)
 }
 
-fn valid_room_grants(rooms: &[RoomGrant], allow_all_rooms: bool) -> bool {
-    if rooms.len() > MAX_GRANTS {
-        return false;
-    }
-    let mut unique_rooms = HashSet::new();
-    rooms.iter().all(|grant| {
-        (valid_identifier(&grant.room_id) || (allow_all_rooms && grant.room_id == ALL_ROOMS_GRANT))
-            && unique_rooms.insert(&grant.room_id)
-            && (grant.access || (!grant.publish && !grant.subscribe))
-    })
-}
-
 pub fn validate_account_password(password: &str) -> Result<(), &'static str> {
     if !(MIN_ACCOUNT_PASSWORD_BYTES..=MAX_ACCOUNT_PASSWORD_BYTES).contains(&password.len()) {
         return Err("Password must contain 12–512 UTF-8 bytes.");
@@ -128,49 +83,14 @@ pub fn validate_account_password(password: &str) -> Result<(), &'static str> {
 pub fn validate_user_fields(
     username: &str,
     display_name: Option<&str>,
-    rooms: &[RoomGrant],
-    expires_at_unix_seconds: u32,
-    allowed_ips: &[IpAddr],
 ) -> Result<(), &'static str> {
     if !valid_identifier(username) {
         return Err("Username must contain 1–64 ASCII letters, digits, underscores or hyphens.");
-    }
-    if expires_at_unix_seconds == 0 {
-        return Err("Expiration must be a nonzero Unix timestamp.");
     }
     if display_name.is_some_and(|name| !valid_display_name(name)) {
         return Err(
             "Display name must contain 1–128 UTF-8 bytes, non-whitespace text and no control characters.",
         );
-    }
-    if rooms.len() > MAX_GRANTS {
-        return Err("Each user can have at most 16 room grants.");
-    }
-    let mut unique_rooms = HashSet::new();
-    for grant in rooms {
-        if !valid_identifier(&grant.room_id) && grant.room_id != ALL_ROOMS_GRANT {
-            return Err(
-                "Room ID must contain 1–64 ASCII letters, digits, underscores or hyphens, or be exactly *.",
-            );
-        }
-        if !unique_rooms.insert(&grant.room_id) {
-            return Err("Room grants must not contain duplicate room IDs.");
-        }
-        if !grant.access && (grant.publish || grant.subscribe) {
-            return Err("Publishing and watching require room access.");
-        }
-    }
-    if allowed_ips.len() > 16 {
-        return Err("Each user can have at most 16 allowed IPs.");
-    }
-    if allowed_ips
-        .iter()
-        .any(|ip| ip.is_unspecified() || ip.is_multicast())
-    {
-        return Err("Allowed IPs must not be unspecified or multicast addresses.");
-    }
-    if allowed_ips.iter().collect::<HashSet<_>>().len() != allowed_ips.len() {
-        return Err("Allowed IPs must not contain duplicates.");
     }
     Ok(())
 }
@@ -217,18 +137,18 @@ impl InviteStore {
             return Err("invite file too large");
         }
         let file: InviteFile = serde_json::from_slice(bytes).map_err(|_| "invalid invite file")?;
-        if file.version != 1 || file.invites.len() > MAX_INVITES {
+        // Version 2 removes room grants, expiration and revocation fields;
+        // legacy files fail closed rather than silently widening access.
+        if file.version != 2 || file.invites.len() > MAX_INVITES {
             return Err("invalid invite file");
         }
         let mut invites = HashMap::new();
         for invite in file.invites {
             if !valid_identifier(&invite.invite_id)
-                || invite.expires_at_unix_seconds == 0
                 || invite
                     .display_name
                     .as_deref()
                     .is_some_and(|name| !valid_display_name(name))
-                || !valid_room_grants(&invite.rooms, false)
             {
                 return Err("invalid invite record");
             }
@@ -239,8 +159,7 @@ impl InviteStore {
         }
         Ok(Self {
             invites,
-            account_ids: HashSet::new(),
-            ..Self::default()
+            account_ids: Default::default(),
         })
     }
 
@@ -250,32 +169,22 @@ impl InviteStore {
             return Err("DASS_USERS is too large");
         }
         let file: UsersFile = serde_json::from_slice(bytes).map_err(|_| "invalid DASS_USERS")?;
-        if file.version != 1 || file.users.len() > MAX_USERS {
+        if file.version != 2 || file.users.len() > MAX_USERS {
             return Err("invalid DASS_USERS");
         }
         let mut invites = HashMap::new();
-        let mut account_ids = HashSet::new();
-        let mut allowed_ips = HashMap::new();
+        let mut account_ids = std::collections::HashSet::new();
         for user in file.users {
             if !valid_identifier(&user.username)
-                || user.expires_at_unix_seconds == 0
                 || user
                     .display_name
                     .as_deref()
                     .is_some_and(|name| !valid_display_name(name))
-                || !valid_room_grants(&user.rooms, true)
-                || user.allowed_ips.len() > 16
-                || user
-                    .allowed_ips
-                    .iter()
-                    .any(|ip| ip.is_unspecified() || ip.is_multicast())
-                || user.allowed_ips.iter().collect::<HashSet<_>>().len() != user.allowed_ips.len()
             {
                 return Err("invalid DASS_USERS record");
             }
             validated_hash(&user.password_hash)?;
             let username = user.username;
-            allowed_ips.insert(username.clone(), user.allowed_ips);
             if !account_ids.insert(username.clone()) {
                 return Err("duplicate DASS username");
             }
@@ -284,18 +193,13 @@ impl InviteStore {
                 Invite {
                     invite_id: username,
                     password_hash: user.password_hash,
-                    expires_at_unix_seconds: user.expires_at_unix_seconds,
-                    revoked: user.revoked,
                     display_name: user.display_name,
-                    rooms: user.rooms,
                 },
             );
         }
         Ok(Self {
             invites,
             account_ids,
-            allowed_ips,
-            blocked_rooms: HashSet::new(),
         })
     }
 
@@ -309,7 +213,7 @@ impl InviteStore {
         Self::from_bytes(&bytes)
     }
 
-    pub fn verify(&self, credential: &str, now_seconds: u32) -> Result<String, &'static str> {
+    pub fn verify(&self, credential: &str) -> Result<String, &'static str> {
         let (invite_id, secret) = credential.split_once('.').ok_or("unauthorized")?;
         if !valid_identifier(invite_id)
             || self.account_ids.contains(invite_id)
@@ -320,7 +224,7 @@ impl InviteStore {
         {
             return Err("unauthorized");
         }
-        let invite = self.current(invite_id, now_seconds).ok_or("unauthorized")?;
+        let invite = self.invites.get(invite_id).ok_or("unauthorized")?;
         let hash = validated_hash(&invite.password_hash).map_err(|_| "unauthorized")?;
         hasher()
             .verify_password(secret.as_bytes(), &hash)
@@ -328,13 +232,9 @@ impl InviteStore {
         Ok(invite_id.to_owned())
     }
 
-    /// Verify an account login and return the username used by room authorization.
-    pub fn verify_account(
-        &self,
-        username: &str,
-        password: &str,
-        now_seconds: u32,
-    ) -> Result<String, &'static str> {
+    /// Verify an account login and return the account identity. There are no
+    /// per-room credentials: stream admission is decided by publishers.
+    pub fn verify_account(&self, username: &str, password: &str) -> Result<String, &'static str> {
         if !valid_identifier(username)
             || password.is_empty()
             || password.len() > MAX_ACCOUNT_PASSWORD_BYTES
@@ -343,7 +243,7 @@ impl InviteStore {
         {
             return Err("unauthorized");
         }
-        let account = self.current(username, now_seconds).ok_or("unauthorized")?;
+        let account = self.invites.get(username).ok_or("unauthorized")?;
         let hash = validated_hash(&account.password_hash).map_err(|_| "unauthorized")?;
         hasher()
             .verify_password(password.as_bytes(), &hash)
@@ -351,47 +251,18 @@ impl InviteStore {
         Ok(username.to_owned())
     }
 
-    pub fn current(&self, invite_id: &str, now_seconds: u32) -> Option<&Invite> {
-        self.invites
-            .get(invite_id)
-            .filter(|invite| !invite.revoked && now_seconds < invite.expires_at_unix_seconds)
+    /// The identity exists and its credentials are current. Authentication is
+    /// service-wide; no room or role check exists at this layer.
+    pub fn current(&self, invite_id: &str) -> Option<&Invite> {
+        self.invites.get(invite_id)
     }
 
-    pub fn permits_ip(&self, identity: &str, observed_ip: Option<IpAddr>) -> bool {
-        self.allowed_ips
-            .get(identity)
-            .is_none_or(|ips| ips.is_empty() || observed_ip.is_some_and(|ip| ips.contains(&ip)))
-    }
-
-    pub fn with_blocked_rooms(mut self, rooms: HashSet<String>) -> Self {
-        self.blocked_rooms = rooms;
-        self
-    }
-
-    pub fn authorize(
-        &self,
-        invite_id: &str,
-        room_id: &str,
-        permission: Permission,
-        now_seconds: u32,
-    ) -> bool {
-        if !valid_identifier(room_id) || self.blocked_rooms.contains(room_id) {
-            return false;
-        }
-        self.current(invite_id, now_seconds).is_some_and(|invite| {
-            invite.rooms.iter().any(|grant| {
-                // TODO: Replace broad trusted-account access with authenticated,
-                // call-scoped admission. A Discord channel ID is not membership proof.
-                (grant.room_id == room_id
-                    || (self.account_ids.contains(invite_id) && grant.room_id == ALL_ROOMS_GRANT))
-                    && grant.access
-                    && match permission {
-                        Permission::Access => true,
-                        Permission::Publish => grant.publish,
-                        Permission::Subscribe => grant.subscribe,
-                    }
-            })
-        })
+    /// Stable operator-facing label for pending-request prompts; falls back to
+    /// the account identifier, never to untrusted session data.
+    pub fn display_name(&self, invite_id: &str) -> String {
+        self.current(invite_id)
+            .and_then(|invite| invite.display_name.clone())
+            .unwrap_or_else(|| invite_id.to_owned())
     }
 }
 
@@ -408,20 +279,14 @@ pub fn random_identifier() -> Result<String, &'static str> {
 }
 
 /// Admin-only creation: caller delivers the returned credential out of band.
-pub fn create_invite(
-    invite_id: String,
-    rooms: Vec<RoomGrant>,
-    expires_at_unix_seconds: u32,
-) -> Result<(Invite, String), &'static str> {
-    create_invite_with_display_name(invite_id, None, rooms, expires_at_unix_seconds)
+pub fn create_invite(invite_id: String) -> Result<(Invite, String), &'static str> {
+    create_invite_with_display_name(invite_id, None)
 }
 
 /// Admin-only creation with an optional credential-bound publisher display name.
 pub fn create_invite_with_display_name(
     invite_id: String,
     display_name: Option<String>,
-    rooms: Vec<RoomGrant>,
-    expires_at_unix_seconds: u32,
 ) -> Result<(Invite, String), &'static str> {
     if display_name
         .as_deref()
@@ -440,13 +305,10 @@ pub fn create_invite_with_display_name(
     let invite = Invite {
         invite_id,
         password_hash,
-        expires_at_unix_seconds,
-        revoked: false,
         display_name,
-        rooms,
     };
     let bytes = serde_json::to_vec(&InviteFile {
-        version: 1,
+        version: 2,
         invites: vec![invite.clone()],
     })
     .map_err(|_| "invalid invite record")?;
@@ -459,17 +321,9 @@ pub fn create_user(
     username: String,
     password: &str,
     display_name: Option<String>,
-    rooms: Vec<RoomGrant>,
-    expires_at_unix_seconds: u32,
 ) -> Result<User, &'static str> {
     validate_account_password(password)?;
-    validate_user_fields(
-        &username,
-        display_name.as_deref(),
-        &rooms,
-        expires_at_unix_seconds,
-        &[],
-    )?;
+    validate_user_fields(&username, display_name.as_deref())?;
     let mut salt = [0u8; 16];
     getrandom::fill(&mut salt).map_err(|_| "random source unavailable")?;
     let password_hash = hasher()
@@ -479,14 +333,10 @@ pub fn create_user(
     let user = User {
         username,
         password_hash,
-        expires_at_unix_seconds,
-        revoked: false,
         display_name,
-        rooms,
-        allowed_ips: vec![],
     };
     let bytes = serde_json::to_vec(&UsersFile {
-        version: 1,
+        version: 2,
         users: vec![user.clone()],
     })
     .map_err(|_| "invalid DASS user record")?;
@@ -498,67 +348,11 @@ pub fn create_user(
 mod tests {
     use super::*;
 
-    #[test]
-    fn account_ip_restrictions_and_blocked_rooms_fail_closed() {
-        let (_, mut user) = sample_user_store();
-        user.allowed_ips = vec!["192.168.1.20".parse().unwrap(), "::1".parse().unwrap()];
-        let bytes = serde_json::to_vec(&UsersFile {
-            version: 1,
-            users: vec![user.clone()],
-        })
-        .unwrap();
-        let store = InviteStore::from_users_bytes(&bytes).unwrap();
-        assert!(store.permits_ip("alice", Some("192.168.1.20".parse().unwrap())));
-        assert!(store.permits_ip("alice", Some("::1".parse().unwrap())));
-        assert!(!store.permits_ip("alice", Some("192.168.1.21".parse().unwrap())));
-        assert!(!store.permits_ip("alice", None));
-        assert!(store.authorize("alice", "room_1", Permission::Subscribe, 99));
-        let blocked = store.with_blocked_rooms(HashSet::from(["room_1".into()]));
-        assert!(!blocked.authorize("alice", "room_1", Permission::Subscribe, 99));
-        for ips in [
-            vec!["0.0.0.0"],
-            vec!["224.0.0.1"],
-            vec!["::"],
-            vec!["::1", "::1"],
-            vec!["127.0.0.1"; 17],
-        ] {
-            user.allowed_ips = ips.into_iter().map(|ip| ip.parse().unwrap()).collect();
-            let bytes = serde_json::to_vec(&UsersFile {
-                version: 1,
-                users: vec![user.clone()],
-            })
-            .unwrap();
-            assert!(InviteStore::from_users_bytes(&bytes).is_err());
-        }
-        user.allowed_ips.clear();
-        let bytes = serde_json::to_vec(&UsersFile {
-            version: 1,
-            users: vec![user],
-        })
-        .unwrap();
-        assert!(
-            InviteStore::from_users_bytes(&bytes)
-                .unwrap()
-                .permits_ip("alice", None)
-        );
-    }
-
     fn sample() -> (InviteStore, String, Invite) {
-        let (invite, credential) = create_invite(
-            "invite_1".into(),
-            vec![RoomGrant {
-                room_id: "room_1".into(),
-                access: true,
-                publish: true,
-                subscribe: false,
-            }],
-            100,
-        )
-        .unwrap();
+        let (invite, credential) = create_invite("invite_1".into()).unwrap();
         let store = InviteStore {
             invites: HashMap::from([(invite.invite_id.clone(), invite.clone())]),
-            account_ids: HashSet::new(),
-            ..InviteStore::default()
+            account_ids: Default::default(),
         };
         (store, credential, invite)
     }
@@ -568,17 +362,10 @@ mod tests {
             "alice".into(),
             "correct horse battery staple",
             Some("Alice Studio".into()),
-            vec![RoomGrant {
-                room_id: "room_1".into(),
-                access: true,
-                publish: false,
-                subscribe: true,
-            }],
-            100,
         )
         .unwrap();
         let bytes = serde_json::to_vec(&UsersFile {
-            version: 1,
+            version: 2,
             users: vec![user.clone()],
         })
         .unwrap();
@@ -586,35 +373,58 @@ mod tests {
     }
 
     #[test]
-    fn verifies_only_dass_credentials_and_scoped_permissions() {
+    fn verifies_only_dass_credentials_without_room_authority() {
         let (store, credential, _) = sample();
-        assert_eq!(store.verify(&credential, 99).unwrap(), "invite_1");
+        assert_eq!(store.verify(&credential).unwrap(), "invite_1");
+        assert!(store.verify(&format!("invite_1.{}", "0".repeat(64))).is_err());
+        assert!(store.verify("discord-token").is_err());
         assert!(
             store
-                .verify(&format!("invite_1.{}", "0".repeat(64)), 99)
+                .verify_account("invite_1", "correct horse battery staple")
                 .is_err()
         );
-        assert!(store.verify("discord-token", 99).is_err());
-        assert!(
-            store
-                .verify_account("invite_1", "correct horse battery staple", 99)
-                .is_err()
-        );
-        assert!(store.authorize("invite_1", "room_1", Permission::Access, 99));
-        assert!(store.authorize("invite_1", "room_1", Permission::Publish, 99));
-        assert!(!store.authorize("invite_1", "room_1", Permission::Subscribe, 99));
-        assert!(!store.authorize("invite_1", "room_2", Permission::Publish, 99));
-        assert!(!store.authorize("123", "room_1", Permission::Publish, 99));
+        // Authentication is service-wide: any opaque room ID groups discovery.
+        assert!(store.current("invite_1").is_some());
+        assert!(store.current("unknown").is_none());
     }
 
     #[test]
-    fn expiry_revocation_and_dangerous_hash_costs_fail_closed() {
-        let (mut store, credential, invite) = sample();
-        assert!(store.verify(&credential, 100).is_err());
-        assert!(!store.authorize("invite_1", "room_1", Permission::Access, 100));
-        store.invites.get_mut("invite_1").unwrap().revoked = true;
-        assert!(store.verify(&credential, 99).is_err());
-        assert!(!store.authorize("invite_1", "room_1", Permission::Access, 99));
+    fn legacy_grant_and_login_control_fields_fail_closed() {
+        // Version-1 records carried room grants, scheduled expiration,
+        // revocation flags and login IP allowlists. Loading them must fail
+        // closed rather than silently widening or narrowing access.
+        let legacy_user = serde_json::json!({
+            "username": "alice",
+            "password_hash": create_user("alice".into(), "correct horse battery staple", None)
+                .unwrap()
+                .password_hash,
+            "expires_at_unix_seconds": u32::MAX,
+            "revoked": false,
+            "rooms": [{"room_id": "*", "access": true, "publish": true, "subscribe": true}],
+            "allowed_ips": ["192.168.1.20"]
+        });
+        for (file, parse) in [
+            serde_json::json!({"version": 1, "users": [legacy_user]}),
+            serde_json::json!({"version": 2, "users": [legacy_user]}),
+        ] {
+            let bytes = serde_json::to_vec(&file).unwrap();
+            assert!(InviteStore::from_users_bytes(&bytes).is_err());
+            let _ = parse;
+        }
+        let (_, _, invite) = sample();
+        let mut legacy_invite = serde_json::to_value(&invite).unwrap();
+        legacy_invite["rooms"] = serde_json::json!([]);
+        legacy_invite["expires_at_unix_seconds"] = serde_json::json!(u32::MAX);
+        for version in [1, 2] {
+            let file = serde_json::json!({"version": version, "invites": [legacy_invite]});
+            assert!(InviteStore::from_bytes(&serde_json::to_vec(&file).unwrap()).is_err());
+        }
+    }
+
+    #[test]
+    fn dangerous_hash_costs_fail_closed() {
+        let (store, credential, invite) = sample();
+        assert!(store.verify(&credential).is_ok());
         assert!(validated_hash(&invite.password_hash.replace("m=19456", "m=4294967295")).is_err());
     }
 
@@ -622,160 +432,37 @@ mod tests {
     fn invite_file_rejects_duplicates_unknown_fields_and_oversize() {
         let (_, _, invite) = sample();
         let bytes = serde_json::to_vec(&InviteFile {
-            version: 1,
+            version: 2,
             invites: vec![invite.clone(), invite],
         })
         .unwrap();
         assert!(InviteStore::from_bytes(&bytes).is_err());
         assert!(
-            InviteStore::from_bytes(br#"{"version":1,"invites":[],"discord_user_id":"123"}"#)
+            InviteStore::from_bytes(br#"{"version":2,"invites":[],"discord_user_id":"123"}"#)
                 .is_err()
         );
         assert!(InviteStore::from_bytes(&vec![b' '; MAX_INVITE_FILE_BYTES + 1]).is_err());
     }
 
     #[test]
-    fn all_rooms_account_grant_preserves_permissions_expiry_and_revocation() {
-        let user = create_user(
-            "alice".into(),
-            "correct horse battery staple",
-            None,
-            vec![RoomGrant {
-                room_id: ALL_ROOMS_GRANT.into(),
-                access: true,
-                publish: false,
-                subscribe: true,
-            }],
-            100,
-        )
-        .unwrap();
-        let bytes = serde_json::to_vec(&UsersFile {
-            version: 1,
-            users: vec![user],
-        })
-        .unwrap();
-        let mut store = InviteStore::from_users_bytes(&bytes).unwrap();
-        for room_id in ["room_1", "room_2", "123456789"] {
-            assert!(store.authorize("alice", room_id, Permission::Access, 99));
-            assert!(store.authorize("alice", room_id, Permission::Subscribe, 99));
-            assert!(!store.authorize("alice", room_id, Permission::Publish, 99));
-            assert!(!store.authorize("unknown", room_id, Permission::Access, 99));
-            assert!(!store.authorize("alice", room_id, Permission::Access, 100));
-        }
-        for room_id in ["", "*", "room/*", "room/name", &"x".repeat(65)] {
-            assert!(!store.authorize("alice", room_id, Permission::Access, 99));
-        }
-        store.invites.get_mut("alice").unwrap().revoked = true;
-        assert!(!store.authorize("alice", "new_dm", Permission::Subscribe, 99));
-    }
-
-    #[test]
-    fn wildcard_grants_are_explicit_account_only_and_not_glob_patterns() {
-        let grant = |room_id: &str| RoomGrant {
-            room_id: room_id.into(),
-            access: true,
-            publish: true,
-            subscribe: false,
-        };
-        assert!(valid_room_grants(&[grant("*")], true));
-        assert!(!valid_room_grants(&[grant("*")], false));
-        assert!(!valid_room_grants(&[grant("*"), grant("*")], true));
-        for pattern in ["room_*", "**", " *", "* "] {
-            assert!(!valid_room_grants(&[grant(pattern)], true));
-        }
-        assert!(!valid_room_grants(
-            &[RoomGrant {
-                room_id: "*".into(),
-                access: false,
-                publish: true,
-                subscribe: false,
-            }],
-            true,
-        ));
-        assert!(!valid_room_grants(
-            &(0..=MAX_GRANTS)
-                .map(|index| grant(&format!("room_{index}")))
-                .collect::<Vec<_>>(),
-            true,
-        ));
-        let (_, _, mut invite) = sample();
-        invite.rooms = vec![grant("*")];
-        let bytes = serde_json::to_vec(&InviteFile {
-            version: 1,
-            invites: vec![invite],
-        })
-        .unwrap();
-        assert!(InviteStore::from_bytes(&bytes).is_err());
-    }
-
-    #[test]
-    fn exact_and_all_rooms_grants_are_additive_not_deny_overrides() {
-        let (mut store, _) = sample_user_store();
-        store
-            .invites
-            .get_mut("alice")
-            .unwrap()
-            .rooms
-            .push(RoomGrant {
-                room_id: ALL_ROOMS_GRANT.into(),
-                access: true,
-                publish: true,
-                subscribe: false,
-            });
-        assert!(store.authorize("alice", "room_1", Permission::Publish, 99));
-        assert!(store.authorize("alice", "room_1", Permission::Subscribe, 99));
-        assert!(store.authorize("alice", "new_dm", Permission::Publish, 99));
-        assert!(!store.authorize("alice", "new_dm", Permission::Subscribe, 99));
-        store.invites.get_mut("alice").unwrap().rooms = vec![RoomGrant {
-            room_id: ALL_ROOMS_GRANT.into(),
-            access: false,
-            publish: false,
-            subscribe: false,
-        }];
-        assert!(!store.authorize("alice", "new_dm", Permission::Access, 99));
-    }
-
-    #[test]
-    fn account_login_shares_room_scope_metadata_expiry_and_revocation() {
-        let (mut store, user) = sample_user_store();
+    fn account_login_uses_bounded_credentials_and_display_names() {
+        let (store, user) = sample_user_store();
         assert_eq!(
             store
-                .verify_account("alice", "correct horse battery staple", 99)
+                .verify_account("alice", "correct horse battery staple")
                 .unwrap(),
             "alice"
         );
-        assert!(store.verify_account("alice", "wrong password", 99).is_err());
+        assert!(store.verify_account("alice", "wrong password").is_err());
         assert!(
             store
-                .verify_account("alice", &"x".repeat(MAX_ACCOUNT_PASSWORD_BYTES + 1), 99)
+                .verify_account("alice", &"x".repeat(MAX_ACCOUNT_PASSWORD_BYTES + 1))
                 .is_err()
         );
-        assert!(store.verify_account("alice", "bad\0password", 99).is_err());
-        assert!(
-            store
-                .verify(&format!("alice.{}", "0".repeat(64)), 99)
-                .is_err()
-        );
-        assert!(store.authorize("alice", "room_1", Permission::Access, 99));
-        assert!(store.authorize("alice", "room_1", Permission::Subscribe, 99));
-        assert!(!store.authorize("alice", "room_1", Permission::Publish, 99));
-        assert!(!store.authorize("alice", "room_2", Permission::Access, 99));
-        assert_eq!(
-            store.current("alice", 99).unwrap().display_name.as_deref(),
-            Some("Alice Studio")
-        );
-        assert!(
-            store
-                .verify_account("alice", "correct horse battery staple", 100)
-                .is_err()
-        );
-        store.invites.get_mut("alice").unwrap().revoked = true;
-        assert!(
-            store
-                .verify_account("alice", "correct horse battery staple", 99)
-                .is_err()
-        );
-        assert!(!store.authorize("alice", "room_1", Permission::Access, 99));
+        assert!(store.verify_account("alice", "bad\0password").is_err());
+        assert!(store.verify(&format!("alice.{}", "0".repeat(64))).is_err());
+        assert_eq!(store.display_name("alice"), "Alice Studio");
+        assert_eq!(store.display_name("unknown"), "unknown");
         assert!(validated_hash(&user.password_hash.replace("m=19456", "m=4294967295")).is_err());
     }
 
@@ -783,111 +470,78 @@ mod tests {
     fn users_file_is_versioned_bounded_strict_and_rejects_duplicate_identities() {
         let (_, user) = sample_user_store();
         let duplicate = serde_json::to_vec(&UsersFile {
-            version: 1,
+            version: 2,
             users: vec![user.clone(), user.clone()],
         })
         .unwrap();
         assert!(InviteStore::from_users_bytes(&duplicate).is_err());
         assert!(
-            InviteStore::from_users_bytes(br#"{"version":1,"users":[],"discord_user_id":"123"}"#)
+            InviteStore::from_users_bytes(br#"{"version":2,"users":[],"discord_user_id":"123"}"#)
                 .is_err()
         );
         assert!(InviteStore::from_users_bytes(&vec![b' '; MAX_USERS_FILE_BYTES + 1]).is_err());
 
         let mut invalid_hash = serde_json::to_value(UsersFile {
-            version: 1,
+            version: 2,
             users: vec![user],
         })
         .unwrap();
         invalid_hash["users"][0]["password_hash"] = "not-an-argon-hash".into();
-        assert!(
-            InviteStore::from_users_bytes(&serde_json::to_vec(&invalid_hash).unwrap()).is_err()
-        );
+        assert!(InviteStore::from_users_bytes(&serde_json::to_vec(&invalid_hash).unwrap()).is_err());
         invalid_hash["users"][0]["password_hash"] = "valid hash stays private".into();
         invalid_hash["users"][0]["unexpected"] = true.into();
-        assert!(
-            InviteStore::from_users_bytes(&serde_json::to_vec(&invalid_hash).unwrap()).is_err()
-        );
+        assert!(InviteStore::from_users_bytes(&serde_json::to_vec(&invalid_hash).unwrap()).is_err());
     }
 
     #[test]
     fn admin_user_creation_enforces_the_password_policy_and_account_bounds() {
         for password in ["short", "has\ncontrol\ncharacters", &"x".repeat(513)] {
-            assert!(create_user("alice".into(), password, None, vec![], 100).is_err());
+            assert!(create_user("alice".into(), password, None).is_err());
         }
         assert!(
-            create_user(
-                "alice/name".into(),
-                "correct horse battery staple",
-                None,
-                vec![],
-                100
-            )
-            .is_err()
-        );
-        assert!(
-            create_user(
-                "alice".into(),
-                "correct horse battery staple",
-                None,
-                vec![],
-                0
-            )
-            .is_err()
+            create_user("alice/name".into(), "correct horse battery staple", None).is_err()
         );
     }
 
     #[test]
     fn display_names_are_optional_admin_metadata_and_bounded() {
-        let (named, _) = create_invite_with_display_name(
-            "named".into(),
-            Some("Studio display 🖥️".into()),
-            vec![],
-            100,
-        )
-        .unwrap();
+        let (named, _) =
+            create_invite_with_display_name("named".into(), Some("Studio display 🖥️".into()))
+                .unwrap();
         let encoded = serde_json::to_vec(&InviteFile {
-            version: 1,
+            version: 2,
             invites: vec![named],
         })
         .unwrap();
         assert_eq!(
             InviteStore::from_bytes(&encoded)
                 .unwrap()
-                .current("named", 99)
+                .current("named")
                 .unwrap()
                 .display_name
                 .as_deref(),
             Some("Studio display 🖥️")
         );
 
-        let (unnamed, _) = create_invite("legacy".into(), vec![], 100).unwrap();
+        let (unnamed, _) = create_invite("legacy".into()).unwrap();
         let mut legacy = serde_json::to_value(InviteFile {
-            version: 1,
+            version: 2,
             invites: vec![unnamed],
         })
         .unwrap();
-        assert!(
-            !legacy["invites"][0]
-                .as_object()
-                .unwrap()
-                .contains_key("display_name")
-        );
         legacy["invites"][0]
             .as_object_mut()
             .unwrap()
             .remove("display_name");
         let parsed = InviteStore::from_bytes(&serde_json::to_vec(&legacy).unwrap()).unwrap();
-        assert_eq!(parsed.current("legacy", 99).unwrap().display_name, None);
+        assert_eq!(parsed.current("legacy").unwrap().display_name, None);
 
         for name in [
             "   ".to_owned(),
             "line\nbreak".to_owned(),
             "x".repeat(MAX_DISPLAY_NAME_BYTES + 1),
         ] {
-            assert!(
-                create_invite_with_display_name("invalid".into(), Some(name), vec![], 100).is_err()
-            );
+            assert!(create_invite_with_display_name("invalid".into(), Some(name)).is_err());
         }
     }
 }

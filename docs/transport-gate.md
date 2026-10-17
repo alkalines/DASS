@@ -52,9 +52,12 @@ documentation; no container was recreated during this session.
 
 ## Authentication and secure control plane (steps 4.2–4.4 groundwork, Docker-tested)
 
-`auth.rs`, `signaling.rs` and `listener.rs` add separate Argon2id invites, expiring
-and revocable room grants, timed first-message login, exact Origin policy, bounded
+`auth.rs`, `signaling.rs` and `listener.rs` add separate Argon2id credentials,
+timed first-message login, exact Origin policy, bounded
 admission/replay state, TLS 1.3 via explicit AWS-LC, and lease-owned cleanup.
+The earlier room-grant/expiry/revocation model was replaced by service-wide
+authentication plus publisher-controlled stream admission (pending requests,
+single-use approvals, deny/block/remove); see [protocol.md](protocol.md).
 Tests include network-level WSS with verified certificates. Manifest pins and an
 API/release review are recorded in [control-plane.md](control-plane.md); this is
 not an independent security audit. The user completed Docker dependency resolution,
@@ -140,10 +143,11 @@ host network/security change was made by the agent.
    HTTPS/WSS crypto provider. Resolve intentional dependency additions in Docker,
    commit `Cargo.lock`, then use locked builds/tests. Keep one Rust executable;
    do not create a separate signaling service.
-2. Add invite-only DASS identities and expiring, revocable room permissions for
-   publish and subscribe. Discord identity/channel claims confer no authority.
-   Reauthorize each operation and disconnect expired/revoked sessions. Bound
-   credentials, room membership, sessions and unauthenticated connections.
+2. Add invite/account DASS identities and publisher-controlled stream admission
+   for watching. Discord identity/channel claims confer no authority and rooms
+   grant no access. Reauthorize each operation and disconnect expired/contained
+   sessions. Bound credentials, room membership, sessions, pending approvals and
+   unauthenticated connections.
 3. Add TLS/WSS signaling with strict message validation, bounded queues, setup
    deadlines and an exact Origin policy. Browser connections use short-lived
    single-use tickets or a timed first-message login; never credentials in URLs.

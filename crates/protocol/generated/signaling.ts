@@ -10,6 +10,8 @@ export const SETUP_DEADLINE_MS = 15000;
 export const MAX_DIRECTORY_SHARES = 64;
 export const MAX_PUBLISHER_DISPLAY_NAME_BYTES = 128;
 export const MAX_LOGIN_PASSWORD_BYTES = 512;
+export const VIEW_REQUEST_TIMEOUT_SECONDS = 60;
+export const SESSION_LIFETIME_SECONDS = 600;
 
 export type ClientMessage = { protocol_version: number; request_id: string; operation: ClientOperation };
 
@@ -24,7 +26,10 @@ export type ClientOperation =
     | { type: "directory"; room_id: string }
     | { type: "publish"; session_id: string }
     | { type: "enable_viewer_presence"; session_id: string }
-    | { type: "subscribe"; session_id: string; publisher_id: string }
+    | { type: "request_view"; session_id: string; publisher_id: string }
+    | { type: "view_decision"; session_id: string; request_id: string; decision: ViewDecisionKind }
+    | { type: "subscribe"; session_id: string; publisher_id: string; approval_id: string }
+    | { type: "remove_viewer"; session_id: string; viewer_id: string }
     | { type: "offer"; session_id: string; sdp: string }
     | { type: "ice"; session_id: string; candidate: string }
     | { type: "leave"; session_id: string };
@@ -33,10 +38,19 @@ export type ViewerPresenceChange =
     | "joined"
     | "left";
 
+export type ViewDecisionKind =
+    | "approve"
+    | "deny"
+    | "block";
+
 export type ServerOperation =
     | { type: "authenticated"; expires_at_unix_seconds: number }
     | { type: "joined"; session_id: string }
     | { type: "directory"; room_id: string; publisher_ids: Array<string>; publishers: Array<PublisherMetadata> }
+    | { type: "view_request_pending"; session_id: string; request_id: string }
+    | { type: "view_request"; session_id: string; request_id: string; viewer_id: string; viewer_display_name: string }
+    | { type: "view_decision"; session_id: string; request_id: string; decision: ViewDecisionKind; approval_id: string }
+    | { type: "view_request_closed"; session_id: string; request_id: string }
     | { type: "accepted"; session_id: string }
     | { type: "answer"; session_id: string; sdp: string }
     | { type: "ice"; session_id: string; candidate: string }
@@ -60,4 +74,5 @@ export type ErrorCode =
     | "e2ee_unavailable"
     | "overloaded"
     | "invalid_state"
+    | "denied"
     | "transport_unavailable";

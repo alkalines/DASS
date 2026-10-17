@@ -157,8 +157,8 @@ TLS or claim a working transport to work around test-harness limitations.
 ## Manual panel flow once networking is ready
 
 1. Set the same HTTPS backend origin in DASS settings on both clients. Use separate
-   DASS credentials: publisher grants on one, subscribe grants on the other, with
-   access to the same DASS room. Do not use Discord tokens or channel IDs as grants.
+   DASS accounts, one per person; credentials are service-wide and carry no room
+   grants. Do not use Discord tokens or channel IDs as credentials.
 2. Prepare the viewer, then prepare publisher capture using the installed host
    picker. Explicitly select share audio there or choose video-only. Preparation
    holds capture locally and expires after 180 seconds; it does not prove consent
