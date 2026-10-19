@@ -85,13 +85,14 @@ The intended connection sequence is:
      referencing that pending request ID: `approve`, `deny` or `block`. The
      decision is single-use. The viewer receives a pushed `view_decision`
      (stable envelope ID `server_view_decision`); on `approve` it carries an
-     opaque `approval_id` plus the publisher's `publisher_key` so the viewer
-     can pin it. `deny` imposes a 30 s cooldown on further requests from that
-     account on this stream; `block` additionally refuses all future requests
-     and terminates that account's existing viewer sessions, unused approvals
-     and pending prompts on this stream. An expired or withdrawn request pushes
-     `view_request_closed` (stable envelope ID `server_view_request_closed`)
-     to the publisher.
+     opaque `approval_id`, the publisher's `publisher_key` and the publisher's
+     `publisher_account` so the viewer can pin the identity against a scope
+     that stays stable across stream instances. `deny` imposes a 30 s cooldown
+     on further requests from that account on this stream; `block`
+     additionally refuses all future requests and terminates that account's
+     existing viewer sessions, unused approvals and pending prompts on this
+     stream. An expired or withdrawn request pushes `view_request_closed`
+     (stable envelope ID `server_view_request_closed`) to the publisher.
    - `subscribe` requires the `approval_id`. The backend consumes it exactly
      once and only for the stream, viewer session and account it names; a
      forged, stale or mismatched ID is rejected. The publisher can withdraw an
@@ -196,11 +197,16 @@ see [control-plane.md](control-plane.md) for the exact current limits.
 
 No operation carries media frames or previews. Media must use WebRTC DTLS-SRTP,
 not JSON or Electron IPC. E2EE is mandatory: encoded frames are AES-256-GCM
-encrypted per media epoch on the publisher's device (SFrame-derived header,
+encrypted per media epoch on the publisher's device (SFrame-shaped header,
 HKDF-SHA-256 key derivation, nonce = per-epoch salt XOR epoch‖counter) and
 decrypted only on approved viewers' devices; the backend forwards ciphertext
-unchanged and never holds media keys. Identity keys are ECDH P-256 with local
-TOFU pinning and an out-of-band safety-number comparison. Authentication,
-secure signaling, `str0m`, and the real two-client gate remain tracked in
+unchanged and never holds media keys. The frame layout is project-specific:
+it is not RFC 9605 SFrame, has no key id and no interoperability, and no
+published test vector exists yet. Identity keys are ECDH P-256 with local
+TOFU pinning scoped to the peer account, plus an out-of-band safety-number
+comparison that marks a pinned identity as independently verified. A changed
+publisher key fails closed and pauses admission until it is explicitly
+re-confirmed. Authentication, secure signaling, `str0m`, and the real
+two-client gate remain tracked in
 [transport-gate.md](transport-gate.md); production SFU work is blocked until
 that gate passes.

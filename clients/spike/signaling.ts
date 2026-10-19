@@ -82,6 +82,7 @@ export class SpikeSignaling {
     private viewDecisionListener?: { sessionId: string; requestId: string; listener: (decision: ViewDecision) => void; };
     private keyRelayListener?: { listener: (relay: KeyRelay) => void; };
     private earlyDecisions: ViewDecision[] = [];
+    private earlyRelays: KeyRelay[] = [];
     private readonly closedController = new AbortController();
     readonly closed = this.closedController.signal;
 
@@ -201,7 +202,10 @@ export class SpikeSignaling {
                 // session_id names our own viewer session, publisher_id names
                 // the stream. Unknown relays are ignored, never acted upon.
                 if (message.request_id === "server_key_relay" && relay.publisher_id && relay.blob) {
-                    this.keyRelayListener?.listener(relay);
+                    if (this.keyRelayListener) this.keyRelayListener.listener(relay);
+                    // A relay can arrive before the viewer finished its trust
+                    // decision; keep a bounded few instead of dropping the key.
+                    else if (this.earlyRelays.length < 8) this.earlyRelays.push(relay);
                 }
                 return;
             }
@@ -274,6 +278,9 @@ export class SpikeSignaling {
     onKeyRelay(listener: (relay: KeyRelay) => void) {
         if (this.keyRelayListener) throw new Error("DASS key relays are already handled.");
         this.keyRelayListener = { listener };
+        // Hand over relays that arrived before the viewer was ready for them.
+        const buffered = this.earlyRelays.splice(0, this.earlyRelays.length);
+        for (const relay of buffered) listener(relay);
     }
 
     /**

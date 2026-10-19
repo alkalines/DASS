@@ -52,7 +52,7 @@ export type ServerOperation =
     | { type: "directory"; room_id: string; publisher_ids: Array<string>; publishers: Array<PublisherMetadata> }
     | { type: "view_request_pending"; session_id: string; request_id: string }
     | { type: "view_request"; session_id: string; request_id: string; viewer_id: string; viewer_display_name: string; viewer_key: string }
-    | { type: "view_decision"; session_id: string; request_id: string; decision: ViewDecisionKind; approval_id: string; publisher_key: string }
+    | { type: "view_decision"; session_id: string; request_id: string; decision: ViewDecisionKind; approval_id: string; publisher_key: string; publisher_account: string }
     | { type: "key_relay"; session_id: string; publisher_id: string; blob: string }
     | { type: "view_request_closed"; session_id: string; request_id: string }
     | { type: "accepted"; session_id: string }

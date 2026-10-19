@@ -95,6 +95,7 @@ class Socket extends EventTarget {
     static rejectPresence = false;
     static denyView = false;
     static denyDecision = false;
+    static relayBeforeDecision = false;
     protocol = "dass.v1";
     readyState = 1;
     bufferedAmount = 0;
@@ -115,12 +116,19 @@ class Socket extends EventTarget {
             case "request_view":
                 operation = Socket.denyView ? { type: "rejected", code: "denied" }
                     : { type: "view_request_pending", session_id: "session", request_id: "pending_1" };
-                if (!Socket.denyView) pushed.push({ request_id: "server_view_decision", operation: {
-                    type: "view_decision", session_id: "session", request_id: "pending_1",
-                    decision: Socket.denyDecision ? "deny" : "approve",
-                    approval_id: Socket.denyDecision ? "" : "approval_1",
-                    publisher_key: Socket.denyDecision ? "" : "cHViLWtleQ"
-                } });
+                if (!Socket.denyView) {
+                    // The publisher may relay the epoch key before the viewer
+                    // finished its trust decision.
+                    if (Socket.relayBeforeDecision) pushed.push({ request_id: "server_key_relay", operation: {
+                        type: "key_relay", session_id: "session", publisher_id: "source", blob: "ZW5jcnlwdGVk"
+                    } });
+                    pushed.push({ request_id: "server_view_decision", operation: {
+                        type: "view_decision", session_id: "session", request_id: "pending_1", publisher_account: "publisher_account",
+                        decision: Socket.denyDecision ? "deny" : "approve",
+                        approval_id: Socket.denyDecision ? "" : "approval_1",
+                        publisher_key: Socket.denyDecision ? "" : "cHViLWtleQ"
+                    } });
+                }
                 break;
             case "subscribe": operation = Socket.rejectSubscribe ? { type: "rejected", code: "invalid_state" }
                 : { type: "accepted", session_id: "session" }; break;
@@ -158,6 +166,7 @@ async function withBrowserDoubles(run: () => Promise<void>) {
     Socket.rejectPresence = false;
     Socket.denyView = false;
     Socket.denyDecision = false;
+    Socket.relayBeforeDecision = false;
     for (const [name, value] of Object.entries(doubles)) Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
     try { await run(); } finally {
         for (const [name, descriptor] of originals) {
@@ -193,8 +202,20 @@ test("viewer reuses directory authentication without a second credential login",
     } finally { connection.close(); signaling.close(); }
 }));
 
-test("publisher opts into presence before its offer and receives scoped join/leave events", async () => withBrowserDoubles(async () => {
-    const source = capture();
+test("an epoch key relayed before the approval reaches the viewer", async () => withBrowserDoubles(async () => {
+    Socket.relayBeforeDecision = true;
+    const abort = new AbortController();
+    const signaling = await SpikeSignaling.connect({ experimental: true, backendUrl: "https://dass.example", credential: "separate_secret", signal: abort.signal });
+    const connection = await SpikePeer.prepare({ experimental: true, signal: abort.signal });
+    const blobs: string[] = [];
+    try {
+        await connection.activate({ backendUrl: "https://dass.example", credential: "", roomId: "room", publisherId: "source", signaling,
+            e2ee: { ...TEST_E2EE, onEpochBlob: blob => blobs.push(blob) } });
+        expect(blobs).toEqual(["ZW5jcnlwdGVk"]);
+    } finally { connection.close(); signaling.close(); }
+}));
+
+test("publisher opts into presence before its offer and receives scoped join/leave events", async () => withBrowserDoubles(async () => {    const source = capture();
     const connection = await SpikePeer.prepare({ experimental: true, signal: new AbortController().signal, capture: source.lease });
     const updates: number[] = [];
     try {

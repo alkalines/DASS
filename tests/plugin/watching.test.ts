@@ -1,5 +1,6 @@
 import { memoryIdentityStore } from "./helpers/e2eeStore";
 import { expect, test } from "bun:test";
+import { type E2eeIdentity, generateEpochKey, generateIdentity, wrapEpochKey } from "../../clients/spike/e2ee";
 import { SpikePeer } from "../../clients/spike/peer";
 import { BrowserSocket, SpikeSignaling, SpikeSignalingError } from "../../clients/spike/signaling";
 import { WatchController } from "../../plugins/dass/watching";
@@ -29,10 +30,12 @@ class Socket extends EventTarget implements BrowserSocket {
     }
 }
 
-function fixture() {
+function fixture(options: { publisher?: E2eeIdentity; epoch?: number; epochKey?: Uint8Array; pinnedKey?: string; } = {}) {
     let context: string | undefined = "discord_voice_context";
     const socket = new Socket();
     const closed = new AbortController();
+    const identityStore = memoryIdentityStore();
+    if (options.pinnedKey) void identityStore.writePeer("publisher/publisher_account", { key: options.pinnedKey, fingerprint: "fingerprint", verified: false });
     const track = new EventTarget() as MediaStreamTrack;
     Object.assign(track, { kind: "video", readyState: "live", stop: () => { Object.assign(track, { readyState: "ended" }); } });
     const stream = new EventTarget() as MediaStream;
@@ -42,15 +45,30 @@ function fixture() {
     let activations = 0;
     let signaling: SpikeSignaling | undefined;
     let deliverVideo = true;
+    let receivedEpoch: { epoch: number; keyBytes: Uint8Array; } | undefined;
     const close = () => { if (!closed.signal.aborted) { closed.abort(); tracks.forEach(track => track.stop()); signaling?.close(); } };
     const tracksChanged = new EventTarget();
     const peer = { receivedStream: stream, tracksChanged, closed: closed.signal, candidates: ["candidate:1 1 UDP 1 192.168.1.2 50000 typ host"],
         closeMessage: "Media disconnected.", close,
-        activate: async (options: any) => {
+        setReceiveEpoch: (epoch: number, keyBytes: Uint8Array) => { receivedEpoch = { epoch, keyBytes }; },
+        retireEpochsBelow: () => {},
+        activate: async (activation: any) => {
             activations++;
-            expect(options.credential).toBe("");
-            expect(options.e2ee?.identityPublicKey).toBeTruthy();
-            expect(options.signaling).toBe(signaling);
+            expect(activation.credential).toBe("");
+            expect(activation.e2ee?.identityPublicKey).toBeTruthy();
+            expect(activation.signaling).toBe(signaling);
+            if (options.publisher) {
+                // The publisher decision carries its identity and account; the
+                // relayed epoch key follows immediately.
+                const trusted = await activation.e2ee.trustPublisher(options.publisher.publicKey, {
+                    type: "view_decision", session_id: "viewer_session", request_id: "pending_1", decision: "approve",
+                    approval_id: "approval_1", publisher_key: options.publisher.publicKey, publisher_account: "publisher_account"
+                });
+                if (!trusted) throw new Error("DASS E2EE trust refused.");
+                const blob = await wrapEpochKey(options.publisher, activation.e2ee.identityPublicKey, "stream/real_source",
+                    options.epoch ?? 3, options.epochKey ?? generateEpochKey());
+                activation.e2ee.onEpochBlob?.(blob);
+            }
             if (deliverVideo) tracks = [track];
             return "viewer_session";
         } } as unknown as SpikePeer;
@@ -64,10 +82,11 @@ function fixture() {
             options.signal.addEventListener("abort", close, { once: true });
             return peer;
         },
-        identityStore: async () => memoryIdentityStore()
+        identityStore: async () => identityStore
     });
     controller.start();
     return { controller, socket, peer, stream, closed, prepares: () => prepares, activations: () => activations,
+        receivedEpoch: () => receivedEpoch,
         exit: () => { context = undefined; controller.reset(); },
         loseContext: () => { context = undefined; },
         delayVideo: () => { deliverVideo = false; },
@@ -295,5 +314,38 @@ test("cancelled grid directory setup cannot restore a pending tile or activate m
         expect(f.controller.getSnapshot().watchingShare).toBeUndefined();
         expect(f.controller.getSnapshot().stream).toBeUndefined();
         expect(f.controller.getSnapshot().phase).toBe("disconnected");
+    } finally { f.controller.stop(); }
+});
+
+test("a relayed epoch key is applied after the publisher identity is pinned", async () => {
+    const publisher = await generateIdentity();
+    const epochKey = generateEpochKey();
+    const f = fixture({ publisher, epoch: 4, epochKey });
+    try {
+        await f.controller.prepareViewer();
+        await f.controller.bind("https://dass.example", "room", "secret");
+        await f.controller.watch({ roomId: "room", shareId: "real_source" });
+        // The blob arrives right after the decision: the viewer must still
+        // unwrap it, which only works once the identity pin exists.
+        for (let attempt = 0; attempt < 50 && !f.receivedEpoch(); attempt++) await Bun.sleep(1);
+        expect(f.receivedEpoch()).toEqual({ epoch: 4, keyBytes: epochKey });
+        expect(f.controller.getSnapshot().publisherTrust).toContain("unverified");
+    } finally { f.controller.stop(); }
+});
+
+test("a changed publisher identity fails closed until it is explicitly accepted", async () => {
+    const publisher = await generateIdentity();
+    const previous = await generateIdentity();
+    const f = fixture({ publisher, pinnedKey: previous.publicKey });
+    try {
+        await f.controller.prepareViewer();
+        await f.controller.bind("https://dass.example", "room", "secret");
+        const result = await f.controller.watch({ roomId: "room", shareId: "real_source" });
+        expect(result.ok).toBe(false);
+        expect(f.controller.getSnapshot().publisherIdentityChanged).toBe(true);
+        expect(f.receivedEpoch()).toBeUndefined();
+        // Accepting the presented identity clears the change for the next try.
+        await f.controller.acceptPublisherIdentity();
+        expect(f.controller.getSnapshot().publisherIdentityChanged).toBe(false);
     } finally { f.controller.stop(); }
 });

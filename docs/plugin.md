@@ -264,7 +264,21 @@ version-1 scaffold contract is accepted. Discovery is not authentication or an
 authorization to capture. E2EE is mandatory in the media path (publisher and
 viewer ECDH identities plus AES-256-GCM frame encryption); it is not yet
 independently reviewed or validated on real clients, so treat it as
-unproven code rather than a security claim.
+unproven code rather than a security claim. The frame layout is
+project-specific: it follows the SFrame shape but is not RFC 9605 SFrame and
+has no interoperability.
+
+**Identity verification:** the publisher's approval prompt shows the
+viewer's safety number, and the viewer panel shows the publisher's safety
+number, so both sides can compare it over an independently authenticated
+channel. A confirmed comparison marks that pinned identity as verified and
+switches the stream state to "E2EE — identity independently verified";
+without it the state stays "E2EE — identity unverified (TOFU)". The
+`requireVerifiedViewers` setting makes the publisher refuse approvals for
+viewers whose identity was not verified. A first contact is never verified by
+the comparison alone, and a changed key always pauses admission until the
+publisher explicitly re-confirms it. A changed publisher key pauses the
+subscription until the viewer accepts the new identity.
 
 **Historical chooser-only behavior:** On Discord stable build **634304**, the center voice tray and left Voice Connected
 panel share buttons now declare an explicit Discord/DASS chooser before their

@@ -9,7 +9,9 @@ import {
     generateIdentity,
     identityFingerprint,
     safetyNumber,
+    transformWorkerSource,
     trustLabel,
+    trustPrompt,
     unwrapEpochKey,
     wrapEpochKey,
 } from "../../clients/spike/e2ee";
@@ -53,6 +55,32 @@ describe("media frame cipher", () => {
         // separation is per key, and epoch keys are rotated together.
         const again = await MediaFrameCipher.create(generateEpochKey());
         expect(await again.decrypt(await again.encrypt(2, 5n, FRAME))).toMatchObject({ epoch: 2, counter: 5n });
+    });
+});
+
+describe("transform worker scope", () => {
+    test("the generated worker source carries every constant it needs", async () => {
+        // The worker runs in its own global scope. Evaluating the generated
+        // source there proves no module binding is missing at runtime; a
+        // missing constant would leave every frame dropped.
+        const scope: { onrtctransform?: unknown } = {};
+        const factory = new Function("self", `${transformWorkerSource()}\nreturn { MediaFrameCipher, ReplayWindow };`);
+        const worker = factory(scope) as {
+            MediaFrameCipher: typeof MediaFrameCipher;
+            ReplayWindow: typeof ReplayWindow;
+        };
+        expect(typeof scope.onrtctransform).toBe("function");
+
+        const cipher = await worker.MediaFrameCipher.create(generateEpochKey());
+        const encrypted = await cipher.encrypt(4, 9n, FRAME);
+        const decrypted = await cipher.decrypt(encrypted);
+        expect(new Uint8Array(decrypted.frame)).toEqual(new Uint8Array(FRAME));
+        expect(decrypted.epoch).toBe(4);
+        expect(decrypted.counter).toBe(9n);
+
+        const window = new worker.ReplayWindow();
+        expect(window.admit(3n)).toBe(true);
+        expect(window.admit(3n)).toBe(false);
     });
 });
 
@@ -101,10 +129,13 @@ describe("identity trust", () => {
         expect(evaluateIdentity({ ...tofu, verified: true }, peer.publicKey).kind).toBe("verified");
         const changed = evaluateIdentity(tofu, (await generateIdentity()).publicKey);
         expect(changed.kind).toBe("changed");
-        expect(trustLabel({ kind: "changed", pinned: tofu })).toContain("changed");
+        expect(trustPrompt({ kind: "changed", pinned: tofu })).toContain("changed");
+        expect(trustPrompt({ kind: "first-contact" })).toContain("first contact");
+        // The stream state only shows the two allowed labels.
         expect(trustLabel({ kind: "verified" })).toContain("verified");
         expect(trustLabel({ kind: "tofu" })).toContain("TOFU");
         expect(trustLabel({ kind: "first-contact" })).toContain("unverified");
+        expect(trustLabel({ kind: "changed", pinned: tofu })).toContain("unverified");
     });
 
     test("safety number binds both identity keys deterministically", async () => {

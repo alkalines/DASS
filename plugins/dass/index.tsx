@@ -42,7 +42,7 @@ const discovery = new DiscoveryController();
 const session = new DassSession({ read: readRememberedAccount, write: writeRememberedAccount, forget: forgetRememberedAccount }, undefined, currentCall);
 const watching = new WatchController(currentCall, { connect: options => session.connect(options), prepare: SpikePeer.prepare, identityStore: defaultIdentityStore });
 const directory = new WatchController(currentCall, { connect: options => session.connect(options), prepare: SpikePeer.prepare, identityStore: defaultIdentityStore });
-const publisher = new PublishController(session, currentCall, { connect: options => session.connect(options), prepare: SpikePeer.prepare, identityStore: defaultIdentityStore });
+const publisher = new PublishController(session, currentCall, { connect: options => session.connect(options), prepare: SpikePeer.prepare, identityStore: defaultIdentityStore, requireVerifiedViewers: () => settings.store.requireVerifiedViewers });
 const callDiscovery = createCallDiscovery(session, directory, () => settings.store.backendUrl,
     () => !["idle", "failed"].includes(publisher.getSnapshot().phase) || ["loading", "ready", "watching"].includes(watching.getSnapshot().phase));
 const localCapture = new LocalCaptureCheck();
@@ -140,6 +140,11 @@ const settings = definePluginSettings({
         default: false,
         hidden: true,
         onChange: resetConfiguration
+    },
+    requireVerifiedViewers: {
+        type: OptionType.BOOLEAN,
+        description: "Only admit viewers whose E2EE identity was independently verified with a safety-number comparison.",
+        default: false
     }
 });
 

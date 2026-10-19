@@ -7,7 +7,7 @@ import { DassSession } from "../../plugins/dass/session";
 import { createShareSelection } from "../../plugins/dass/discordAdapter";
 import { memoryIdentityStore } from "./helpers/e2eeStore";
 
-function fixture() {
+function fixture(options: { requireVerifiedViewers?: boolean; } = {}) {
     const session = new DassSession();
     session.configure("authorized_room", "separate_secret");
     let context: string | undefined = "discord_context";
@@ -48,7 +48,8 @@ function fixture() {
             return signalingClosed.signal.aborted ? { ...signaling, closed: new AbortController().signal } : signaling;
         },
         prepare: async () => { events.push("prepare"); return peerClosed.signal.aborted ? { ...peer, closed: new AbortController().signal } : peer; },
-        identityStore: async () => memoryIdentityStore()
+        identityStore: async () => memoryIdentityStore(),
+        requireVerifiedViewers: () => options.requireVerifiedViewers ?? false
     });
     controller.start();
     return { session, controller, bridge, events, peer, lease, signalingClosed, releases: () => releases,
@@ -331,8 +332,7 @@ test("DASS selection consumes native callback even when publishing fails", () =>
     expect(native).toBe(0);
 });
 
-test("publisher sees pending view requests and decides them manually", async () => {
-    const f = fixture();
+test("publisher sees pending view requests and decides them manually", async () => {    const f = fixture();
     try {
         await f.controller.publish("https://dass.example", f.bridge);
         expect(f.controller.getSnapshot().phase).toBe("publishing");
@@ -352,5 +352,22 @@ test("publisher sees pending view requests and decides them manually", async () 
         await f.controller.removeViewer("alice");
         expect(f.removals).toEqual(["alice"]);
         expect(f.controller.getSnapshot().approvedViewers).toEqual([]);
+    } finally { f.controller.stop(); }
+});
+
+test("a publisher that requires verified identities refuses an unverified viewer", async () => {
+    const f = fixture({ requireVerifiedViewers: true });
+    try {
+        await f.controller.publish("https://dass.example", f.bridge);
+        f.request({ request_id: "req_1", viewer_id: "alice", viewer_display_name: "Alice", viewer_key: "aXYta2V5" });
+        await Promise.resolve();
+        await Promise.resolve();
+        await f.controller.decideView("req_1", "approve");
+        expect(f.decisions).toEqual([]);
+        expect(f.controller.getSnapshot().message).toContain("not independently verified");
+        // A verified viewer is admitted.
+        await f.controller.verifyViewerIdentity("alice");
+        await f.controller.decideView("req_1", "approve");
+        expect(f.decisions).toEqual([{ requestId: "req_1", decision: "approve" }]);
     } finally { f.controller.stop(); }
 });

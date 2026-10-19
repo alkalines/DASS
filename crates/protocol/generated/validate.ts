@@ -50,7 +50,7 @@ const serverShapes: Record<string, Shape> = {
         viewer_display_name: displayName, viewer_key: identityKey },
     view_decision: { session_id: identifier, request_id: identifier,
         decision: member(["approve", "deny", "block"]), approval_id: value => value === "" || identifier(value),
-        publisher_key: emptyOrIdentityKey },
+        publisher_key: emptyOrIdentityKey, publisher_account: value => value === "" || identifier(value) },
     view_request_closed: { session_id: identifier, request_id: identifier },
     key_relay: { session_id: identifier, publisher_id: identifier, blob: opaqueField(MAX_KEY_RELAY_CHARS) },
     accepted: { session_id: identifier },
@@ -91,7 +91,9 @@ function parse(message: string, shapes: Record<string, Shape>): unknown {
             }
             if (shapes === serverShapes && operation.type === "view_decision") {
                 return operation.decision !== "approve"
-                    || ((operation.approval_id as string).length > 0 && (operation.publisher_key as string).length > 0);
+                    || ((operation.approval_id as string).length > 0
+                        && (operation.publisher_key as string).length > 0
+                        && (operation.publisher_account as string).length > 0);
             }
             if (shapes === serverShapes && operation.type === "viewer_presence") {
                 return operation.change !== "joined" || (operation.viewer_count as number) > 0;

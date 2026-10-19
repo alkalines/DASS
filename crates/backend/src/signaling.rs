@@ -90,6 +90,9 @@ enum ConnectionEvent {
         approval_id: String,
         /// Publisher's E2EE identity for the viewer's pin; empty on denial.
         publisher_key: String,
+        /// Publisher's DASS account, the viewer's stable pin scope; empty on
+        /// denial.
+        publisher_account: String,
     },
     /// Publisher-encrypted epoch key ciphertext bound for one approved viewer.
     KeyRelay {
@@ -373,6 +376,7 @@ impl Drop for PublisherLease {
                             decision: ViewDecisionKind::Deny,
                             approval_id: String::new(),
                             publisher_key: String::new(),
+                            publisher_account: String::new(),
                         });
                 }
             }
@@ -731,6 +735,7 @@ fn decide_view(
                 decision: ViewDecisionKind::Approve,
                 approval_id,
                 publisher_key: publisher.publisher_key.clone(),
+                publisher_account: publisher.account.clone(),
             }
         }
         ViewDecisionKind::Deny | ViewDecisionKind::Block => {
@@ -753,6 +758,7 @@ fn decide_view(
                 decision: ViewDecisionKind::Deny,
                 approval_id: String::new(),
                 publisher_key: String::new(),
+                publisher_account: String::new(),
             }
         }
     };
@@ -822,6 +828,7 @@ fn block_account_viewers(
                         decision: ViewDecisionKind::Deny,
                         approval_id: String::new(),
                         publisher_key: String::new(),
+                        publisher_account: String::new(),
                     });
             }
         }
@@ -898,6 +905,7 @@ fn remove_viewer(
             decision: ViewDecisionKind::Deny,
             approval_id: String::new(),
             publisher_key: String::new(),
+            publisher_account: String::new(),
         });
     }
     Ok(())
@@ -996,6 +1004,7 @@ fn expire_pending_views(state: &SignalingState) {
                 decision: ViewDecisionKind::Deny,
                 approval_id: String::new(),
                 publisher_key: String::new(),
+                publisher_account: String::new(),
             });
     }
 }
@@ -1394,11 +1403,11 @@ async fn run(
                             session_id: joined.session_id.clone(), request_id,
                         }).await
                     }
-                    ConnectionEvent::ViewDecision { request_id, decision, approval_id, publisher_key } => {
+                    ConnectionEvent::ViewDecision { request_id, decision, approval_id, publisher_key, publisher_account } => {
                         let Some(joined) = session.as_ref() else { continue; };
                         send(&mut socket, VIEW_DECISION_PUSH_ID.into(), ServerOperation::ViewDecision {
                             session_id: joined.session_id.clone(),
-                            request_id, decision, approval_id, publisher_key,
+                            request_id, decision, approval_id, publisher_key, publisher_account,
                         }).await
                     }
                     ConnectionEvent::KeyRelay { publisher_id, blob } => {
@@ -2004,11 +2013,14 @@ mod tests {
                 approval_id,
                 request_id: decided,
                 publisher_key,
+                publisher_account,
             } => {
                 assert!(matches!(decision, ViewDecisionKind::Approve));
                 assert_eq!(decided, request_id);
-                // The approval carries the publisher's E2EE identity for pinning.
+                // The approval carries the publisher's E2EE identity for pinning
+                // and the account that scopes the viewer's pin.
                 assert_eq!(publisher_key, "cHVibGlzaGVyLWtleQ");
+                assert_eq!(publisher_account, "publisher_account");
                 approval_id
             }
             _ => panic!("expected a pushed approval"),

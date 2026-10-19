@@ -56,6 +56,14 @@ export function WatchPanel({ controller, backendUrl, beforePrepare, session }: {
         }}>Bind room and discover</Button>
         </details>}
         <Paragraph role="status" aria-live="polite">{status.phase}: {status.message}</Paragraph>
+        {(status.publisherTrust || status.publisherIdentityChanged) && <div>
+            {status.publisherTrust && <Paragraph role="status">{status.publisherTrust}</Paragraph>}
+            {status.publisherSafetyNumber && <Paragraph>Safety number: {status.publisherSafetyNumber}. Compare it with the publisher over an independent channel to verify the identity.</Paragraph>}
+            {status.publisherIdentityChanged
+                ? <Button onClick={() => void controller.acceptPublisherIdentity()}>Accept new publisher identity</Button>
+                : status.stream && status.publisherTrust && !status.publisherTrust.includes("independently verified")
+                    && <Button onClick={() => void controller.verifyPublisherIdentity()}>Mark publisher identity verified</Button>}
+        </div>}
         {status.phase === "ready" && status.shares.length === 0 && <Paragraph>No shares listed. Wait for a connected publisher in this authorized call.</Paragraph>}
         {status.shares.map(share => <Button key={share.shareId} disabled={loading || !status.candidates.length || !!status.stream}
             onClick={() => void controller.watch(share)}>Watch {share.displayName ?? "Unnamed DASS publisher"}</Button>)}

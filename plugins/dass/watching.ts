@@ -11,6 +11,8 @@ import {
     evaluateIdentity,
     identityFingerprint,
     type IdentityStore,
+    type PinnedIdentity,
+    safetyNumber,
     trustLabel,
     unwrapEpochKey,
 } from "../../clients/spike/e2ee";
@@ -29,6 +31,12 @@ export interface WatchStatus {
     closedShare?: DassShare;
     failedShare?: DassShare;
     directoryRoomId?: string;
+    /** E2EE trust state of the publisher this viewer is watching. */
+    publisherTrust?: string;
+    /** Safety number both participants compare over an independent channel. */
+    publisherSafetyNumber?: string;
+    /** The publisher presented a different identity key than the pinned one. */
+    publisherIdentityChanged?: boolean;
 }
 
 /** One independently authorized room, one prepared/active decoder, no native streams. */
@@ -49,6 +57,11 @@ export class WatchController implements ScreenshareTransport {
     private identity?: E2eeIdentity;
     private identityStore?: IdentityStore;
     private publisherTrust?: string;
+    private publisherScope?: string;
+    private publisherPin?: PinnedIdentity;
+    private publisherPresentedKey?: string;
+    private publisherSafetyNumber?: string;
+    private publisherIdentityChanged = false;
     private status: WatchStatus = { phase: "idle", message: "Bind a DASS room using a separate credential. Discord context is not authorization.", shares: [], candidates: [] };
     private listeners = new Set<() => void>();
 
@@ -66,7 +79,7 @@ export class WatchController implements ScreenshareTransport {
 
     private update(status: WatchStatus) {
         if (status.phase !== this.status.phase) logDiagnostic("viewer phase", { phase: status.phase }, status.phase === "failed" || status.phase === "unauthorized");
-        this.status = status;
+        this.status = { ...status, publisherTrust: this.publisherTrust, publisherSafetyNumber: this.publisherSafetyNumber, publisherIdentityChanged: this.publisherIdentityChanged };
         for (const listener of this.listeners) listener();
     }
 
@@ -95,6 +108,9 @@ export class WatchController implements ScreenshareTransport {
         this.closedContextId = closedShare || failedShare ? this.contextId : undefined;
         this.contextId = this.roomId = undefined;
         this.busy = false;
+        // The pinned identity is a long-lived local anchor and survives the
+        // stream; only the stream-scoped trust label is cleared.
+        this.publisherTrust = undefined;
         this.update({ phase, message, shares: [], candidates: [], closedShare, failedShare });
     }
 
@@ -103,6 +119,11 @@ export class WatchController implements ScreenshareTransport {
         clearInterval(this.contextCheck);
         this.contextCheck = undefined;
         this.reset();
+        this.publisherScope = undefined;
+        this.publisherPin = undefined;
+        this.publisherPresentedKey = undefined;
+        this.publisherSafetyNumber = undefined;
+        this.publisherIdentityChanged = false;
         this.routing.stop();
     }
 
@@ -261,32 +282,51 @@ export class WatchController implements ScreenshareTransport {
         try {
             this.identityStore ??= await this.dependencies.identityStore();
             this.identity ??= await deviceIdentity(this.identityStore);
-            const { identity } = this;
-            const publisherScope = `publisher/${share.roomId}/${share.shareId}`;
-            const existingPin = await this.identityStore.readPeer(publisherScope).catch(() => undefined);
+            const { identity, identityStore } = this;
+            // The pin scope is the publisher's account, not the stream instance:
+            // a changed publisher key must be detected across streams instead
+            // of looking like a first contact.
+            let publisherPin: PinnedIdentity | undefined;
+            let resolvePin: ((pin: PinnedIdentity) => void) | undefined;
+            const pinReady = new Promise<PinnedIdentity>(resolve => { resolvePin = resolve; });
             await peer.activate({ backendUrl: this.backendUrl, credential: "", roomId: share.roomId, publisherId: share.shareId, signaling,
                 e2ee: {
                     identityPublicKey: identity.publicKey,
-                    // The approval decision carries the publisher's E2EE key.
-                    // TOFU pin it on first contact; a changed key fails closed
-                    // and must be explicitly re-trusted before watching.
-                    trustPublisher: (publisherKey, _decision) => {
-                        const fingerprintPromise = identityFingerprint(publisherKey);
-                        const trust = evaluateIdentity(existingPin, publisherKey);
+                    // The approval decision carries the publisher's E2EE key and
+                    // account. TOFU pin it on first contact; a changed key fails
+                    // closed and must be explicitly re-trusted before watching.
+                    trustPublisher: async (publisherKey, decision) => {
+                        const scope = `publisher/${decision.publisher_account}`;
+                        publisherPin = await identityStore.readPeer(scope).catch(() => undefined);
+                        const trust = evaluateIdentity(publisherPin, publisherKey);
                         this.publisherTrust = trustLabel(trust);
-                        if (trust.kind === "changed") return false;
-                        if (!existingPin) {
-                            void fingerprintPromise.then(fingerprint =>
-                                this.identityStore?.writePeer(publisherScope, { key: publisherKey, fingerprint, verified: false })).catch(() => {});
+                        this.publisherScope = scope;
+                        this.publisherPin = publisherPin;
+                        this.publisherPresentedKey = publisherKey;
+                        this.publisherIdentityChanged = trust.kind === "changed";
+                        if (trust.kind === "changed") {
+                            if (publisherPin) resolvePin?.(publisherPin);
+                            return false;
                         }
+                        if (!publisherPin) {
+                            // The pin is stored before subscribing, so a relayed
+                            // epoch key can never arrive before its anchor.
+                            publisherPin = { key: publisherKey, fingerprint: await identityFingerprint(publisherKey), verified: false };
+                            await identityStore.writePeer(scope, publisherPin);
+                        }
+                        this.publisherPin = publisherPin;
+                        this.publisherSafetyNumber = await safetyNumber(identity.publicKey, publisherPin.key);
+                        resolvePin?.(publisherPin);
                         return true;
                     },
                     onEpochBlob: blob => {
                         void (async () => {
-                            const pin = await this.identityStore?.readPeer(publisherScope);
-                            if (!pin) return;
+                            const pin = await pinReady;
                             const { epoch, keyBytes } = await unwrapEpochKey(identity, pin.key, `stream/${share.shareId}`, blob);
                             this.peer?.setReceiveEpoch(epoch, keyBytes);
+                            // Old epoch keys are dropped so a removed or
+                            // replaced key stops being usable here.
+                            this.peer?.retireEpochsBelow(epoch);
                         })().catch(() => logDiagnostic("epoch key unwrap failed", {}, true));
                     },
                 } });
@@ -311,6 +351,36 @@ export class WatchController implements ScreenshareTransport {
             peer.close();
             throw error;
         }
+    }
+
+    /**
+     * Mark the publisher identity as independently verified after the
+     * participants compared the safety number over an independent channel.
+     */
+    async verifyPublisherIdentity() {
+        const scope = this.publisherScope;
+        const pin = this.publisherPin;
+        if (!scope || !pin) return;
+        await this.identityStore?.writePeer(scope, { ...pin, verified: true });
+        this.publisherPin = { ...pin, verified: true };
+        this.publisherTrust = trustLabel({ kind: "verified" });
+        this.update({ ...this.status });
+    }
+
+    /**
+     * Explicitly accept a changed publisher identity after review. The next
+     * watch attempt pins the presented key as an unverified TOFU anchor.
+     */
+    async acceptPublisherIdentity() {
+        const scope = this.publisherScope;
+        const key = this.publisherPresentedKey;
+        if (!scope || !key) return;
+        const pin = { key, fingerprint: await identityFingerprint(key), verified: false };
+        await this.identityStore?.writePeer(scope, pin);
+        this.publisherPin = pin;
+        this.publisherIdentityChanged = false;
+        this.publisherTrust = trustLabel({ kind: "tofu" });
+        this.update({ ...this.status });
     }
 
     async preparePublish(): Promise<never> { throw new Error("Publishing is owned by the DASS session publisher, not the viewer routing instance."); }

@@ -55,13 +55,6 @@ export class DassIdentityStore implements IdentityStore {
         return serialize(() => this.backend.set(`${PIN_PREFIX}${scope}`, { key: pin.key, fingerprint: pin.fingerprint, verified: pin.verified }));
     }
 
-    /** Mark a pinned peer identity as verified after out-of-band comparison. */
-    async verifyPeer(scope: string, key: string): Promise<void> {
-        const pin = await this.readPeer(scope);
-        if (!pin || pin.key !== key) throw new Error("Cannot verify an unpinned or changed DASS identity.");
-        await this.writePeer(scope, { ...pin, verified: true });
-    }
-
     async readDevice() {
         const stored = await this.backend.get(DEVICE_KEY);
         if (stored === undefined) return undefined;

@@ -64,8 +64,8 @@ describe("proposed signaling protocol", () => {
             { type: "ice", session_id: "s", candidate: "candidate:example" },
             { type: "view_request_pending", session_id: "s", request_id: "pending_1" },
             { type: "view_request", session_id: "s", request_id: "pending_1", viewer_id: "alice", viewer_display_name: "Alice", viewer_key: "aXYta2V5" },
-            { type: "view_decision", session_id: "s", request_id: "pending_1", decision: "approve", approval_id: "approval_1", publisher_key: "cHViLWtleQ" },
-            { type: "view_decision", session_id: "s", request_id: "pending_1", decision: "deny", approval_id: "", publisher_key: "" },
+            { type: "view_decision", session_id: "s", request_id: "pending_1", decision: "approve", approval_id: "approval_1", publisher_key: "cHViLWtleQ", publisher_account: "publisher_account" },
+            { type: "view_decision", session_id: "s", request_id: "pending_1", decision: "deny", approval_id: "", publisher_key: "", publisher_account: "" },
             { type: "view_request_closed", session_id: "s", request_id: "pending_1" },
             { type: "viewer_presence", session_id: "publisher_session", change: "joined", viewer_count: 1 },
             { type: "viewer_presence", session_id: "publisher_session", change: "left", viewer_count: 0 },
@@ -74,8 +74,9 @@ describe("proposed signaling protocol", () => {
         ]) expect(parseServerMessage(message(operation)).operation).toEqual(operation);
         expect(() => parseServerMessage(message({ type: "closed", session_id: "s", reason: "unknown" }))).toThrow();
         for (const operation of [
-            { type: "view_decision", session_id: "s", request_id: "r", decision: "approve", approval_id: "", publisher_key: "" },
-            { type: "view_decision", session_id: "s", request_id: "r", decision: "approve", approval_id: "a", publisher_key: "" },
+            { type: "view_decision", session_id: "s", request_id: "r", decision: "approve", approval_id: "", publisher_key: "", publisher_account: "publisher_account" },
+            { type: "view_decision", session_id: "s", request_id: "r", decision: "approve", approval_id: "a", publisher_key: "", publisher_account: "publisher_account" },
+            { type: "view_decision", session_id: "s", request_id: "r", decision: "approve", approval_id: "a", publisher_key: "cHViLWtleQ", publisher_account: "" },
             { type: "view_decision", session_id: "s", request_id: "r", decision: "maybe", approval_id: "a" },
             { type: "view_request", session_id: "s", request_id: "r", viewer_id: "bad/id", viewer_display_name: "A", viewer_key: "aXYta2V5" },
             { type: "view_request", session_id: "s", request_id: "r", viewer_id: "a", viewer_display_name: "line\nbreak", viewer_key: "aXYta2V5" },

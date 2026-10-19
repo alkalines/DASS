@@ -9,12 +9,13 @@
 // viewers' devices; the backend relays opaque ciphertext and bounded key
 // material blobs but never receives media keys.
 //
-// Frame format is SFrame-derived (RFC 9605 shape, fixed layout):
+// Frame layout is project-specific and follows the SFrame shape (RFC 9605):
 //   epoch(4 BE) || counter(8 BE) || AES-256-GCM(encoded frame, aad = header)
 // The nonce is the per-epoch 96-bit salt XORed with epoch||counter, matching
 // the SFrame nonce construction. Keys are derived per epoch with HKDF-SHA-256.
-// This is the project's reviewed-target construction; independent
-// cryptographic review remains a release gate, not a completed step.
+// This is not RFC 9605 SFrame: there is no SFrame key id, no SFrame
+// interoperability and no published test vector. Independent cryptographic
+// review and interop test vectors remain release gates, not completed steps.
 //
 // Media epoch keys reach approved viewers as E2EE-wrapped blobs relayed over
 // signaling (`key_relay`): AES-256-GCM under a key derived from static ECDH
@@ -35,6 +36,38 @@ const MAX_EPOCHS = 4;
 const REPLAY_WINDOW_BITS = 256;
 const NONCE_BYTES = 12;
 const WRAP_NONCE_BYTES = 12;
+
+/**
+ * Every numeric value the insertable-stream transform worker needs. The
+ * worker runs in its own global scope and cannot read this module's
+ * bindings, so the constants travel as data and the worker-side code is
+ * generated from them instead of from module-scope identifiers.
+ */
+export interface FrameConstants {
+    readonly keyBytes: number;
+    readonly epochBytes: number;
+    readonly counterBytes: number;
+    readonly headerBytes: number;
+    readonly tagBytes: number;
+    readonly maxEpochs: number;
+    readonly replayWindowBits: number;
+    readonly nonceBytes: number;
+    readonly maxFrameBytes: number;
+    readonly frameOverheadBytes: number;
+}
+
+const FRAME_CONSTANTS: FrameConstants = {
+    keyBytes: E2EE_KEY_BYTES,
+    epochBytes: FRAME_EPOCH_BYTES,
+    counterBytes: FRAME_COUNTER_BYTES,
+    headerBytes: FRAME_HEADER_BYTES,
+    tagBytes: TAG_BYTES,
+    maxEpochs: MAX_EPOCHS,
+    replayWindowBits: REPLAY_WINDOW_BITS,
+    nonceBytes: NONCE_BYTES,
+    maxFrameBytes: E2EE_MAX_FRAME_BYTES,
+    frameOverheadBytes: E2EE_FRAME_OVERHEAD_BYTES
+};
 const WRAP_CONTEXT_PREFIX = "DASS/E2EE-key-v1/";
 
 function base64urlEncode(bytes: Uint8Array | ArrayBuffer): string {
@@ -78,87 +111,105 @@ async function hkdfSha256(keyBytes: Uint8Array, salt: Uint8Array, info: string, 
  * 96-bit salt are unique per epoch, so counters may restart at zero after a
  * rekey without reusing a nonce. Encrypts the complete encoded frame; the
  * backend forwards the ciphertext unchanged to every approved viewer.
+ *
+ * The class is built by a factory so the generated transform-worker source
+ * stays self-contained: it closes over its arguments and global APIs only,
+ * never over this module's bindings.
  */
-export class MediaFrameCipher {
-    private constructor(
-        private readonly key: CryptoKey,
-        private readonly salt: Uint8Array
-    ) { }
+export function defineMediaFrameCipher(
+    constants: FrameConstants,
+    hkdf: (keyBytes: Uint8Array, salt: Uint8Array, info: string, lengthBytes: number) => Promise<Uint8Array>,
+    concat: (...parts: Array<Uint8Array | ArrayBuffer>) => Uint8Array
+) {
+    class FrameCipher {
+        private constructor(
+            private readonly key: CryptoKey,
+            private readonly salt: Uint8Array
+        ) { }
 
-    static async create(keyBytes: Uint8Array | ArrayBuffer): Promise<MediaFrameCipher> {
-        const raw = keyBytes instanceof Uint8Array ? keyBytes : new Uint8Array(keyBytes);
-        if (raw.byteLength !== E2EE_KEY_BYTES) throw new Error("DASS epoch keys are 256 bits.");
-        const expanded = await hkdfSha256(raw, new Uint8Array(NONCE_BYTES), "DASS/SFrame/AES-256-GCM", E2EE_KEY_BYTES + NONCE_BYTES);
-        const key = await crypto.subtle.importKey("raw", expanded.slice(0, E2EE_KEY_BYTES) as BufferSource, "AES-GCM", false, ["encrypt", "decrypt"]);
-        return new MediaFrameCipher(key, expanded.slice(E2EE_KEY_BYTES));
-    }
-
-    private nonce(epoch: number, counter: bigint): Uint8Array {
-        // XOR epoch into the first salt bytes and the counter into the rest,
-        // identical to the SFrame nonce construction (KID || CTR big-endian).
-        const overlay = new Uint8Array(FRAME_HEADER_BYTES);
-        const view = new DataView(overlay.buffer);
-        view.setUint32(0, epoch, false);
-        view.setBigUint64(FRAME_EPOCH_BYTES, counter, false);
-        const nonce = this.salt.slice();
-        for (let index = 0; index < FRAME_HEADER_BYTES; index++) nonce[index] ^= overlay[index];
-        return nonce;
-    }
-
-    /** Encrypt one encoded frame under `epoch`/`counter`; AAD binds the header. */
-    async encrypt(epoch: number, counter: bigint, frame: ArrayBuffer): Promise<ArrayBuffer> {
-        if (frame.byteLength > E2EE_MAX_FRAME_BYTES) throw new Error("DASS frame exceeds the E2EE bound.");
-        const header = new Uint8Array(FRAME_HEADER_BYTES);
-        const view = new DataView(header.buffer);
-        view.setUint32(0, epoch, false);
-        view.setBigUint64(FRAME_EPOCH_BYTES, counter, false);
-        const ciphertext = await crypto.subtle.encrypt(
-            { name: "AES-GCM", iv: this.nonce(epoch, counter) as BufferSource, additionalData: header as BufferSource, tagLength: TAG_BYTES * 8 },
-            this.key,
-            frame
-        );
-        return concatBytes(header, ciphertext).buffer as ArrayBuffer;
-    }
-
-    /** Authenticate and decrypt one wire frame. Throws on tampering. */
-    async decrypt(data: ArrayBuffer): Promise<{ epoch: number; counter: bigint; frame: ArrayBuffer; }> {
-        if (data.byteLength < FRAME_HEADER_BYTES + TAG_BYTES || data.byteLength > E2EE_MAX_FRAME_BYTES + E2EE_FRAME_OVERHEAD_BYTES) {
-            throw new Error("Malformed DASS frame.");
+        static async create(keyBytes: Uint8Array | ArrayBuffer): Promise<FrameCipher> {
+            const raw = keyBytes instanceof Uint8Array ? keyBytes : new Uint8Array(keyBytes);
+            if (raw.byteLength !== constants.keyBytes) throw new Error("DASS epoch keys are 256 bits.");
+            const expanded = await hkdf(raw, new Uint8Array(constants.nonceBytes), "DASS/SFrame/AES-256-GCM", constants.keyBytes + constants.nonceBytes);
+            const key = await crypto.subtle.importKey("raw", expanded.slice(0, constants.keyBytes) as BufferSource, "AES-GCM", false, ["encrypt", "decrypt"]);
+            return new FrameCipher(key, expanded.slice(constants.keyBytes));
         }
-        const bytes = new Uint8Array(data);
-        const header = bytes.slice(0, FRAME_HEADER_BYTES);
-        const view = new DataView(data, 0, FRAME_HEADER_BYTES);
-        const epoch = view.getUint32(0, false);
-        const counter = view.getBigUint64(FRAME_EPOCH_BYTES, false);
-        const frame = await crypto.subtle.decrypt(
-            { name: "AES-GCM", iv: this.nonce(epoch, counter) as BufferSource, additionalData: header as BufferSource, tagLength: TAG_BYTES * 8 },
-            this.key,
-            bytes.slice(FRAME_HEADER_BYTES) as BufferSource
-        );
-        return { epoch, counter, frame };
+
+        private nonce(epoch: number, counter: bigint): Uint8Array {
+            // XOR epoch into the first salt bytes and the counter into the rest,
+            // identical to the SFrame nonce construction (KID || CTR big-endian).
+            const overlay = new Uint8Array(constants.headerBytes);
+            const view = new DataView(overlay.buffer);
+            view.setUint32(0, epoch, false);
+            view.setBigUint64(constants.epochBytes, counter, false);
+            const nonce = this.salt.slice();
+            for (let index = 0; index < constants.headerBytes; index++) nonce[index] ^= overlay[index];
+            return nonce;
+        }
+
+        /** Encrypt one encoded frame under `epoch`/`counter`; AAD binds the header. */
+        async encrypt(epoch: number, counter: bigint, frame: ArrayBuffer): Promise<ArrayBuffer> {
+            if (frame.byteLength > constants.maxFrameBytes) throw new Error("DASS frame exceeds the E2EE bound.");
+            const header = new Uint8Array(constants.headerBytes);
+            const view = new DataView(header.buffer);
+            view.setUint32(0, epoch, false);
+            view.setBigUint64(constants.epochBytes, counter, false);
+            const ciphertext = await crypto.subtle.encrypt(
+                { name: "AES-GCM", iv: this.nonce(epoch, counter) as BufferSource, additionalData: header as BufferSource, tagLength: constants.tagBytes * 8 },
+                this.key,
+                frame
+            );
+            return concat(header, ciphertext).buffer as ArrayBuffer;
+        }
+
+        /** Authenticate and decrypt one wire frame. Throws on tampering. */
+        async decrypt(data: ArrayBuffer): Promise<{ epoch: number; counter: bigint; frame: ArrayBuffer; }> {
+            if (data.byteLength < constants.headerBytes + constants.tagBytes || data.byteLength > constants.maxFrameBytes + constants.frameOverheadBytes) {
+                throw new Error("Malformed DASS frame.");
+            }
+            const bytes = new Uint8Array(data);
+            const header = bytes.slice(0, constants.headerBytes);
+            const view = new DataView(data, 0, constants.headerBytes);
+            const epoch = view.getUint32(0, false);
+            const counter = view.getBigUint64(constants.epochBytes, false);
+            const frame = await crypto.subtle.decrypt(
+                { name: "AES-GCM", iv: this.nonce(epoch, counter) as BufferSource, additionalData: header as BufferSource, tagLength: constants.tagBytes * 8 },
+                this.key,
+                bytes.slice(constants.headerBytes) as BufferSource
+            );
+            return { epoch, counter, frame };
+        }
     }
+    return FrameCipher;
 }
+
+export const MediaFrameCipher = defineMediaFrameCipher(FRAME_CONSTANTS, hkdfSha256, concatBytes);
 
 /** Sliding replay window over per-epoch frame counters; admits only new counters. */
-export class ReplayWindow {
-    private highest = -1n;
-    private seen = 0n;
+export function defineReplayWindow(constants: FrameConstants) {
+    class FrameReplayWindow {
+        private highest = -1n;
+        private seen = 0n;
 
-    admit(counter: bigint): boolean {
-        if (counter < 0n) return false;
-        if (counter <= this.highest - BigInt(REPLAY_WINDOW_BITS)) return false;
-        const delta = this.highest - counter;
-        if (delta < 0n) {
-            this.seen = (this.seen << (-delta)) | 1n;
-            this.highest = counter;
+        admit(counter: bigint): boolean {
+            if (counter < 0n) return false;
+            if (counter <= this.highest - BigInt(constants.replayWindowBits)) return false;
+            const delta = this.highest - counter;
+            if (delta < 0n) {
+                this.seen = (this.seen << (-delta)) | 1n;
+                this.highest = counter;
+                return true;
+            }
+            const bit = 1n << delta;
+            if (this.seen & bit) return false;
+            this.seen |= bit;
             return true;
         }
-        const bit = 1n << delta;
-        if (this.seen & bit) return false;
-        this.seen |= bit;
-        return true;
     }
+    return FrameReplayWindow;
 }
+
+export const ReplayWindow = defineReplayWindow(FRAME_CONSTANTS);
 
 /** Fresh random 256-bit media epoch key. */
 export function generateEpochKey(): Uint8Array {
@@ -263,8 +314,10 @@ export async function unwrapEpochKey(
 }
 
 // ---------------------------------------------------------------------------
-// Insertable-streams transform worker. The codec functions above are
-// stringified verbatim into the worker so both sides run identical code.
+// Insertable-streams transform worker. The codec code is generated into the
+// worker so both sides run identical code. The worker has its own global
+// scope: every unit is embedded as an expression and receives the frame
+// constants as data, so no module binding can be missing at runtime.
 // ---------------------------------------------------------------------------
 
 const workerBootstrap = `
@@ -274,7 +327,7 @@ let sendCounter = 0n;
 let role = null;
 
 function dropStaleEpochs() {
-    while (codecs.size > ${MAX_EPOCHS}) {
+    while (codecs.size > ${FRAME_CONSTANTS.maxEpochs}) {
         codecs.delete(codecs.keys().next().value);
     }
 }
@@ -297,7 +350,11 @@ async function transformFrame(event) {
                         sendEpoch = data.epoch;
                         sendCounter = 0n;
                     }
-                })();
+                })().catch(error => {
+                    // Fail closed and visibly: without a cipher every frame is
+                    // dropped instead of leaving this peer in plaintext.
+                    console.error("DASS E2EE epoch installation failed.", error);
+                });
             } else if (data.type === "dropBelow") {
                 for (const epoch of codecs.keys()) if (epoch < data.epoch) codecs.delete(epoch);
             }
@@ -315,8 +372,8 @@ async function transformFrame(event) {
                 controller.enqueue(frame);
             } else {
                 const bytes = new Uint8Array(frame.data);
-                if (bytes.byteLength < ${FRAME_HEADER_BYTES + TAG_BYTES}) return;
-                const epoch = new DataView(frame.data, 0, ${FRAME_HEADER_BYTES}).getUint32(0, false);
+                if (bytes.byteLength < ${FRAME_CONSTANTS.headerBytes + FRAME_CONSTANTS.tagBytes}) return;
+                const epoch = new DataView(frame.data, 0, ${FRAME_CONSTANTS.headerBytes}).getUint32(0, false);
                 const entry = codecs.get(epoch);
                 if (!entry) return; // unknown epoch: drop rather than emit plaintext
                 try {
@@ -338,6 +395,18 @@ self.onrtctransform = event => {
 };
 `;
 
+/** The complete transform-worker source, generated from this module's code. */
+export function transformWorkerSource(): string {
+    return [
+        `const FRAME_CONSTANTS = ${JSON.stringify(FRAME_CONSTANTS)};`,
+        `const concatBytes = (${concatBytes.toString()});`,
+        `const hkdfSha256 = (${hkdfSha256.toString()});`,
+        `const MediaFrameCipher = (${defineMediaFrameCipher.toString()})(FRAME_CONSTANTS, hkdfSha256, concatBytes);`,
+        `const ReplayWindow = (${defineReplayWindow.toString()})(FRAME_CONSTANTS);`,
+        workerBootstrap,
+    ].join("\n");
+}
+
 /**
  * One transform worker per peer. Epoch keys are pushed to the worker through a
  * MessagePort so raw key material never appears in signaling JSON beyond the
@@ -351,13 +420,7 @@ export class E2eeTransforms {
         if (typeof Worker !== "function" || typeof RTCRtpScriptTransform !== "function") {
             throw new Error("DASS E2EE requires WebRTC insertable streams.");
         }
-        const source = [
-            concatBytes.toString(),
-            hkdfSha256.toString(),
-            MediaFrameCipher.toString(),
-            ReplayWindow.toString(),
-            workerBootstrap,
-        ].join("\n");
+        const source = transformWorkerSource();
         this.worker = new Worker(URL.createObjectURL(new Blob([source], { type: "text/javascript" })));
     }
 
@@ -437,11 +500,21 @@ export async function safetyNumber(selfKey: string, peerKey: string): Promise<st
     return digits.replace(/(\d{6})(?=\d)/g, "$1 ");
 }
 
+/**
+ * Stream-state label. Only the two states the roadmap allows are shown: an
+ * independently verified identity or an unverified TOFU identity. The
+ * first-contact and changed-key details belong to the approval prompt.
+ */
 export function trustLabel(trust: IdentityTrust): string {
+    return trust.kind === "verified" ? "E2EE — identity independently verified" : "E2EE — identity unverified (TOFU)";
+}
+
+/** Approval-prompt wording, including first contact and changed identities. */
+export function trustPrompt(trust: IdentityTrust): string {
     switch (trust.kind) {
         case "verified": return "E2EE — identity independently verified";
         case "tofu": return "E2EE — identity unverified (TOFU)";
-        case "first-contact": return "E2EE — first contact (unverified)";
-        case "changed": return "E2EE — identity changed; review required";
+        case "first-contact": return "E2EE — first contact (unverified). Approving pins this key as the trust anchor.";
+        case "changed": return "E2EE — identity changed. Confirm the new key before approving.";
     }
 }

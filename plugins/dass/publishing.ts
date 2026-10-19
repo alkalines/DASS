@@ -13,6 +13,7 @@ import {
     identityFingerprint,
     type IdentityStore,
     type IdentityTrust,
+    safetyNumber,
     wrapEpochKey,
 } from "../../clients/spike/e2ee";
 import { defaultIdentityStore,deviceIdentity } from "./e2eeIdentity";
@@ -27,6 +28,8 @@ export interface PendingViewer {
     displayName: string;
     /** Pinned-identity trust for the key this viewer presented. */
     trust: IdentityTrust;
+    /** Safety number both participants compare over an independent channel. */
+    safetyNumber?: string;
 }
 
 export interface ApprovedViewer {
@@ -47,6 +50,14 @@ export function hasAcceptedPublishCapture(phase: PublishStatus["phase"]): boolea
     return ["preparing", "prepared", "activating", "publishing"].includes(phase);
 }
 
+export interface PublishDependencies {
+    connect: typeof SpikeSignaling.connect;
+    prepare: typeof SpikePeer.prepare;
+    identityStore: () => Promise<IdentityStore>;
+    /** Publisher policy: admit only independently verified viewers. */
+    requireVerifiedViewers?: () => boolean;
+}
+
 /** Owns publishing independently of settings/modal mounting and Discord's native stream. */
 export class PublishController {
     private active = false;
@@ -58,7 +69,7 @@ export class PublishController {
     private status: PublishStatus = { phase: "idle", message: "No DASS share is running.", candidates: [], pendingViewers: [], approvedViewers: [] };
 
     constructor(private readonly session: DassSession, private readonly currentContext: () => string | undefined,
-        private readonly dependencies = { connect: SpikeSignaling.connect, prepare: SpikePeer.prepare, identityStore: async () => defaultIdentityStore() }) {}
+        private readonly dependencies: PublishDependencies = { connect: SpikeSignaling.connect, prepare: SpikePeer.prepare, identityStore: async () => defaultIdentityStore(), requireVerifiedViewers: () => false }) {}
 
     getSnapshot = () => this.status;
     getPreviewStream = () => this.operation && this.current(this.operation) ? this.operation.capture?.stream : undefined;
@@ -206,6 +217,18 @@ export class PublishController {
                             operation.viewerKeys?.set(viewRequest.viewer_id, viewRequest.viewer_key);
                             operation.viewerKeys ??= new Map([[viewRequest.viewer_id, viewRequest.viewer_key]]);
                             this.update({ ...this.status, pendingViewers: pending });
+                            // The safety number needs a digest, so it fills in
+                            // once it is computed.
+                            const { identity } = operation;
+                            if (!identity) return;
+                            void safetyNumber(identity.publicKey, viewRequest.viewer_key).then(safety => {
+                                if (!this.current(operation)) return;
+                                this.update({
+                                    ...this.status,
+                                    pendingViewers: this.status.pendingViewers.map(viewer =>
+                                        viewer.requestId === viewRequest.request_id ? { ...viewer, safetyNumber: safety } : viewer),
+                                });
+                            });
                         })
                         .catch(() => logDiagnostic("view request trust evaluation failed", {}, true));
                 });
@@ -231,6 +254,10 @@ export class PublishController {
         const request = this.status.pendingViewers.find(pending => pending.requestId === requestId);
         if (decision === "approve" && request?.trust.kind === "changed") {
             this.update({ ...this.status, message: "This viewer's E2EE identity changed. Confirm the new identity before approving." });
+            return;
+        }
+        if (decision === "approve" && this.dependencies.requireVerifiedViewers?.() && request?.trust.kind !== "verified") {
+            this.update({ ...this.status, message: "This viewer's identity is not independently verified. Compare the safety number before approving." });
             return;
         }
         try {
@@ -327,6 +354,21 @@ export class PublishController {
             ...this.status,
             pendingViewers: this.status.pendingViewers.map(pending =>
                 pending.viewerId === viewerId ? { ...pending, trust: { kind: "tofu" } } : pending),
+        });
+    }
+
+    /** Mark a viewer's identity as independently verified after the
+     * participants compared the safety number over an independent channel. */
+    async verifyViewerIdentity(viewerId: string) {
+        const { operation } = this;
+        const key = operation?.viewerKeys?.get(viewerId);
+        if (!operation?.store || !key) return;
+        await operation.store.writePeer(viewerId, { key, fingerprint: await identityFingerprint(key), verified: true });
+        if (!this.current(operation)) return;
+        this.update({
+            ...this.status,
+            pendingViewers: this.status.pendingViewers.map(pending =>
+                pending.viewerId === viewerId ? { ...pending, trust: { kind: "verified" } } : pending),
         });
     }
 

@@ -18,7 +18,7 @@ export interface PeerE2ee {
     identityPublicKey: string;
     /** Viewer trust gate on the publisher's pinned identity key from the
      * approval decision. Returning false aborts before subscribing. */
-    trustPublisher?: (publisherKey: string, decision: ViewDecision) => boolean;
+    trustPublisher?: (publisherKey: string, decision: ViewDecision) => boolean | Promise<boolean>;
     /** Viewer callback with an opaque relayed epoch blob for local unwrapping. */
     onEpochBlob?: (blob: string) => void;
 }
@@ -247,6 +247,15 @@ export class SpikePeer {
             this.activationStage = options.publisherId ? "request_view" : "publish";
             let approvalId = "";
             if (options.publisherId) {
+                // Register the relay listener before the decision so an epoch
+                // key relayed right after the approval is never dropped.
+                if (options.e2ee.onEpochBlob) {
+                    const handler = options.e2ee.onEpochBlob;
+                    const { publisherId } = options;
+                    this.signaling.onKeyRelay(relay => {
+                        if (relay.publisher_id === publisherId) handler(relay.blob);
+                    });
+                }
                 // Publisher-controlled admission: ask, then wait for the
                 // publisher's pushed decision. Denial or a closed request
                 // never proceeds to subscribe. The viewer's E2EE identity key
@@ -258,15 +267,8 @@ export class SpikePeer {
                 }
                 // Fail closed on an unpinned/changed publisher identity rather
                 // than receiving media under a substituted key.
-                if (options.e2ee.trustPublisher && !options.e2ee.trustPublisher(decision.publisher_key, decision)) {
+                if (options.e2ee.trustPublisher && !(await options.e2ee.trustPublisher(decision.publisher_key, decision))) {
                     throw new SpikeSignalingError("rejected:e2ee_unavailable");
-                }
-                if (options.e2ee.onEpochBlob) {
-                    const handler = options.e2ee.onEpochBlob;
-                    const { publisherId } = options;
-                    this.signaling.onKeyRelay(relay => {
-                        if (relay.publisher_id === publisherId) handler(relay.blob);
-                    });
                 }
                 approvalId = decision.approval_id;
             }

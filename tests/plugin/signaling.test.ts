@@ -141,10 +141,22 @@ test("viewer view requests carry the E2EE identity key", async () => {
     expect(request).toMatchObject({ type: "request_view", session_id: "viewer_session", publisher_id: "publisher_session", viewer_key: "aXYtcHVibGljLWtleQ" });
     socket.reply({ type: "view_request_pending", session_id: "viewer_session", request_id: "pending_1" });
     socket.dispatchEvent(new MessageEvent("message", { data: JSON.stringify({ protocol_version: 1, request_id: "server_view_decision",
-        operation: { type: "view_decision", session_id: "viewer_session", request_id: "pending_1", decision: "approve", approval_id: "approval_1", publisher_key: "cHViLWtleQ" } }) }));
+        operation: { type: "view_decision", session_id: "viewer_session", request_id: "pending_1", decision: "approve", approval_id: "approval_1", publisher_key: "cHViLWtleQ", publisher_account: "publisher_account" } }) }));
     const decision = await pending;
     expect(decision.approval_id).toBe("approval_1");
     expect(decision.publisher_key).toBe("cHViLWtleQ");
+    expect(decision.publisher_account).toBe("publisher_account");
+    connection.close();
+});
+
+test("a key relay that arrives before the listener is registered is not lost", async () => {
+    const socket = new Socket();
+    const connection = await connect(socket);
+    socket.dispatchEvent(new MessageEvent("message", { data: JSON.stringify({ protocol_version: 1, request_id: "server_key_relay",
+        operation: { type: "key_relay", session_id: "viewer", publisher_id: "publisher", blob: "ZW5jcnlwdGVk" } }) }));
+    const relays: Array<KeyRelay> = [];
+    connection.onKeyRelay(relay => relays.push(relay));
+    expect(relays).toEqual([{ type: "key_relay", session_id: "viewer", publisher_id: "publisher", blob: "ZW5jcnlwdGVk" }]);
     connection.close();
 });
 

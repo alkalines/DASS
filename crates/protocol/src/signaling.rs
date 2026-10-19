@@ -172,12 +172,17 @@ pub enum ServerOperation {
     /// only for an approval and is consumed by a single `subscribe`.
     /// `publisher_key` is the publisher's E2EE identity key on an approval so
     /// the viewer can pin it; it is empty on deny/block.
+    /// `publisher_account` is the publisher's DASS account on an approval. It
+    /// gives the viewer a stable identity scope for the pin, so a changed
+    /// publisher key is detected across stream instances instead of being
+    /// mistaken for a first contact.
     ViewDecision {
         session_id: String,
         request_id: String,
         decision: ViewDecisionKind,
         approval_id: String,
         publisher_key: String,
+        publisher_account: String,
     },
     /// Relays an opaque publisher-encrypted media-epoch key blob to an approved
     /// viewer session. The backend enforces the route only; contents are E2EE.
@@ -555,11 +560,13 @@ mod tests {
             decision: ViewDecisionKind::Approve,
             approval_id: "approval_1".into(),
             publisher_key: "cHVibGlzaGVyLWtleQ".into(),
+            publisher_account: "publisher_account".into(),
         })
         .unwrap();
         assert_eq!(decision["type"], "view_decision");
         assert_eq!(decision["decision"], "approve");
         assert_eq!(decision["publisher_key"], "cHVibGlzaGVyLWtleQ");
+        assert_eq!(decision["publisher_account"], "publisher_account");
         let relay = serde_json::to_value(ServerOperation::KeyRelay {
             session_id: "viewer_session".into(),
             publisher_id: "publisher_session".into(),
