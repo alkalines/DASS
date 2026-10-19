@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { BrowserSocket, isAuthenticationRejected, signalingFailureMessage, signalingUrl, SpikeSignaling, SpikeSignalingError, type ViewerPresence } from "../../clients/spike/signaling";
+import { BrowserSocket, isAuthenticationRejected, signalingFailureMessage, signalingUrl, SpikeSignaling, SpikeSignalingError, type KeyRelay, type ViewerPresence } from "../../clients/spike/signaling";
 
 class Socket extends EventTarget implements BrowserSocket {
     protocol = "dass.v1";
@@ -109,6 +109,43 @@ test("buffer overload closes rather than queueing more control messages", async 
     await expect(connection.request({ type: "join", room_id: "room", require_e2ee: false }, "joined")).rejects.toThrow("overloaded");
     expect(connection.closed.aborted).toBe(true);
     expect(socket.messages.length).toBe(1);
+});
+
+test("key relays and E2EE key fields pass through validated signaling", async () => {
+    const socket = new Socket();
+    const connection = await connect(socket);
+    const publish = connection.request({ type: "publish", session_id: "publisher", publisher_key: "cHViLWtleQ" }, "accepted");
+    socket.reply({ type: "accepted", session_id: "publisher" });
+    await publish;
+    expect(JSON.parse(socket.messages.at(-1)!).operation.publisher_key).toBe("cHViLWtleQ");
+
+    // A pushed key_relay reaches only registered listeners, opaque to the client.
+    const relays: Array<KeyRelay> = [];
+    connection.onKeyRelay(relay => relays.push(relay));
+    socket.dispatchEvent(new MessageEvent("message", { data: JSON.stringify({ protocol_version: 1, request_id: "server_key_relay",
+        operation: { type: "key_relay", session_id: "viewer", publisher_id: "publisher", blob: "ZW5jcnlwdGVk" } }) }));
+    expect(relays).toEqual([{ type: "key_relay", session_id: "viewer", publisher_id: "publisher", blob: "ZW5jcnlwdGVk" }]);
+
+    // Malformed relays are a protocol violation and fail closed.
+    socket.dispatchEvent(new MessageEvent("message", { data: JSON.stringify({ protocol_version: 1, request_id: "server_key_relay",
+        operation: { type: "key_relay", session_id: "viewer", publisher_id: "", blob: "" } }) }));
+    expect(connection.closed.aborted).toBe(true);
+    connection.close();
+});
+
+test("viewer view requests carry the E2EE identity key", async () => {
+    const socket = new Socket();
+    const connection = await connect(socket);
+    const pending = connection.requestView("viewer_session", "publisher_session", "aXYtcHVibGljLWtleQ");
+    const request = JSON.parse(socket.messages.at(-1)!).operation;
+    expect(request).toMatchObject({ type: "request_view", session_id: "viewer_session", publisher_id: "publisher_session", viewer_key: "aXYtcHVibGljLWtleQ" });
+    socket.reply({ type: "view_request_pending", session_id: "viewer_session", request_id: "pending_1" });
+    socket.dispatchEvent(new MessageEvent("message", { data: JSON.stringify({ protocol_version: 1, request_id: "server_view_decision",
+        operation: { type: "view_decision", session_id: "viewer_session", request_id: "pending_1", decision: "approve", approval_id: "approval_1", publisher_key: "cHViLWtleQ" } }) }));
+    const decision = await pending;
+    expect(decision.approval_id).toBe("approval_1");
+    expect(decision.publisher_key).toBe("cHViLWtleQ");
+    connection.close();
 });
 
 test("directory snapshots are correlated and stale responses fail closed", async () => {

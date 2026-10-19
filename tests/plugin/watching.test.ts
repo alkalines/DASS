@@ -49,6 +49,7 @@ function fixture() {
         activate: async (options: any) => {
             activations++;
             expect(options.credential).toBe("");
+            expect(options.e2ee?.identityPublicKey).toBeTruthy();
             expect(options.signaling).toBe(signaling);
             if (deliverVideo) tracks = [track];
             return "viewer_session";
