@@ -12,7 +12,7 @@ inspection here is an AI-assisted review, **not an audit** or an exhaustive list
 
 | Finding | Evidence / required resolution |
 | --- | --- |
-| Unreviewed media cryptography | `clients/spike/e2ee.ts` explicitly implements a project-specific SFrame-shaped format, not RFC 9605. No published interoperability vectors or independent cryptographic review. Select a maintained reviewed implementation/protocol and validate sender/track separation, usage limits, membership and malicious-signaling behavior before confidentiality claims. |
+| Unreviewed media cryptography and sender/track binding | `clients/spike/e2ee.ts` implements a project-specific SFrame-shaped format, not RFC 9605. The same epoch key and frame-cipher context are installed on every audio/video transform for a peer; the authenticated frame header contains only epoch and counter, not an authenticated sender/track context. The shared counter avoids local nonce collision between those transforms, but does not establish sender or track identity. There are no published DASS vectors or independent cryptographic review. Keep Internet-pilot and confidentiality claims blocked. |
 | Worker epoch lifecycle and media-context binding | The previous `workerBootstrap` could replace an epoch's replay state and reset a live send counter on duplicate or out-of-order asynchronous installs. The worker now serializes installs and retirement, treats a byte-identical install as idempotent, rejects conflicting same-epoch keys, advances sender epoch state monotonically, shares the per-epoch send counter/replay window across attached audio/video transform ports, and keeps encrypt/decrypt role local to each transform. Isolated worker event/stream tests exercise duplicate installs after traffic, counter continuity across sender transforms and rekey ordering, conflicting-key rejection, queued retirement versus stale installation, and replay rejection across receiver transforms. **This repairs the identified local lifecycle race only; it does not establish sender/track cryptographic binding.** The project-specific frame format still has no independent crypto review or published vectors; protocol-level sender/track separation, membership and malicious-signaling validation remain pilot blockers. |
 | Recipient keys are selected by mutable account state | **Client-side race fixes implemented; independent review/retest still required.** Request/device keys are snapshotted by request ID, duplicate IDs cannot replace them, and view decisions are serialized. Account membership generations invalidate outstanding requests on deny/block/removal; late trust results and request-closed events remove pending state. Delivery and rekey bind to an immutable membership token/key and recheck it after async wrapping and relay; identity confirm/verify actions address one request. Request-key state is bounded to 16 entries and cleared on trust-read failure, decision failure or closure. Deferred-promise tests exercise same-account competing devices and withdrawal during approval; generated ECDH identities verify a relayed blob unwraps only for the approved device, and a removed identity cannot unwrap a replacement device's epoch blob. Tests also verify closed requests cannot be approved and unconfirmed removal stops publishing fail-closed. **Not established:** authenticity of malicious backend events, rollback-safe persistent pin writes, cancellation of a relay already in flight before withdrawal, account-to-device uniqueness, or admission-history isolation below. |
 | Admission-history isolation | A newly approved viewer triggers a fresh epoch; the publisher snapshots the approved one-device-per-account roster, wraps the fresh key only for those exact members, checks membership after asynchronous wrapping and each relay, and fails publishing closed if wrapping or relay fails. The send epoch is committed only after all wraps complete; publishing startup with no viewers does not install an epoch. Removal invalidates that member before the serialized removal/rekey operation, excluding it from future distribution. Generated ECDH identity tests record a frame under the prior key and confirm the newly admitted identity cannot decrypt it while existing approved identities unwrap the new epoch. A controlled deferred-wrap test removes a joining viewer before wrap completion and confirms no key is relayed to that viewer and the send epoch advances monotonically for the remaining member. These are client unit-test results, not independent cryptographic review or browser/media acceptance. Previously authorized recipients may record or share plaintext/ciphertext while authorized; rekeying cannot retract it. |
@@ -23,6 +23,44 @@ The replay bitmap previously retained arbitrarily long history and could shift b
 a 64-bit counter jump. Order F bounds it to 256 bits, rejects out-of-range counters
 and rejects frame integer truncation before nonce construction. These local fixes
 are regression-tested, not a validation of the surrounding encryption protocol.
+
+### E2EE implementation choice (open; no migration claimed)
+
+The source and deployment constraints do not currently support a safe drop-in
+replacement. The pinned clients use Chromium encoded-frame transforms, while the
+project frame cipher and signaling key distribution are separate mechanisms. No
+maintained, reviewed JavaScript implementation with documented compatibility for
+the pinned Chromium/Equibop builds, the required AES-256 suite, one-upload
+ciphertext forwarding, interoperable vectors, and a suitable authenticated
+membership/key-management story has been verified for this repository. Do not
+interpret the absence of a selected package as evidence that none exists.
+
+RFC 9605 is the interoperable framing specification and includes test vectors,
+but it explicitly leaves key management to the application (Sections 5 and 9),
+requires a key to be used for encryption by exactly one sender (Section 4.4.1),
+and does not authenticate the sender of media (Section 7.2). Adopting SFrame
+alone therefore does not repair DASS sender/track binding or membership trust.
+The current frame transform is not RFC 9605: it has no SFrame KID/header encoding
+or RFC 9605 cipher-suite derivation, and matching a nonce construction is not
+interoperability. The W3C encoded-transform API supplies a transform hook, not a
+cryptographic protocol or key-management implementation.
+
+Before selecting a replacement, a qualified crypto/media maintainer must decide
+and document (1) the pinned client/Chromium compatibility target and maintained
+implementation, (2) a published-vector test plan and exact mandatory suite, (3)
+unique cryptographic sender and track contexts that are authenticated and cannot
+be reassigned by signaling, (4) authenticated membership, join/removal rekey and
+malicious-signaling behavior, and (5) nonce/key-usage bounds, replay handling,
+and failure behavior. Any design must preserve the backend's one-upload,
+unchanged-ciphertext fan-out and keep media keys off the backend. Obtain
+independent expert review and real pinned-client interoperability evidence before
+changing the gate or making confidentiality claims. Until then the existing
+experimental transform is not an approved secure implementation; do not weaken
+mandatory E2EE or add a plaintext fallback.
+
+Primary specifications: [RFC 9605](https://www.rfc-editor.org/rfc/rfc9605.html)
+(notably §§4.4.1, 5, 7.2, 9 and Appendix C) and the
+[W3C WebRTC Encoded Transform specification](https://www.w3.org/TR/webrtc-encoded-transform/).
 
 ## Repeatable automated checks
 
