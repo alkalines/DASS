@@ -25,10 +25,7 @@ export interface PeerE2ee {
 
 const PREPARATION_MESSAGES = {
     offer_size: "The gathered offer exceeded the spike's 12 KiB limit.",
-    candidate_count: "ICE gathering did not provide one to sixteen candidates.",
-    candidate_mdns: "Chromium provided an mDNS (.local) candidate. The spike requires literal IPv4 addresses.",
-    candidate_address: "Chromium provided an unsupported candidate address. The spike supports IPv4 only.",
-    ipv4_missing: "Only IPv6 candidates were gathered. The spike needs a reachable literal IPv4 candidate.",
+    candidate_count: "ICE gathering did not provide one to sixteen usable candidates.",
     candidate_transport: "Chromium provided an unsupported candidate transport or port. The spike requires UDP component 1 and non-privileged ports.",
     capture_tracks: "Capture tracks do not match the explicitly selected video/audio, or a source track has ended.",
     codecs: "Chromium could not configure the required VP8/Opus codec preferences.",
@@ -52,41 +49,50 @@ export function preparationFailureMessage(error: unknown): string {
         : "Preparation failed [capture]: The installed Equibop capture bridge or picker failed or was cancelled. No Discord fallback.";
 }
 
+/** A literal IP address the backend can use. Names are never usable: the
+ * backend resolves nothing and never asks a participant's network for one. */
+function isLiteralAddress(address: string): boolean {
+    if (address.includes(":")) {
+        // A literal IPv6 address: hex groups separated by colons.
+        return /^[0-9a-f]{0,4}(:[0-9a-f]{0,4}){2,7}$/i.test(address);
+    }
+    const octets = address.split(".");
+    return octets.length === 4 && octets.every(octet => /^\d{1,3}$/.test(octet) && Number(octet) <= 255);
+}
+
+/** A candidate the backend may use: a literal IP address, UDP, component 1 and
+ * a non-privileged port. An mDNS name is dropped, never resolved. */
+function isUsableCandidate(candidate: string): boolean {
+    const fields = candidate.split(/\s+/);
+    const address = fields[4];
+    const port = Number(fields[5]);
+    if (!address) return false;
+    if (address.toLowerCase().endsWith(".local")) return false;
+    if (fields[1] !== "1" || fields[2]?.toLowerCase() !== "udp") return false;
+    if (!Number.isInteger(port) || port < 1024 || port > 65535) return false;
+    return isLiteralAddress(address);
+}
+
+/** The usable candidates of a gathered offer, deduplicated and bounded. */
 export function gatheredCandidates(sdp: string): readonly string[] {
     if (new TextEncoder().encode(sdp).byteLength > 12_288) throw new SpikePreparationError("offer_size");
     const candidates = [...new Set(sdp.split(/\r?\n/).filter(line => line.startsWith("a=candidate:")).map(line => line.slice(2)))];
-    if (!candidates.length || candidates.length > 16) throw new SpikePreparationError("candidate_count");
-    for (const candidate of candidates) {
-        const fields = candidate.split(/\s+/);
-        const octets = fields[4]?.split(".");
-        const port = Number(fields[5]);
-        if (fields[4]?.toLowerCase().endsWith(".local")) throw new SpikePreparationError("candidate_mdns");
-        if (!octets || octets.length !== 4 || octets.some(octet => !/^\d{1,3}$/.test(octet) || Number(octet) > 255)) {
-            throw new SpikePreparationError("candidate_address");
-        }
-        if (fields[1] !== "1" || fields[2]?.toLowerCase() !== "udp" || !Number.isInteger(port) || port < 1024 || port > 65535) {
-            throw new SpikePreparationError("candidate_transport");
-        }
-    }
-    return candidates;
+    if (candidates.length > 16) throw new SpikePreparationError("candidate_count");
+    const usable = candidates.filter(candidate => isUsableCandidate(candidate));
+    if (!usable.length) throw new SpikePreparationError("candidate_count");
+    return usable;
 }
 
-/** Remove unsupported IPv6 routes only; never rewrite an address or port. */
-export function ipv4Offer(sdp: string): string {
+/** Keep the media lines and the usable candidates; drop the rest. IPv6
+ * candidates are kept: a public deployment may be IPv6-only, and the backend
+ * decides which candidates it may use. */
+export function supportedOffer(sdp: string): string {
     if (new TextEncoder().encode(sdp).byteLength > 12_288) throw new SpikePreparationError("offer_size");
-    const lines = sdp.split(/\r?\n/);
-    let removedIpv6 = false;
-    const supportedLines = lines.filter(line => {
+    const kept = sdp.split(/\r?\n/).filter(line => {
         if (!line.startsWith("a=candidate:")) return true;
-        const address = line.split(/\s+/)[4];
-        if (!address?.includes(":")) return true;
-        removedIpv6 = true;
-        return false;
+        return isUsableCandidate(line.slice(2));
     });
-    if (removedIpv6 && !supportedLines.some(line => line.startsWith("a=candidate:"))) {
-        throw new SpikePreparationError("ipv4_missing");
-    }
-    const offer = supportedLines.join("\r\n");
+    const offer = kept.join("\r\n");
     gatheredCandidates(offer);
     return offer;
 }
@@ -165,7 +171,7 @@ export class SpikePeer {
             connection.checkActive();
             const sdp = peer.localDescription?.sdp;
             if (!sdp) throw new SpikePreparationError("missing_offer");
-            connection.offer = ipv4Offer(sdp);
+            connection.offer = supportedOffer(sdp);
             logDiagnostic("peer prepared", { publisher: !!options.capture, candidateCount: connection.candidates.length });
             return connection;
         } catch (error) {

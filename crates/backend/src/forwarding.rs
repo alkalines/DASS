@@ -16,7 +16,7 @@ pub struct ForwardPacket {
 }
 
 #[derive(Default)]
-pub struct SpikeHub {
+pub struct MediaHub {
     publisher: Mutex<Option<PublisherRegistration>>,
 }
 
@@ -28,13 +28,13 @@ struct PublisherRegistration {
 }
 
 pub struct PublisherEndpoint {
-    hub: Arc<SpikeHub>,
+    hub: Arc<MediaHub>,
     publisher_id: String,
     keyframes: mpsc::Receiver<()>,
 }
 
 pub struct SubscriberEndpoint {
-    hub: Arc<SpikeHub>,
+    hub: Arc<MediaHub>,
     publisher_id: String,
     subscriber_id: String,
     packets: mpsc::Receiver<ForwardPacket>,
@@ -44,7 +44,7 @@ pub struct SubscriberEndpoint {
 #[derive(Debug)]
 pub struct RouteFailure;
 
-impl SpikeHub {
+impl MediaHub {
     pub fn publish(
         self: &Arc<Self>,
         room_id: &str,
@@ -248,7 +248,7 @@ mod tests {
 
     #[test]
     fn routes_are_room_scoped_exclusive_bounded_and_drop_owned() {
-        let hub = Arc::new(SpikeHub::default());
+        let hub = Arc::new(MediaHub::default());
         let mut publisher = hub.publish("room", "source").unwrap();
         assert!(hub.publish("other_room", "other_source").is_err());
         assert!(hub.subscribe("other_room", "source", "viewer").is_err());

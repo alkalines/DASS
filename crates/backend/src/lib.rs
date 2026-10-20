@@ -1,10 +1,13 @@
 pub mod admin;
 pub mod auth;
+pub mod certificate;
 pub mod config;
 pub mod forwarding;
 pub mod listener;
+pub mod metrics;
 pub mod rtc;
 pub mod signaling;
+pub mod transport;
 
 use axum::{
     Json, Router,
@@ -147,6 +150,9 @@ mod tests {
     use dass_protocol::ControlLimits;
     use tower::ServiceExt;
 
+    use crate::config::ResourceLimits;
+    use crate::transport::TransportMode;
+
     fn test_app() -> Router {
         app(Config {
             listen_addr: "127.0.0.1:8080".parse().unwrap(),
@@ -154,6 +160,8 @@ mod tests {
                 max_concurrent_requests: 128,
                 max_control_message_bytes: 16_384,
             },
+            resources: ResourceLimits::default(),
+            transport_mode: TransportMode::Local,
             request_timeout: Duration::from_secs(5),
             tls: None,
             invite_file: None,

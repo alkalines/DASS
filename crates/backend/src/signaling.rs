@@ -1,11 +1,13 @@
-//! Authenticated control plane with an explicit one-publisher/one-viewer RTC spike.
-//! Rooms are discovery grouping only. Stream admission is decided solely by the
-//! authenticated publisher through bounded, single-use approval requests; the
-//! backend relays and enforces decisions but never grants viewership itself.
+//! Authenticated control plane with an explicit one-publisher/one-viewer media
+//! transport. Rooms are discovery grouping only. Stream admission is decided
+//! solely by the authenticated publisher through bounded, single-use approval
+//! requests; the backend relays and enforces decisions but never grants
+//! viewership itself.
 
 use crate::auth::{InviteStore, random_identifier};
 use crate::listener::PeerAddress;
-use crate::rtc::{SpikeConfig, SpikePeer};
+use crate::rtc::{MediaPeer, TransportConfig};
+use crate::transport::is_private_or_loopback;
 use axum::{
     Router,
     extract::{
@@ -30,7 +32,7 @@ use dass_protocol::{
 };
 use std::{
     collections::{HashMap, HashSet},
-    net::{IpAddr, Ipv4Addr},
+    net::IpAddr,
     sync::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
@@ -46,7 +48,6 @@ use tracing::Instrument;
 // Process-local diagnostics only; unrelated to credentials, rooms or wire session IDs.
 static NEXT_CONNECTION: AtomicU64 = AtomicU64::new(1);
 
-const MAX_UNAUTHENTICATED_CONNECTIONS: usize = 16;
 const MAX_REQUEST_IDS: usize = 256;
 const MAX_MESSAGES_PER_SECOND: usize = 32;
 const SEND_TIMEOUT: Duration = Duration::from_secs(1);
@@ -110,13 +111,14 @@ pub struct SignalingState {
     connections: Arc<Semaphore>,
     unauthenticated: Arc<Semaphore>,
     verifications: Arc<Semaphore>,
+    metrics: Arc<crate::metrics::Metrics>,
     active_accounts: Arc<Mutex<HashSet<String>>>,
     rooms: Arc<Mutex<HashMap<String, usize>>>,
     publishers: Arc<Mutex<HashMap<String, PublisherEntry>>>,
     view_requests: Arc<Mutex<HashMap<String, PendingView>>>,
     login_rate: Arc<Mutex<RateWindow>>,
     login_sources: Arc<Mutex<HashMap<IpAddr, RateWindow>>>,
-    rtc_spike: Option<SpikeConfig>,
+    transport: Option<TransportConfig>,
 }
 
 struct RateWindow {
@@ -176,28 +178,44 @@ impl SignalingState {
                 .unwrap_or_default()
                 .to_owned()
         });
-        Ok(serde_json::json!({"rooms": room_list, "streams": streams, "watch_available": false}))
+        Ok(serde_json::json!({
+            "rooms": room_list,
+            "streams": streams,
+            "watch_available": false,
+            "metrics": self.metrics.snapshot(),
+        }))
     }
 
     pub fn new(invites: watch::Receiver<Arc<InviteStore>>) -> Self {
+        let resources = crate::config::ResourceLimits::default();
         Self {
             invites,
             maximum_message_bytes: MAX_MESSAGE_BYTES,
-            connections: Arc::new(Semaphore::new(MAX_SESSIONS)),
-            unauthenticated: Arc::new(Semaphore::new(MAX_UNAUTHENTICATED_CONNECTIONS)),
-            verifications: Arc::new(Semaphore::new(2)),
+            connections: Arc::new(Semaphore::new(resources.max_sessions)),
+            unauthenticated: Arc::new(Semaphore::new(resources.max_unauthenticated_sessions)),
+            verifications: Arc::new(Semaphore::new(resources.max_password_verifications)),
+            metrics: Arc::new(crate::metrics::Metrics::new()),
             active_accounts: Arc::new(Mutex::new(HashSet::new())),
             rooms: Arc::new(Mutex::new(HashMap::new())),
             publishers: Arc::new(Mutex::new(HashMap::new())),
             view_requests: Arc::new(Mutex::new(HashMap::new())),
             login_rate: Arc::new(Mutex::new(RateWindow::new())),
             login_sources: Arc::new(Mutex::new(HashMap::new())),
-            rtc_spike: None,
+            transport: None,
         }
     }
 
-    pub fn with_rtc_spike(mut self, config: Option<SpikeConfig>) -> Self {
-        self.rtc_spike = config;
+    /// Apply the deployment's explicit resource budget. Every limit is
+    /// bounded, so one account or one source cannot monopolize the service.
+    pub fn with_limits(mut self, resources: crate::config::ResourceLimits) -> Self {
+        self.connections = Arc::new(Semaphore::new(resources.max_sessions));
+        self.unauthenticated = Arc::new(Semaphore::new(resources.max_unauthenticated_sessions));
+        self.verifications = Arc::new(Semaphore::new(resources.max_password_verifications));
+        self
+    }
+
+    pub fn with_transport(mut self, config: Option<TransportConfig>) -> Self {
+        self.transport = config;
         self
     }
 
@@ -243,10 +261,12 @@ impl SignalingState {
             return if window.admit(PER_SOURCE_LOGINS_PER_SECOND) {
                 Ok(())
             } else {
+                self.metrics.rate_limited();
                 Err(ErrorCode::Overloaded)
             };
         }
         if sources.len() >= MAX_LOGIN_SOURCES {
+            self.metrics.rate_limited();
             return Err(ErrorCode::Overloaded);
         }
         let mut window = RateWindow::new();
@@ -290,9 +310,9 @@ struct JoinedSession {
     session_account: String,
     room: RoomLease,
     setup_deadline: Instant,
-    observed_peer_ip: Option<Ipv4Addr>,
+    observed_peer_ip: Option<IpAddr>,
     events: mpsc::Sender<ConnectionEvent>,
-    receive_peer: Option<SpikePeer>,
+    receive_peer: Option<MediaPeer>,
     publisher: Option<PublisherLease>,
     /// E2EE identity declared by an accepted `publish`; copied into the
     /// directory entry so approved viewers can pin it.
@@ -349,7 +369,8 @@ struct PublisherLease {
     session_id: String,
     publishers: Arc<Mutex<HashMap<String, PublisherEntry>>>,
     view_requests: Arc<Mutex<HashMap<String, PendingView>>>,
-    spike: Option<SpikeConfig>,
+    transport: Option<TransportConfig>,
+    metrics: Arc<crate::metrics::Metrics>,
 }
 
 impl Drop for PublisherLease {
@@ -383,9 +404,10 @@ impl Drop for PublisherLease {
         }
         // Drop queued media packets for this stream so nothing forwards after
         // the publisher's route ended.
-        if let Some(spike) = &self.spike {
-            spike.close_publisher(&self.session_id);
+        if let Some(transport) = &self.transport {
+            transport.close_publisher(&self.session_id);
         }
+        self.metrics.stream_stopped();
         for (_, events) in closed_viewers {
             let _ = events.try_send(ConnectionEvent::Close(CloseReason::Revoked));
         }
@@ -480,8 +502,10 @@ fn register_publisher(state: &SignalingState, joined: &mut JoinedSession) -> Res
         session_id: joined.session_id.clone(),
         publishers: state.publishers.clone(),
         view_requests: state.view_requests.clone(),
-        spike: state.rtc_spike.clone(),
+        transport: state.transport.clone(),
+        metrics: state.metrics.clone(),
     });
+    state.metrics.stream_started();
     tracing::info!("connected publisher registered in directory");
     Ok(())
 }
@@ -654,6 +678,7 @@ fn request_view(
         return Err(ErrorCode::InvalidState);
     }
     let request_id = random_identifier().map_err(|_| ErrorCode::Overloaded)?;
+    state.metrics.view_requested();
     publisher.pending.insert(request_id.clone());
     let pending = PendingView {
         publisher_session_id: publisher_session_id.into(),
@@ -721,6 +746,7 @@ fn decide_view(
             if publisher.approvals.len() >= MAX_APPROVALS_PER_PUBLISHER {
                 return Err(ErrorCode::Overloaded);
             }
+            state.metrics.view_approved();
             let approval_id = random_identifier().map_err(|_| ErrorCode::Overloaded)?;
             publisher.approvals.insert(
                 approval_id.clone(),
@@ -739,6 +765,7 @@ fn decide_view(
             }
         }
         ViewDecisionKind::Deny | ViewDecisionKind::Block => {
+            state.metrics.view_denied();
             publisher
                 .denied_at
                 .insert(pending.viewer_account.clone(), Instant::now());
@@ -790,8 +817,8 @@ fn block_account_viewers(
     for session in removed {
         if let Some(viewer) = publisher.viewers.remove(&session) {
             removed_any = true;
-            if let Some(spike) = &state.rtc_spike {
-                spike.drop_viewer(publisher_session_id, &session);
+            if let Some(transport) = &state.transport {
+                transport.drop_viewer(publisher_session_id, &session);
             }
             let _ = viewer
                 .events
@@ -858,8 +885,8 @@ fn remove_viewer(
     let mut events = Vec::new();
     for session in sessions {
         if let Some(viewer) = publisher.viewers.remove(&session) {
-            if let Some(spike) = &state.rtc_spike {
-                spike.drop_viewer(&joined.session_id, &session);
+            if let Some(transport) = &state.transport {
+                transport.drop_viewer(&joined.session_id, &session);
             }
             events.push(viewer.events);
         }
@@ -1085,15 +1112,12 @@ async fn upgrade(
     // Only the accepted TCP socket's peer address is authoritative here. Do
     // not consult forwarding headers or any address claimed by the client.
     let observed_ip = connect_info.map(|Extension(ConnectInfo(PeerAddress(address)))| address.ip());
-    let observed_peer_ip = observed_ip.and_then(|ip| match ip {
-        IpAddr::V4(ip) => Some(ip),
-        IpAddr::V6(_) => None,
-    });
+    let observed_peer_ip = observed_ip.map(crate::transport::normalize);
     if state
-        .rtc_spike
+        .transport
         .as_ref()
-        .is_some_and(SpikeConfig::auto_lan_peers_enabled)
-        && !observed_peer_ip.is_some_and(crate::rtc::auto_lan_ip)
+        .is_some_and(TransportConfig::auto_lan_peers_enabled)
+        && !observed_peer_ip.is_some_and(is_private_or_loopback)
     {
         tracing::warn!(code = "auto_lan_peer_policy", "signaling upgrade rejected");
         return StatusCode::FORBIDDEN.into_response();
@@ -1273,10 +1297,8 @@ async fn run(
     observed_ip: Option<IpAddr>,
 ) {
     tracing::info!("signaling socket opened");
-    let observed_peer_ip = observed_ip.and_then(|ip| match ip {
-        IpAddr::V4(ip) => Some(ip),
-        IpAddr::V6(_) => None,
-    });
+    state.metrics.connection_opened();
+    let observed_peer_ip = observed_ip.map(crate::transport::normalize);
     let mut failure_request_id = "login_rejected".to_owned();
     let result = tokio::time::timeout(
         Duration::from_millis(LOGIN_DEADLINE_MS as u64),
@@ -1289,8 +1311,15 @@ async fn run(
     )
     .await;
     let (request_id, identity) = match result {
-        Ok(Ok(value)) => value,
+        Ok(Ok(value)) => {
+            state.metrics.login_succeeded();
+            value
+        }
         Ok(Err(code)) => {
+            state.metrics.login_failed();
+            state
+                .metrics
+                .event(crate::metrics::Severity::Warning, "login_failed");
             let _ = send(
                 &mut socket,
                 failure_request_id,
@@ -1330,7 +1359,7 @@ async fn run(
     let mut last_left: Option<String> = None;
     let (event_sender, mut event_receiver) = mpsc::channel::<ConnectionEvent>(MAX_QUEUED_MESSAGES);
     let account = identity.account.clone();
-    let tick_ms = if state.rtc_spike.is_some() { 10 } else { 250 };
+    let tick_ms = if state.transport.is_some() { 10 } else { 250 };
     let mut tick = tokio::time::interval(Duration::from_millis(tick_ms));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut rate = RateWindow::new();
@@ -1349,7 +1378,7 @@ async fn run(
                     break;
                 }
                 if session.as_ref().is_some_and(|session| Instant::now() >= session.setup_deadline
-                    && !session.receive_peer.as_ref().is_some_and(SpikePeer::connected)) {
+                    && !session.receive_peer.as_ref().is_some_and(MediaPeer::connected)) {
                     close(&mut socket, session.as_ref(), CloseReason::SetupTimeout).await;
                     break;
                 }
@@ -1421,7 +1450,14 @@ async fn run(
                 if !push { break; }
             }
             received = socket.recv() => {
-                if !rate.admit(MAX_MESSAGES_PER_SECOND) { close(&mut socket, session.as_ref(), CloseReason::Overloaded).await; break; }
+                if !rate.admit(MAX_MESSAGES_PER_SECOND) {
+                    state.metrics.rate_limited();
+                    state
+                        .metrics
+                        .event(crate::metrics::Severity::Warning, "signaling_rate_limited");
+                    close(&mut socket, session.as_ref(), CloseReason::Overloaded).await;
+                    break;
+                }
                 let message = match received {
                     Some(Ok(Message::Text(text))) => match parse_client_message(text.as_bytes()) {
                         Ok(message) => message,
@@ -1458,6 +1494,9 @@ async fn run(
                         break;
                     }
                 };
+                if matches!(&response, ServerOperation::Rejected { .. }) {
+                    state.metrics.signaling_rejected();
+                }
                 if operation_type != "directory" {
                     tracing::info!(operation = operation_type, rejected = matches!(&response, ServerOperation::Rejected { .. }), "signaling operation completed");
                 }
@@ -1485,6 +1524,7 @@ async fn run(
         drop(joined.viewer_subscription.take());
         drop_viewer_state(&state, &session_id);
     }
+    state.metrics.connection_closed();
     tracing::info!("signaling socket ended; releasing session resources");
 }
 
@@ -1538,7 +1578,7 @@ async fn media_operation(
     operation: &ClientOperation,
     session: &mut Option<JoinedSession>,
 ) -> Result<Option<ServerOperation>, ()> {
-    let Some(config) = &state.rtc_spike else {
+    let Some(config) = &state.transport else {
         return Ok(None);
     };
     let session_id = match operation {
@@ -1559,7 +1599,7 @@ async fn media_operation(
             if joined.receive_peer.is_some() {
                 return Ok(Some(rejected(ErrorCode::InvalidState)));
             }
-            match SpikePeer::publisher_for_session(
+            match MediaPeer::publisher_for_session(
                 config,
                 &joined.room.room_id,
                 session_id,
@@ -1567,8 +1607,17 @@ async fn media_operation(
             )
             .await
             {
-                Ok(peer) => joined.receive_peer = Some(peer),
-                Err(_) => return Ok(Some(rejected(ErrorCode::Overloaded))),
+                Ok(peer) => {
+                    joined.receive_peer = Some(peer);
+                    state.metrics.media_session_started();
+                }
+                Err(_) => {
+                    state.metrics.media_session_failed();
+                    state
+                        .metrics
+                        .event(crate::metrics::Severity::Warning, "media_session_failed");
+                    return Ok(Some(rejected(ErrorCode::Overloaded)));
+                }
             }
             // Only record the E2EE identity once the media route exists, so a
             // failed bind never leaves a stale pinned key on the stream.
@@ -1607,7 +1656,7 @@ async fn media_operation(
             if !approved {
                 return Ok(Some(rejected(ErrorCode::Unauthorized)));
             }
-            let peer = match SpikePeer::subscriber_for_session(
+            let peer = match MediaPeer::subscriber_for_session(
                 config,
                 &joined.room.room_id,
                 publisher_id,
@@ -1616,9 +1665,15 @@ async fn media_operation(
             )
             .await
             {
-                Ok(peer) => peer,
+                Ok(peer) => {
+                    state.metrics.media_session_started();
+                    peer
+                }
                 // Deliberately do not disclose whether a publisher exists in another room.
-                Err(_) => return Ok(Some(rejected(ErrorCode::InvalidState))),
+                Err(_) => {
+                    state.metrics.media_session_failed();
+                    return Ok(Some(rejected(ErrorCode::InvalidState)));
+                }
             };
             let subscription = match register_viewer_subscription(
                 state,
@@ -1688,7 +1743,7 @@ fn operate_for_peer(
     account: &str,
     operation: ClientOperation,
     (observed_peer_ip, session, events): (
-        Option<Ipv4Addr>,
+        Option<IpAddr>,
         &mut Option<JoinedSession>,
         mpsc::Sender<ConnectionEvent>,
     ),
@@ -1861,6 +1916,7 @@ mod tests {
     use crate::auth::{
         InviteFile, UsersFile, create_invite, create_invite_with_display_name, create_user,
     };
+    use crate::config::DEFAULT_MAX_UNAUTHENTICATED_SESSIONS;
 
     fn store_with_invites(invites: Vec<crate::auth::Invite>) -> Arc<InviteStore> {
         Arc::new(
@@ -2244,7 +2300,7 @@ mod tests {
             session_id: "publisher_session".into(),
             publishers: state.publishers.clone(),
             view_requests: state.view_requests.clone(),
-            spike: None,
+            transport: None,
         };
         drop(lease);
         assert!(matches!(
@@ -2567,7 +2623,7 @@ mod network_tests {
         start_with_spike(None).await
     }
 
-    async fn start_with_spike(spike: Option<SpikeConfig>) -> Server {
+    async fn start_with_spike(spike: Option<TransportConfig>) -> Server {
         let (invite, credential) =
             create_invite_with_display_name("network_invite".into(), Some("DASS Publisher".into()))
                 .unwrap();
@@ -2583,7 +2639,7 @@ mod network_tests {
         )
         .unwrap();
         let (invites, receiver) = watch::channel(Arc::new(store));
-        let state = SignalingState::new(receiver).with_rtc_spike(spike);
+        let state = SignalingState::new(receiver).with_transport(spike);
         let rcgen::CertifiedKey { cert, signing_key } =
             rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
         let tls = tls_acceptor_from_der(
@@ -2789,7 +2845,7 @@ mod network_tests {
         let _occupied = server
             .state
             .unauthenticated
-            .acquire_many(MAX_UNAUTHENTICATED_CONNECTIONS as u32)
+            .acquire_many(DEFAULT_MAX_UNAUTHENTICATED_SESSIONS as u32)
             .await
             .unwrap();
         let result = connect(&server, "https://discord.com", "").await;
@@ -2863,7 +2919,9 @@ mod network_tests {
             .unwrap();
         assert!(matches!(frame, ClientFrame::Close(_)));
         for _ in 0..100 {
-            if server.state.unauthenticated.available_permits() == MAX_UNAUTHENTICATED_CONNECTIONS {
+            if server.state.unauthenticated.available_permits()
+                == DEFAULT_MAX_UNAUTHENTICATED_SESSIONS
+            {
                 return;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;

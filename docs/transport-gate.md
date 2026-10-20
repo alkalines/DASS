@@ -118,6 +118,27 @@ formatting-check output was supplied. See [forwarding-spike.md](forwarding-spike
 for evidence, limits and commands.
 This is feasibility forwarding only; no step 4.7 acceptance is implied.
 
+## Public Internet transport increment (sections 4 and 5, code only)
+
+The media transport gained an explicit deployment mode. `local` keeps the LAN
+test environment; `public` is the Internet target and binds media admission to
+the authenticated signaling session and its observed peer address, drops
+unusable candidates, refuses plaintext and LAN allowlists, and never dials a
+client-supplied destination. Section 5 adds an explicit resource budget, a
+bounded metrics and event module for the administrator panel, and TLS
+certificate expiry reporting. The design, the deployment requirements and the
+open evidence gaps are in [public-transport.md](public-transport.md).
+
+The Rust changes of this increment were **not** compiled, formatted, linted or
+tested in Docker: the Docker socket was not accessible in the authoring
+session. The canonical checks are blocked, not passed. The client-side
+candidate change (IPv6 candidates are offered, the backend decides) passed
+`bun test ./tests/plugin` with 274 tests.
+
+No real client has exchanged media over the public mode, so the public
+Internet acceptance gate of section 4 and the two-client checklist below stay
+open.
+
 ## Browser client groundwork (partial step 4.6)
 
 `clients/spike/signaling.ts` adds an explicitly experimental, HTTPS-only WSS

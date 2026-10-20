@@ -25,10 +25,15 @@ use tokio::{
 };
 use tokio_rustls::{TlsAcceptor, server::TlsStream};
 
+/// The default connection budget. The deployment may lower or raise it, but
+/// the value is always explicit and bounded.
 pub const MAX_TCP_CONNECTIONS: usize = 128;
 const MAX_PENDING_HANDSHAKES: usize = 16;
 const INITIAL_IO_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_CONNECTION_LIFETIME: Duration = Duration::from_secs(600);
+/// A certificate that expires within this window is reported at startup so the
+/// operator can renew it before it breaks the deployment.
+const CERTIFICATE_RENEWAL_WINDOW: Duration = Duration::from_secs(14 * 24 * 60 * 60);
 
 fn bounded_file(path: &std::path::Path) -> Result<Vec<u8>, &'static str> {
     const MAX_PEM_BYTES: usize = 65_536;
@@ -44,12 +49,45 @@ fn bounded_file(path: &std::path::Path) -> Result<Vec<u8>, &'static str> {
     Ok(bytes)
 }
 
+/// The leaf certificate's expiry as a Unix timestamp, when it can be read.
+/// `None` means the material could not be parsed; that is not a reason to
+/// refuse a certificate the TLS stack itself accepted.
+fn certificate_expiry(certificates: &[CertificateDer<'_>]) -> Option<i64> {
+    let leaf = certificates.first()?;
+    crate::certificate::validity(leaf.as_ref()).map(|validity| validity.not_after)
+}
+
+/// Report a certificate that is expired or about to expire. The TLS stack
+/// remains the authority: an expired certificate fails every handshake, and
+/// this check only tells the operator before that happens.
+pub fn check_certificate_validity(certificates: &[CertificateDer<'_>]) {
+    let Some(expiry) = certificate_expiry(certificates) else {
+        return;
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs() as i64)
+        .unwrap_or_default();
+    if expiry <= now {
+        tracing::error!(
+            code = "certificate_expired",
+            "the TLS certificate has expired; clients cannot connect"
+        );
+    } else if expiry - now <= CERTIFICATE_RENEWAL_WINDOW.as_secs() as i64 {
+        tracing::warn!(
+            code = "certificate_expiring",
+            "the TLS certificate expires soon"
+        );
+    }
+}
+
 pub fn tls_acceptor(files: &TlsFiles) -> Result<TlsAcceptor, &'static str> {
     let certificates = CertificateDer::pem_slice_iter(&bounded_file(&files.certificate)?)
         .collect::<Result<Vec<_>, _>>()
         .map_err(|_| "invalid TLS certificate")?;
     let key = PrivateKeyDer::from_pem_slice(&bounded_file(&files.private_key)?)
         .map_err(|_| "invalid TLS private key")?;
+    check_certificate_validity(&certificates);
     tls_acceptor_from_der(certificates, key)
 }
 
@@ -89,10 +127,20 @@ impl Connected<IncomingStream<'_, BoundedListener>> for PeerAddress {
 
 impl BoundedListener {
     pub fn new(tcp: TcpListener, tls: Option<TlsAcceptor>) -> Self {
+        Self::new_with_limit(tcp, tls, MAX_TCP_CONNECTIONS)
+    }
+
+    /// The connection budget is explicit: a deployment may lower it for a
+    /// small host, but the limit is never unbounded.
+    pub fn new_with_limit(
+        tcp: TcpListener,
+        tls: Option<TlsAcceptor>,
+        max_connections: usize,
+    ) -> Self {
         Self {
             tcp,
             tls,
-            connections: Arc::new(Semaphore::new(MAX_TCP_CONNECTIONS)),
+            connections: Arc::new(Semaphore::new(max_connections.max(1))),
             pending: JoinSet::new(),
         }
     }

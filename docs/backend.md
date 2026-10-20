@@ -5,7 +5,10 @@ backend contains an Axum HTTP scaffold and a separate Rust protocol crate, not a
 functioning SFU. All Rust tooling runs inside Docker. Signaling types and
 structural parsers are documented in [protocol.md](protocol.md). An optional
 invite-backed HTTPS/WSS control plane now passes user-run Docker validation; see
-[control-plane.md](control-plane.md). WebRTC/media transport is still absent.
+[control-plane.md](control-plane.md). The media transport exists as an
+experimental one-publisher/one-viewer path with an explicit Internet mode; see
+[public transport](public-transport.md). It is not a validated SFU and no
+real-client media exchange has been proven.
 
 ## Prerequisites
 
@@ -210,10 +213,26 @@ Without those private files, the default remains local discovery only.
 | `DASS_LISTEN_ADDR` | `127.0.0.1:8080` | Literal IP/port; Compose sets `0.0.0.0:8080` for container networking |
 | `DASS_MAX_CONCURRENT_REQUESTS` | 128 | 1–1024; immediately reject excess active HTTP handlers with 503 |
 | `DASS_MAX_CONTROL_MESSAGE_BYTES` | 16384 | Discovery-only: 1–65536; with invites: minimum 1024, clamped to protocol maximum 16384; cap HTTP bodies/WS messages |
+| `DASS_TRANSPORT_MODE` | `local` | `local` is the LAN test environment; `public` is the Internet target and refuses plaintext and LAN allowlists |
+| `DASS_MAX_SESSIONS` | 128 | 1–4096 authenticated signaling sessions |
+| `DASS_MAX_UNAUTHENTICATED_SESSIONS` | 16 | 1–256 signaling sessions before login |
+| `DASS_MAX_TCP_CONNECTIONS` | 128 | 1–4096 accepted TCP connections, including handshakes |
+| `DASS_MAX_PASSWORD_VERIFICATIONS` | 2 | 1–16 concurrent password hashes |
+| `DASS_RTC_SPIKE` | unset | Enables the media transport; requires TLS signaling |
+| `DASS_RTC_BIND_IP`, `DASS_RTC_ADVERTISED_IP` | unset | Bind and advertised media addresses; same family, and the advertised address must be globally routable in the public mode |
+| `DASS_RTC_FIRST_PORT` | unset | First UDP media port; the transport binds two consecutive ports |
+| `DASS_RTC_AUTO_LAN_PEERS`, `DASS_RTC_ALLOWED_PEERS`, `DASS_RTC_TRUSTED_CLIENT_IPS` | unset | Local-mode test tools only; the public mode refuses them |
+| `DASS_MAX_MEDIA_SESSIONS` | 2 | 1–64 concurrent media sessions |
+| `DASS_MAX_PACKETS_PER_SECOND` | 2000 | 1–20000 UDP datagrams per media session |
+| `DASS_MAX_INGRESS_BYTES_PER_SECOND` | 2000000 | Media bytes per session per second |
+| `DASS_MAX_EGRESS_BYTES_PER_SECOND` | 4000000 | Forwarded bytes per session per second |
 
 The handler limit is **not** a bound on open TCP sockets, a rate limiter or a
-future RTC peer limit. The new listener has its own 128-socket admission bound,
-TLS/initial-I/O deadlines and maximum connection lifetime. See
+future RTC peer limit. The listener has its own connection admission bound,
+TLS/initial-I/O deadlines and maximum connection lifetime. The public
+Internet transport mode, its admission model, the deployment requirements and
+the resource budget are documented in
+[public transport](public-transport.md). See
 [control-plane.md](control-plane.md) for independent WebSocket, verification and
 room limits and their recorded test status. Local opt-in is not a TLS substitute.
 

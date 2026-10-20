@@ -7,7 +7,7 @@ use dass_backend::{
     },
     config::Config,
     listener::{BoundedListener, PeerAddress, tls_acceptor},
-    rtc::SpikeConfig,
+    rtc::TransportConfig,
     signaling::SignalingState,
 };
 use std::{
@@ -46,7 +46,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let config = Config::from_env()?;
     let tls = config.tls.as_ref().map(tls_acceptor).transpose()?;
-    let rtc_spike = SpikeConfig::from_env(tls.is_some())?;
+    let transport = TransportConfig::from_env(tls.is_some(), config.transport_mode)?;
     let admin_credentials = match std::env::var("DASS_ADMIN_USERS") {
         Ok(value) if value.is_empty() => None,
         Ok(value) => Some(parse_credentials(&value)?),
@@ -61,6 +61,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .unwrap_or_else(|_| "/var/lib/dass/policy.json".into()),
     );
     let mut admin_document = None;
+    let resources = config.resources;
     let (sender, state, reload_task) = match (config.invite_file.clone(), config.users_json.clone())
     {
         (Some(path), None) => {
@@ -69,7 +70,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let reload_task = tokio::spawn(reload_invites(path, sender.clone()));
             (
                 Some(sender),
-                Some(SignalingState::new(receiver).with_rtc_spike(rtc_spike)),
+                Some(
+                    SignalingState::new(receiver)
+                        .with_transport(transport)
+                        .with_limits(resources),
+                ),
                 Some(reload_task),
             )
         }
@@ -86,7 +91,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let (sender, receiver) = watch::channel(store);
             (
                 Some(sender),
-                Some(SignalingState::new(receiver).with_rtc_spike(rtc_spike)),
+                Some(
+                    SignalingState::new(receiver)
+                        .with_transport(transport)
+                        .with_limits(resources),
+                ),
                 None,
             )
         }
@@ -105,13 +114,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )),
         _ => None,
     };
-    let listener = BoundedListener::new(
+    let listener = BoundedListener::new_with_limit(
         tokio::net::TcpListener::bind(config.listen_addr).await?,
         tls,
+        resources.max_tcp_connections,
     );
     tracing::info!(
         tls = config.tls.is_some(),
         signaling = state.is_some(),
+        transport_mode = config.transport_mode.as_str(),
         "backend listening"
     );
     tracing::warn!("production media and E2EE unavailable; readiness remains false");

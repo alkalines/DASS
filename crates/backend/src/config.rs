@@ -3,11 +3,42 @@ use std::{fmt, net::SocketAddr, path::PathBuf, time::Duration};
 use dass_protocol::ControlLimits;
 
 use crate::auth::{InviteStore, MAX_USERS_FILE_BYTES};
+use crate::transport::TransportMode;
+
+/// The default number of signaling sessions that have not authenticated yet.
+pub const DEFAULT_MAX_UNAUTHENTICATED_SESSIONS: usize = 16;
+
+/// Bounded service resources. Every queue, socket and worker pool has an
+/// explicit limit so one account or one source cannot monopolize the service.
+#[derive(Clone, Copy, Debug)]
+pub struct ResourceLimits {
+    /// Authenticated signaling sessions.
+    pub max_sessions: usize,
+    /// Signaling sessions that have not authenticated yet.
+    pub max_unauthenticated_sessions: usize,
+    /// Accepted TCP connections, including the ones still handshaking.
+    pub max_tcp_connections: usize,
+    /// Concurrent password verifications.
+    pub max_password_verifications: usize,
+}
+
+impl Default for ResourceLimits {
+    fn default() -> Self {
+        Self {
+            max_sessions: 128,
+            max_unauthenticated_sessions: DEFAULT_MAX_UNAUTHENTICATED_SESSIONS,
+            max_tcp_connections: 128,
+            max_password_verifications: 2,
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct Config {
     pub listen_addr: SocketAddr,
     pub limits: ControlLimits,
+    pub resources: ResourceLimits,
+    pub transport_mode: TransportMode,
     pub request_timeout: Duration,
     pub tls: Option<TlsFiles>,
     pub invite_file: Option<PathBuf>,
@@ -20,6 +51,8 @@ impl fmt::Debug for Config {
             .debug_struct("Config")
             .field("listen_addr", &self.listen_addr)
             .field("limits", &self.limits)
+            .field("resources", &self.resources)
+            .field("transport_mode", &self.transport_mode)
             .field("request_timeout", &self.request_timeout)
             .field("tls", &self.tls)
             .field("invite_file", &self.invite_file)
@@ -51,6 +84,16 @@ impl Config {
             Some("true") => true,
             _ => return Err("DASS_INSECURE_LOCAL_DEV must be true or false"),
         };
+        let transport_mode = match lookup("DASS_TRANSPORT_MODE").as_deref() {
+            None | Some("local") => TransportMode::Local,
+            Some(value) => TransportMode::parse(value)?,
+        };
+        // A public deployment is never allowed to fall back to plaintext
+        // development configuration: it would expose credentials and media
+        // keys to the network.
+        if insecure && transport_mode == TransportMode::Public {
+            return Err("a public deployment must not use insecure local development mode");
+        }
         let tls = match (lookup("DASS_TLS_CERT_FILE"), lookup("DASS_TLS_KEY_FILE")) {
             (Some(certificate), Some(private_key))
                 if !certificate.is_empty() && !private_key.is_empty() =>
@@ -123,6 +166,25 @@ impl Config {
                 )?,
                 max_control_message_bytes,
             },
+            resources: ResourceLimits {
+                max_sessions: bounded_integer(lookup("DASS_MAX_SESSIONS"), 128, 4096)?,
+                max_unauthenticated_sessions: bounded_integer(
+                    lookup("DASS_MAX_UNAUTHENTICATED_SESSIONS"),
+                    16,
+                    256,
+                )?,
+                max_tcp_connections: bounded_integer(
+                    lookup("DASS_MAX_TCP_CONNECTIONS"),
+                    128,
+                    4096,
+                )?,
+                max_password_verifications: bounded_integer(
+                    lookup("DASS_MAX_PASSWORD_VERIFICATIONS"),
+                    2,
+                    16,
+                )?,
+            },
+            transport_mode,
             request_timeout: Duration::from_secs(5),
             tls,
             invite_file,
@@ -240,6 +302,57 @@ mod tests {
             ])
             .is_err()
         );
+    }
+
+    #[test]
+    fn public_mode_rejects_plaintext_development_and_bounds_resources() {
+        // A public deployment never runs without TLS.
+        assert!(
+            config_with(&[
+                ("DASS_INSECURE_LOCAL_DEV", "true"),
+                ("DASS_TRANSPORT_MODE", "public"),
+            ])
+            .is_err()
+        );
+        assert!(
+            config_with(&[
+                ("DASS_TRANSPORT_MODE", "public"),
+                ("DASS_TLS_CERT_FILE", "/run/secrets/cert.pem"),
+                ("DASS_TLS_KEY_FILE", "/run/secrets/key.pem"),
+                ("DASS_INVITE_FILE", "/run/secrets/invites.json"),
+            ])
+            .unwrap()
+            .transport_mode
+                == TransportMode::Public
+        );
+        assert!(config_with(&[("DASS_TRANSPORT_MODE", "peer")]).is_err());
+
+        let resources = config_with(&[
+            ("DASS_INSECURE_LOCAL_DEV", "true"),
+            ("DASS_MAX_SESSIONS", "32"),
+            ("DASS_MAX_UNAUTHENTICATED_SESSIONS", "4"),
+            ("DASS_MAX_TCP_CONNECTIONS", "64"),
+            ("DASS_MAX_PASSWORD_VERIFICATIONS", "8"),
+        ])
+        .unwrap()
+        .resources;
+        assert_eq!(resources.max_sessions, 32);
+        assert_eq!(resources.max_unauthenticated_sessions, 4);
+        assert_eq!(resources.max_tcp_connections, 64);
+        assert_eq!(resources.max_password_verifications, 8);
+
+        for (key, value) in [
+            ("DASS_MAX_SESSIONS", "0"),
+            ("DASS_MAX_SESSIONS", "4097"),
+            ("DASS_MAX_UNAUTHENTICATED_SESSIONS", "257"),
+            ("DASS_MAX_TCP_CONNECTIONS", "-1"),
+            ("DASS_MAX_PASSWORD_VERIFICATIONS", "17"),
+        ] {
+            assert!(
+                config_with(&[("DASS_INSECURE_LOCAL_DEV", "true"), (key, value)]).is_err(),
+                "accepted {key}={value}"
+            );
+        }
     }
 
     #[test]

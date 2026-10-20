@@ -1,5 +1,5 @@
 import { expect, spyOn, test } from "bun:test";
-import { gatheredCandidates, ipv4Offer, preparationFailureMessage, PREPARATION_TIMEOUT_MS, SpikePeer } from "../../clients/spike/peer";
+import { gatheredCandidates, preparationFailureMessage, PREPARATION_TIMEOUT_MS, SpikePeer, supportedOffer } from "../../clients/spike/peer";
 import { SpikeSignaling } from "../../clients/spike/signaling";
 
 test("gathered candidate extraction is bounded and deduplicated", () => {
@@ -11,9 +11,8 @@ test("gathered candidate extraction is bounded and deduplicated", () => {
 
 test("preparation diagnostics identify candidate policy without exposing candidate text", () => {
     for (const [candidate, code] of [
-        ["candidate:private 1 udp 123 private-source.local 50000 typ host", "candidate_mdns"],
-        ["candidate:private 1 udp 123 ::1 50000 typ host", "candidate_address"],
-        ["candidate:private 1 tcp 123 192.168.1.2 50000 typ host", "candidate_transport"]
+        ["candidate:private 1 udp 123 private-source.local 50000 typ host", "candidate_count"],
+        ["candidate:private 1 tcp 123 192.168.1.2 50000 typ host", "candidate_count"]
     ]) {
         try { gatheredCandidates(`a=${candidate}\r\n`); throw new Error("Candidate unexpectedly accepted"); }
         catch (error) {
@@ -26,17 +25,22 @@ test("preparation diagnostics identify candidate policy without exposing candida
     expect(preparationFailureMessage(new Error("sensitive browser exception"))).not.toContain("sensitive");
 });
 
-test("IPv4 offer omits IPv6 candidates without changing supported endpoints or media lines", () => {
+test("the offer keeps usable IPv4 and IPv6 candidates and drops unusable ones", () => {
     const ipv4 = "a=candidate:1 1 udp 2130706431 192.0.2.1 50123 typ host";
     const ipv6 = "a=candidate:2 1 udp 2130706431 fd00::2 50124 typ host";
     const mediaLines = "v=0\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\na=sendonly\r\na=fingerprint:sha-256 placeholder\r\n";
-    const filtered = ipv4Offer(`${mediaLines}${ipv6}\r\n${ipv4}\r\na=end-of-candidates\r\n`);
-    expect(filtered).toBe(`${mediaLines}${ipv4}\r\na=end-of-candidates\r\n`);
-    expect(gatheredCandidates(filtered)).toEqual([ipv4.slice(2)]);
-    expect(() => ipv4Offer(`${mediaLines}${ipv6}\r\n`)).toThrow("Only IPv6");
-    expect(() => ipv4Offer(`${mediaLines}${ipv4}\r\na=candidate:3 1 udp 123 capture.local 50125 typ host\r\n`)).toThrow("mDNS");
-    expect(() => ipv4Offer(`${mediaLines}${ipv4}\r\na=candidate:4 1 tcp 123 192.0.2.1 50126 typ host\r\n`)).toThrow("transport");
-    expect(() => ipv4Offer("x".repeat(12289))).toThrow("12 KiB");
+    const filtered = supportedOffer(`${mediaLines}${ipv6}\r\n${ipv4}\r\na=end-of-candidates\r\n`);
+    expect(filtered).toBe(`${mediaLines}${ipv6}\r\n${ipv4}\r\na=end-of-candidates\r\n`);
+    expect(gatheredCandidates(filtered)).toEqual([ipv6.slice(2), ipv4.slice(2)]);
+    // An IPv6-only client is usable; a public deployment may be IPv6-only.
+    expect(supportedOffer(`${mediaLines}${ipv6}\r\n`)).toBe(`${mediaLines}${ipv6}\r\n`);
+    // Names are never resolved and unsupported transports are dropped.
+    expect(supportedOffer(`${mediaLines}${ipv4}\r\na=candidate:3 1 udp 123 capture.local 50125 typ host\r\n`))
+        .toBe(`${mediaLines}${ipv4}\r\n`);
+    expect(supportedOffer(`${mediaLines}${ipv4}\r\na=candidate:4 1 tcp 123 192.0.2.1 50126 typ host\r\n`))
+        .toBe(`${mediaLines}${ipv4}\r\n`);
+    expect(() => supportedOffer(`${mediaLines}a=candidate:5 1 udp 123 capture.local 50127 typ host\r\n`)).toThrow("candidate");
+    expect(() => supportedOffer("x".repeat(12289))).toThrow("12 KiB");
 });
 
 // These doubles test ownership and cancellation, not Chromium or codec playback.
@@ -353,8 +357,10 @@ test("publisher activation correlates WSS operations; signaling loss stops captu
         expect(await connection.activate({ backendUrl: "https://dass.example", credential: "separate-dass-test", roomId: "room", e2ee: TEST_E2EE })).toBe("session");
         const socket = Socket.instances[0];
         expect(socket.operations.map(operation => operation.type)).toEqual(["login", "join", "publish", "offer"]);
-        expect(socket.operations[3].sdp).not.toContain("fd00::2");
         expect(socket.operations[3].sdp).toContain("192.168.1.2 50000");
+        // IPv6 candidates are offered too; the backend decides which one it
+        // may use.
+        expect(socket.operations[3].sdp).toContain("fd00::2 50001");
         expect(Peer.instances[0].localDescription?.sdp).toContain("fd00::2");
         expect(Peer.instances[0].remoteDescription?.type).toBe("answer");
         await expect(connection.activate({ backendUrl: "https://dass.example", credential: "test", roomId: "room", e2ee: TEST_E2EE })).rejects.toThrow("once");
@@ -394,12 +400,17 @@ test("subscribe rejection is observable at closure before the activation catch r
     } finally { connection.close(); }
 }));
 
-test("mDNS, IPv6, privileged ports and non-UDP candidates fail visibly", () => {
+test("mDNS, privileged ports and non-UDP candidates fail visibly", () => {
     for (const [protocol, address, port] of [
-        ["udp", "capture.local", "50000"], ["udp", "::1", "50000"],
+        ["udp", "capture.local", "50000"],
         ["tcp", "192.168.1.2", "50000"], ["udp", "192.168.1.2", "53"],
         ["udp", "999.1.2.3", "50000"], ["udp", "192.168.1.2", "65536"]
     ]) expect(() => gatheredCandidates(`a=candidate:1 1 ${protocol} 2130706431 ${address} ${port} typ host\r\n`)).toThrow();
+});
+
+test("IPv6 candidates are offered; the backend decides which one it may use", () => {
+    const ipv6 = "a=candidate:1 1 udp 2130706431 fd00::2 50000 typ host";
+    expect(gatheredCandidates(`${ipv6}\r\n`)).toEqual([ipv6.slice(2)]);
 });
 
 test("viewer never subscribes when the publisher denies or the request is refused", async () => withBrowserDoubles(async () => {

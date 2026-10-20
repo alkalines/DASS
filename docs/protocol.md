@@ -148,7 +148,11 @@ The intended connection sequence is:
    server-message parser. There is no feature negotiation for this operation.
 4. After `accepted`, exchange `offer`/`answer` and trickled `ice` within the setup
    deadline. Candidate syntax validation is not ICE destination safety; the RTC
-   implementation must enforce address policy before any outbound packet.
+   implementation must enforce address policy before any outbound packet. The
+   transport policy decides which signalled candidates are usable: a candidate
+   the session may not use is dropped from the offer instead of failing it, so
+   a client behind NAT can offer its private host candidate without the
+   backend ever dialling it. See [public transport](public-transport.md).
 5. `leave` releases session resources; expiration, revocation, timeout, overload
    and transport failure cause `closed`. Repeated teardown must be safe. A new
    connection requires authentication again, not implicit session resumption.
