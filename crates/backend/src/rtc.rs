@@ -10,13 +10,14 @@
 use crate::forwarding::{
     ForwardPacket, MediaHub, PACKET_QUEUE_CAPACITY, PublisherEndpoint, SubscriberEndpoint,
 };
-use crate::transport::{
-    MediaAdmission, Refusal, TransportMode, is_global_unicast, is_unsafe_media_address,
-};
+use crate::transport::{MediaAdmission, Refusal, TransportMode, is_global_unicast};
 use std::{
     collections::HashSet,
     net::{IpAddr, SocketAddr},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, Instant},
 };
 use str0m::{
@@ -127,7 +128,7 @@ impl TransportConfig {
         if bind_ip.is_ipv4() != advertised_ip.is_ipv4() {
             return Err("the advertised media address must use the bind address family");
         }
-        if is_unsafe_media_address(advertised_ip) {
+        if !mode.permits_media_address(advertised_ip) {
             return Err("unsafe advertised media address");
         }
         let first_port: u16 = lookup("DASS_RTC_FIRST_PORT")
@@ -152,7 +153,7 @@ impl TransportConfig {
                     let address: SocketAddr = entry
                         .parse()
                         .map_err(|_| "invalid media transport peer address")?;
-                    if is_unsafe_media_address(address.ip()) || address.port() < 1024 {
+                    if !mode.permits_media_address(address.ip()) || address.port() < 1024 {
                         return Err("unsafe media transport peer destination");
                     }
                     if !allowed_peers.insert(address) || allowed_peers.len() > MAX_CANDIDATES {
@@ -171,7 +172,7 @@ impl TransportConfig {
                     let ip: IpAddr = entry
                         .parse()
                         .map_err(|_| "invalid trusted media transport client address")?;
-                    if is_unsafe_media_address(ip) {
+                    if !mode.permits_media_address(ip) {
                         return Err("unsafe trusted media transport client address");
                     }
                     if !trusted_client_ips.insert(ip)
@@ -283,6 +284,39 @@ impl ByteWindow {
     }
 }
 
+/// Byte counters for one media session. They contain no addresses, payload
+/// content or identifiers: only how many bytes crossed the session. The
+/// administrator panel may read them; clients never receive them.
+#[derive(Clone, Debug, Default)]
+pub struct MediaCounters {
+    ingress_bytes: Arc<AtomicU64>,
+    egress_bytes: Arc<AtomicU64>,
+}
+
+impl MediaCounters {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn add_ingress(&self, bytes: u64) {
+        self.ingress_bytes.fetch_add(bytes, Ordering::Relaxed);
+    }
+
+    fn add_egress(&self, bytes: u64) {
+        self.egress_bytes.fetch_add(bytes, Ordering::Relaxed);
+    }
+
+    /// Bytes received from the peer since the session started.
+    pub fn ingress_bytes(&self) -> u64 {
+        self.ingress_bytes.load(Ordering::Relaxed)
+    }
+
+    /// Bytes forwarded to the peer since the session started.
+    pub fn egress_bytes(&self) -> u64 {
+        self.egress_bytes.load(Ordering::Relaxed)
+    }
+}
+
 pub struct MediaPeer {
     rtc: Rtc,
     socket: UdpSocket,
@@ -298,6 +332,7 @@ pub struct MediaPeer {
     packets_in_window: usize,
     ingress: ByteWindow,
     egress: ByteWindow,
+    counters: MediaCounters,
     budget_drops: usize,
     candidates: usize,
     offered: bool,
@@ -383,6 +418,7 @@ impl MediaPeer {
             packets_in_window: 0,
             ingress: ByteWindow::new(),
             egress: ByteWindow::new(),
+            counters: MediaCounters::new(),
             budget_drops: 0,
             candidates: 0,
             offered: false,
@@ -401,6 +437,12 @@ impl MediaPeer {
 
     pub fn connected(&self) -> bool {
         self.connected
+    }
+
+    /// This session's byte counters. The panel reads them for a bounded
+    /// ingress/egress bitrate summary; they never carry payload content.
+    pub fn counters(&self) -> &MediaCounters {
+        &self.counters
     }
 
     pub fn is_subscriber(&self) -> bool {
@@ -688,6 +730,7 @@ impl MediaPeer {
             }
             return Ok(());
         }
+        self.counters.add_egress(packet.payload.len() as u64);
         let pt = self
             .rtc
             .codec_config()
@@ -753,6 +796,7 @@ impl MediaPeer {
             }
             return Ok(());
         }
+        self.counters.add_ingress(bytes.len() as u64);
         let Ok(contents) = bytes.try_into() else {
             return Ok(());
         };
@@ -1187,6 +1231,15 @@ mod tests {
             "DASS_RTC_AUTO_LAN_PEERS" => Some(auto_lan_peers.to_string()),
             _ => None,
         })
+        .map(use_ephemeral_port)
+    }
+
+    fn use_ephemeral_port(mut config: Option<TransportConfig>) -> Option<TransportConfig> {
+        if let Some(config) = config.as_mut() {
+            // Parallel tests must not compete for the production port range.
+            config.first_port = 0;
+        }
+        config
     }
 
     fn public_config() -> Result<Option<TransportConfig>, &'static str> {
@@ -1197,6 +1250,7 @@ mod tests {
             "DASS_RTC_FIRST_PORT" => Some("45000".into()),
             _ => None,
         })
+        .map(use_ephemeral_port)
     }
 
     #[test]
@@ -1208,6 +1262,7 @@ mod tests {
         );
         assert!(config(false, "127.0.0.1:50000").is_err());
         assert!(config(true, "127.0.0.1:50000,192.168.1.2:50001").is_ok());
+        assert!(config(true, "[::1]:50000").is_ok());
         for peers in [
             "",
             "0.0.0.0:50000",
@@ -1217,11 +1272,11 @@ mod tests {
             "240.0.0.1:50000",
             "192.168.1.255:50000",
             "127.0.0.1:53",
-            "[::1]:50000",
+            "[::]:50000",
             "host.invalid:50000",
             "127.0.0.1:50000,127.0.0.1:50000",
         ] {
-            assert!(config(true, peers).is_err());
+            assert!(config(true, peers).is_err(), "accepted peers {peers}");
         }
     }
 
@@ -1644,8 +1699,11 @@ mod tests {
                     Output::Event(_) => {}
                 }
             };
-            for (destination, bytes) in transmissions {
-                publisher_socket.send_to(&bytes, destination).await.unwrap();
+            for bytes in transmissions {
+                publisher_socket
+                    .send_to(&bytes, peer_address)
+                    .await
+                    .unwrap();
             }
             if publisher_connected && peer.connected() && !wrote_payload {
                 let writer = publisher.writer(mid).unwrap();

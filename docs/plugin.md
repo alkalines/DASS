@@ -365,11 +365,16 @@ prove native interception, live directory detection, server authorization,
 E2EE, OS capture compatibility or absence of runtime Discord media leakage.
 
 Validation for the current routing and chooser slice: `bun test ./tests/plugin`
-passes with Bun 1.4.3 (38 tests, 128 assertions). `bun scripts/build-plugin.mjs`
+passes with Bun 1.4.3 (286 tests, 2092 assertions), including the capture
+consent, teardown and leakage guards in `tests/plugin/captureConsent.test.ts`.
+`bun scripts/build-plugin.mjs`
 passes DASS lint, full Equicord typecheck and desktop/Equibop bundle builds.
 The existing adapter's Bun-version guard was already commented out; this work
 does not change it. GUI hook matching and voice/media behavior remain unverified.
 The historical build details below describe the earlier discovery-only snapshot.
+
+The capture boundary, the teardown matrix and the metadata the client can
+observe are documented in [capture-consent.md](capture-consent.md).
 
 ## Verified builds and remaining limitations
 
@@ -380,7 +385,7 @@ The historical build details below describe the earlier discovery-only snapshot.
   `17e01cf978c3c10a5688429a38db59a4926e8982`. Candidate factory matches are
   recorded in [discord-hooks.md](discord-hooks.md); runtime compatibility and
   native interception remain unverified.
-- All 13 plugin tests passed (41 assertions). DASS lint, full Equicord typecheck,
+- All 286 plugin tests passed (2092 assertions). DASS lint, full Equicord typecheck,
   and desktop/Equibop-target bundle builds passed. Both renderers were checked
   for DASS inclusion. Equibop host builds and GUI/plugin loading were not verified
   by the agent; the user has launched the Equibop host.

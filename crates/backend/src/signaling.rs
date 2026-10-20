@@ -6,7 +6,7 @@
 
 use crate::auth::{InviteStore, random_identifier};
 use crate::listener::PeerAddress;
-use crate::rtc::{MediaPeer, TransportConfig};
+use crate::rtc::{MediaCounters, MediaPeer, TransportConfig};
 use crate::transport::is_private_or_loopback;
 use axum::{
     Router,
@@ -34,7 +34,7 @@ use std::{
     collections::{HashMap, HashSet},
     net::IpAddr,
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, MutexGuard,
         atomic::{AtomicU64, Ordering},
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -113,12 +113,95 @@ pub struct SignalingState {
     verifications: Arc<Semaphore>,
     metrics: Arc<crate::metrics::Metrics>,
     active_accounts: Arc<Mutex<HashSet<String>>>,
-    rooms: Arc<Mutex<HashMap<String, usize>>>,
-    publishers: Arc<Mutex<HashMap<String, PublisherEntry>>>,
+    rooms: Arc<Mutex<RoomMap>>,
+    publishers: Arc<Mutex<PublisherMap>>,
+    /// Live authenticated sessions, keyed by session ID. This is the same
+    /// session model the signaling loop owns; the panel only reads it.
+    sessions: Arc<Mutex<SessionMap>>,
     view_requests: Arc<Mutex<HashMap<String, PendingView>>>,
     login_rate: Arc<Mutex<RateWindow>>,
     login_sources: Arc<Mutex<HashMap<IpAddr, RateWindow>>>,
     transport: Option<TransportConfig>,
+}
+
+/// What a connected session currently does in its room. Administrative
+/// metadata only: it never grants access and never reaches other clients.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SessionRole {
+    /// Joined the room but neither publishes nor watches.
+    Member,
+    /// Owns a live stream in the room.
+    Publisher,
+    /// Watches a publisher's stream.
+    Viewer,
+}
+
+impl SessionRole {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Member => "member",
+            Self::Publisher => "publisher",
+            Self::Viewer => "viewer",
+        }
+    }
+}
+
+/// One live authenticated session. The observed address is the peer of this
+/// session's TCP connection: it is shown to authenticated administrators while
+/// the connection lives and discarded with it.
+struct SessionInfo {
+    account: String,
+    room_id: String,
+    role: SessionRole,
+    observed_ip: Option<IpAddr>,
+    connected_at_unix_seconds: u64,
+    /// The owning connection's bounded event queue. The panel closes a session
+    /// through the same mechanism a publisher withdrawal uses.
+    events: mpsc::Sender<ConnectionEvent>,
+    counters: MediaCounters,
+    /// The previous byte sample used to report a bounded bitrate.
+    sample: Option<RateSample>,
+    ingress_bytes_per_second: u64,
+    egress_bytes_per_second: u64,
+}
+
+struct RateSample {
+    at: Instant,
+    ingress_bytes: u64,
+    egress_bytes: u64,
+}
+
+/// The room, stream and session maps the signaling loop owns. The panel only
+/// reads them; it never keeps a second authority.
+type RoomMap = HashMap<String, usize>;
+type PublisherMap = HashMap<String, PublisherEntry>;
+type SessionMap = HashMap<String, SessionInfo>;
+
+/// Refresh one session's bounded bitrate sample. The reported rate covers the
+/// time since the previous sample, never a lifetime average.
+fn refresh_rate(info: &mut SessionInfo, now: Instant) {
+    let ingress = info.counters.ingress_bytes();
+    let egress = info.counters.egress_bytes();
+    if let Some(sample) = &info.sample {
+        let elapsed = now.saturating_duration_since(sample.at).as_secs_f64();
+        let ingress_delta = ingress.saturating_sub(sample.ingress_bytes);
+        let egress_delta = egress.saturating_sub(sample.egress_bytes);
+        if elapsed >= 0.5 {
+            info.ingress_bytes_per_second = (ingress_delta as f64 / elapsed) as u64;
+            info.egress_bytes_per_second = (egress_delta as f64 / elapsed) as u64;
+            info.sample = Some(RateSample {
+                at: now,
+                ingress_bytes: ingress,
+                egress_bytes: egress,
+            });
+        }
+    } else {
+        info.sample = Some(RateSample {
+            at: now,
+            ingress_bytes: ingress,
+            egress_bytes: egress,
+        });
+    }
 }
 
 struct RateWindow {
@@ -147,43 +230,186 @@ impl RateWindow {
 }
 
 impl SignalingState {
-    /// Administrative metadata only; never exposes SDP, credentials or candidates.
+    /// Administrative metadata only; never exposes SDP, credentials or
+    /// candidates. The panel reads the same accounts, sessions and streams the
+    /// signaling loop owns; this view never grants access.
     pub fn admin_snapshot(&self) -> Result<serde_json::Value, &'static str> {
         let rooms = self.rooms.lock().map_err(|_| "room state unavailable")?;
         let publishers = self
             .publishers
             .lock()
             .map_err(|_| "stream state unavailable")?;
-        let mut room_list: Vec<_> = rooms
-            .iter()
-            .map(|(room_id, members)| serde_json::json!({"room_id": room_id, "members": members}))
-            .collect();
-        room_list.sort_by_key(|room| room["room_id"].as_str().unwrap_or_default().to_owned());
-        let mut streams: Vec<_> = publishers
-            .iter()
-            .map(|(publisher_id, entry)| {
-                serde_json::json!({
-                    "publisher_id": publisher_id,
-                    "room_id": entry.room_id,
-                    "username": entry.account,
-                    "viewers": entry.viewers.keys().collect::<Vec<_>>(),
-                    "viewer_count": entry.viewers.len(),
-                    "pending_view_requests": entry.pending.len(),
-                })
-            })
-            .collect();
-        streams.sort_by_key(|stream| {
-            stream["publisher_id"]
-                .as_str()
-                .unwrap_or_default()
-                .to_owned()
-        });
+        let mut sessions = match self.sessions.lock() {
+            Ok(sessions) => sessions,
+            Err(_) => return Err("session state unavailable"),
+        };
+        // Refresh the bounded bitrate samples before they are reported.
+        let now = Instant::now();
+        for info in sessions.values_mut() {
+            refresh_rate(info, now);
+        }
+        let room_list = self.room_summary(&rooms, &publishers, &sessions);
+        let streams = self.stream_summary(&publishers, &sessions);
+        let users = self.user_summary(&publishers, &sessions);
         Ok(serde_json::json!({
+            "users": users,
             "rooms": room_list,
             "streams": streams,
             "watch_available": false,
             "metrics": self.metrics.snapshot(),
         }))
+    }
+
+    /// Publishers, viewers and plain members per room. Rooms carry no
+    /// authority: this is a read-only grouping view of DASS membership.
+    fn room_summary(
+        &self,
+        rooms: &MutexGuard<'_, RoomMap>,
+        publishers: &MutexGuard<'_, PublisherMap>,
+        sessions: &MutexGuard<'_, SessionMap>,
+    ) -> Vec<serde_json::Value> {
+        let mut list: Vec<serde_json::Value> = Vec::new();
+        for (room_id, members) in rooms.iter() {
+            let room = room_id.as_str();
+            let mut room_publishers: Vec<&str> = Vec::new();
+            let mut room_viewers: Vec<&str> = Vec::new();
+            let mut room_others: Vec<&str> = Vec::new();
+            for info in sessions.values() {
+                if info.room_id.as_str() != room {
+                    continue;
+                }
+                match info.role {
+                    SessionRole::Publisher => room_publishers.push(info.account.as_str()),
+                    SessionRole::Viewer => room_viewers.push(info.account.as_str()),
+                    SessionRole::Member => room_others.push(info.account.as_str()),
+                }
+            }
+            let mut room_streams: Vec<&str> = Vec::new();
+            for (publisher_id, entry) in publishers.iter() {
+                if entry.room_id.as_str() == room {
+                    room_streams.push(publisher_id.as_str());
+                }
+            }
+            list.push(serde_json::json!({
+                "room_id": room,
+                "members": members,
+                "publishers": room_publishers,
+                "viewers": room_viewers,
+                "others": room_others,
+                "streams": room_streams,
+            }));
+        }
+        list.sort_by_key(|room| room["room_id"].as_str().unwrap_or_default().to_owned());
+        list
+    }
+
+    /// Live streams with their publisher, viewers and bounded bitrate.
+    fn stream_summary(
+        &self,
+        publishers: &MutexGuard<'_, PublisherMap>,
+        sessions: &MutexGuard<'_, SessionMap>,
+    ) -> Vec<serde_json::Value> {
+        let mut list: Vec<serde_json::Value> = Vec::new();
+        for (publisher_id, entry) in publishers.iter() {
+            let mut viewers: Vec<serde_json::Value> = Vec::new();
+            let mut egress_bytes_per_second = 0_u64;
+            for (viewer_session_id, viewer) in entry.viewers.iter() {
+                viewers.push(serde_json::json!({
+                    "session_id": viewer_session_id,
+                    "username": viewer.account,
+                }));
+                if let Some(viewer_session) = sessions.get(viewer_session_id) {
+                    egress_bytes_per_second = egress_bytes_per_second
+                        .saturating_add(viewer_session.egress_bytes_per_second);
+                }
+            }
+            let ingress_bytes_per_second = match sessions.get(publisher_id) {
+                Some(publisher) => publisher.ingress_bytes_per_second,
+                None => 0,
+            };
+            let connection_state = if sessions.contains_key(publisher_id) {
+                "connected"
+            } else {
+                "closed"
+            };
+            list.push(serde_json::json!({
+                "publisher_id": publisher_id,
+                "username": entry.account,
+                "room_id": entry.room_id,
+                "started_at_unix_seconds": entry.started_at_unix_seconds,
+                "viewers": viewers,
+                "viewer_count": entry.viewers.len(),
+                "pending_view_requests": entry.pending.len(),
+                "connection_state": connection_state,
+                "ingress_bytes_per_second": ingress_bytes_per_second,
+                "egress_bytes_per_second": egress_bytes_per_second,
+            }));
+        }
+        list.sort_by_key(|stream| {
+            stream["publisher_id"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned()
+        });
+        list
+    }
+
+    /// Accounts with their live connections, rooms and stream activity.
+    fn user_summary(
+        &self,
+        publishers: &MutexGuard<'_, PublisherMap>,
+        sessions: &MutexGuard<'_, SessionMap>,
+    ) -> Vec<serde_json::Value> {
+        let mut accounts: Vec<String> = Vec::new();
+        for info in sessions.values() {
+            if !accounts.contains(&info.account) {
+                accounts.push(info.account.clone());
+            }
+        }
+        accounts.sort();
+        let mut list: Vec<serde_json::Value> = Vec::new();
+        for account in &accounts {
+            let mut connections: Vec<serde_json::Value> = Vec::new();
+            let mut account_rooms: Vec<String> = Vec::new();
+            for (session_id, info) in sessions.iter() {
+                if info.account.as_str() != account.as_str() {
+                    continue;
+                }
+                if !account_rooms.contains(&info.room_id) {
+                    account_rooms.push(info.room_id.clone());
+                }
+                connections.push(serde_json::json!({
+                    "session_id": session_id,
+                    "room_id": info.room_id,
+                    "role": info.role.as_str(),
+                    "source_ip": info.observed_ip.map(|ip| ip.to_string()),
+                    "connected_at_unix_seconds": info.connected_at_unix_seconds,
+                    "ingress_bytes_per_second": info.ingress_bytes_per_second,
+                    "egress_bytes_per_second": info.egress_bytes_per_second,
+                }));
+            }
+            let mut publishing: Vec<String> = Vec::new();
+            let mut watching: Vec<String> = Vec::new();
+            for (publisher_id, entry) in publishers.iter() {
+                if entry.account.as_str() == account.as_str() {
+                    publishing.push(publisher_id.clone());
+                }
+                for viewer in entry.viewers.values() {
+                    if viewer.account.as_str() == account.as_str() {
+                        watching.push(publisher_id.clone());
+                    }
+                }
+            }
+            list.push(serde_json::json!({
+                "username": account,
+                "online": true,
+                "connections": connections,
+                "rooms": account_rooms,
+                "publishing": publishing,
+                "watching": watching,
+            }));
+        }
+        list
     }
 
     pub fn new(invites: watch::Receiver<Arc<InviteStore>>) -> Self {
@@ -198,6 +424,7 @@ impl SignalingState {
             active_accounts: Arc::new(Mutex::new(HashSet::new())),
             rooms: Arc::new(Mutex::new(HashMap::new())),
             publishers: Arc::new(Mutex::new(HashMap::new())),
+            sessions: Arc::new(Mutex::new(HashMap::new())),
             view_requests: Arc::new(Mutex::new(HashMap::new())),
             login_rate: Arc::new(Mutex::new(RateWindow::new())),
             login_sources: Arc::new(Mutex::new(HashMap::new())),
@@ -274,6 +501,113 @@ impl SignalingState {
         sources.insert(ip, window);
         Ok(())
     }
+
+    /// Record a live authenticated session. The panel reads this state; it
+    /// never grants access and the entry disappears with the session.
+    fn register_session(
+        &self,
+        session_id: String,
+        account: String,
+        room_id: String,
+        observed_ip: Option<IpAddr>,
+        events: mpsc::Sender<ConnectionEvent>,
+    ) {
+        let Ok(mut sessions) = self.sessions.lock() else {
+            return;
+        };
+        sessions.insert(
+            session_id,
+            SessionInfo {
+                account,
+                room_id,
+                role: SessionRole::Member,
+                observed_ip,
+                connected_at_unix_seconds: unix_seconds(),
+                events,
+                counters: MediaCounters::new(),
+                sample: None,
+                ingress_bytes_per_second: 0,
+                egress_bytes_per_second: 0,
+            },
+        );
+    }
+
+    fn remove_session(&self, session_id: &str) {
+        if let Ok(mut sessions) = self.sessions.lock() {
+            sessions.remove(session_id);
+        }
+    }
+
+    fn set_session_role(&self, session_id: &str, role: SessionRole) {
+        let Ok(mut sessions) = self.sessions.lock() else {
+            return;
+        };
+        if let Some(info) = sessions.get_mut(session_id) {
+            info.role = role;
+        }
+    }
+
+    /// Adopt the media session's byte counters so the panel can report a
+    /// bounded ingress/egress bitrate for the live session.
+    fn set_session_counters(&self, session_id: &str, counters: MediaCounters) {
+        let Ok(mut sessions) = self.sessions.lock() else {
+            return;
+        };
+        if let Some(info) = sessions.get_mut(session_id) {
+            info.counters = counters;
+            info.sample = None;
+            info.ingress_bytes_per_second = 0;
+            info.egress_bytes_per_second = 0;
+        }
+    }
+
+    /// Close one live session. The panel may stop a stream or disconnect a
+    /// session; it never gains the ability to receive media.
+    pub fn disconnect_session(&self, session_id: &str) -> Result<(), &'static str> {
+        let events = {
+            let sessions = self
+                .sessions
+                .lock()
+                .map_err(|_| "session state unavailable")?;
+            let info = sessions.get(session_id).ok_or("session not found")?;
+            info.events.clone()
+        };
+        self.metrics.event(
+            crate::metrics::Severity::Warning,
+            "admin_session_disconnected",
+        );
+        events
+            .try_send(ConnectionEvent::Close(CloseReason::Revoked))
+            .map_err(|_| "session state unavailable")
+    }
+
+    /// Stop one publisher's stream. The publisher's teardown closes its
+    /// approved viewer routes with it.
+    pub fn stop_stream(&self, publisher_session_id: &str) -> Result<(), &'static str> {
+        let events = {
+            let publishers = self
+                .publishers
+                .lock()
+                .map_err(|_| "stream state unavailable")?;
+            let publisher = publishers
+                .get(publisher_session_id)
+                .ok_or("stream not found")?;
+            publisher.events.clone()
+        };
+        self.metrics
+            .event(crate::metrics::Severity::Warning, "admin_stream_stopped");
+        events
+            .try_send(ConnectionEvent::Close(CloseReason::Revoked))
+            .map_err(|_| "stream state unavailable")
+    }
+}
+
+/// Seconds since the Unix epoch, for administrative timestamps only.
+fn unix_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or_default()
 }
 
 struct AccountLease {
@@ -348,6 +682,8 @@ struct ApprovedView {
 struct PublisherEntry {
     room_id: String,
     account: String,
+    /// When the stream started, for the administrator's stream list.
+    started_at_unix_seconds: u64,
     /// The publisher's E2EE identity key, required at publish time so the
     /// backend can echo it to viewers it has already authorized. The key is
     /// opaque public material; media keys never traverse the backend.
@@ -408,6 +744,8 @@ impl Drop for PublisherLease {
             transport.close_publisher(&self.session_id);
         }
         self.metrics.stream_stopped();
+        self.metrics
+            .event(crate::metrics::Severity::Info, "stream_stopped");
         for (_, events) in closed_viewers {
             let _ = events.try_send(ConnectionEvent::Close(CloseReason::Revoked));
         }
@@ -487,6 +825,7 @@ fn register_publisher(state: &SignalingState, joined: &mut JoinedSession) -> Res
         PublisherEntry {
             room_id: joined.room.room_id.clone(),
             account: joined.session_account.clone(),
+            started_at_unix_seconds: unix_seconds(),
             publisher_key: joined.publisher_key.clone(),
             viewers: HashMap::new(),
             pending: HashSet::new(),
@@ -505,7 +844,11 @@ fn register_publisher(state: &SignalingState, joined: &mut JoinedSession) -> Res
         transport: state.transport.clone(),
         metrics: state.metrics.clone(),
     });
+    state.set_session_role(&joined.session_id, SessionRole::Publisher);
     state.metrics.stream_started();
+    state
+        .metrics
+        .event(crate::metrics::Severity::Info, "stream_started");
     tracing::info!("connected publisher registered in directory");
     Ok(())
 }
@@ -747,6 +1090,9 @@ fn decide_view(
                 return Err(ErrorCode::Overloaded);
             }
             state.metrics.view_approved();
+            state
+                .metrics
+                .event(crate::metrics::Severity::Info, "view_approved");
             let approval_id = random_identifier().map_err(|_| ErrorCode::Overloaded)?;
             publisher.approvals.insert(
                 approval_id.clone(),
@@ -766,6 +1112,9 @@ fn decide_view(
         }
         ViewDecisionKind::Deny | ViewDecisionKind::Block => {
             state.metrics.view_denied();
+            state
+                .metrics
+                .event(crate::metrics::Severity::Info, "view_denied");
             publisher
                 .denied_at
                 .insert(pending.viewer_account.clone(), Instant::now());
@@ -923,6 +1272,9 @@ fn remove_viewer(
         });
     }
     drop(publishers);
+    state
+        .metrics
+        .event(crate::metrics::Severity::Info, "viewer_removed");
     for events in events {
         let _ = events.try_send(ConnectionEvent::Close(CloseReason::Revoked));
     }
@@ -1523,6 +1875,10 @@ async fn run(
         drop(joined.receive_peer.take());
         drop(joined.viewer_subscription.take());
         drop_viewer_state(&state, &session_id);
+        state.remove_session(&session_id);
+        state
+            .metrics
+            .event(crate::metrics::Severity::Info, "session_closed");
     }
     state.metrics.connection_closed();
     tracing::info!("signaling socket ended; releasing session resources");
@@ -1608,6 +1964,8 @@ async fn media_operation(
             .await
             {
                 Ok(peer) => {
+                    state.set_session_counters(session_id, peer.counters().clone());
+                    state.set_session_role(session_id, SessionRole::Publisher);
                     joined.receive_peer = Some(peer);
                     state.metrics.media_session_started();
                 }
@@ -1675,6 +2033,7 @@ async fn media_operation(
                     return Ok(Some(rejected(ErrorCode::InvalidState)));
                 }
             };
+            let peer_counters = peer.counters().clone();
             let subscription = match register_viewer_subscription(
                 state,
                 &joined.room.room_id,
@@ -1688,6 +2047,8 @@ async fn media_operation(
             };
             joined.receive_peer = Some(peer);
             joined.viewer_subscription = Some(subscription);
+            state.set_session_counters(session_id, peer_counters);
+            state.set_session_role(session_id, SessionRole::Viewer);
             ServerOperation::Accepted {
                 session_id: session_id.clone(),
             }
@@ -1764,6 +2125,7 @@ fn operate_for_peer(
             let Ok(session_id) = random_identifier() else {
                 return rejected(ErrorCode::Overloaded);
             };
+            let joined_room_id = room_id.clone();
             let room = match state.join_room(room_id) {
                 Ok(room) => room,
                 Err(code) => return rejected(code),
@@ -1773,7 +2135,7 @@ fn operate_for_peer(
                 room,
                 setup_deadline: Instant::now() + Duration::from_millis(SETUP_DEADLINE_MS as u64),
                 observed_peer_ip,
-                events,
+                events: events.clone(),
                 session_account: account.to_owned(),
                 receive_peer: None,
                 publisher: None,
@@ -1781,6 +2143,17 @@ fn operate_for_peer(
                 viewer_presence_enabled: false,
                 viewer_subscription: None,
             });
+            state.register_session(
+                session_id.clone(),
+                account.to_owned(),
+                joined_room_id,
+                observed_peer_ip,
+                events,
+            );
+            state.metrics.session_joined();
+            state
+                .metrics
+                .event(crate::metrics::Severity::Info, "session_joined");
             *last_left = None;
             ServerOperation::Joined { session_id }
         }
@@ -1801,6 +2174,7 @@ fn operate_for_peer(
             *session = None;
             *last_left = Some(session_id.clone());
             drop_viewer_state(state, &leaving);
+            state.remove_session(&leaving);
             ServerOperation::Closed {
                 session_id,
                 reason: CloseReason::Left,
@@ -1916,7 +2290,6 @@ mod tests {
     use crate::auth::{
         InviteFile, UsersFile, create_invite, create_invite_with_display_name, create_user,
     };
-    use crate::config::DEFAULT_MAX_UNAUTHENTICATED_SESSIONS;
 
     fn store_with_invites(invites: Vec<crate::auth::Invite>) -> Arc<InviteStore> {
         Arc::new(
@@ -1947,6 +2320,7 @@ mod tests {
             PublisherEntry {
                 room_id: "room".into(),
                 account: account.into(),
+                started_at_unix_seconds: unix_seconds(),
                 publisher_key: "cHVibGlzaGVyLWtleQ".into(),
                 viewers: HashMap::new(),
                 pending: HashSet::new(),
@@ -2301,6 +2675,7 @@ mod tests {
             publishers: state.publishers.clone(),
             view_requests: state.view_requests.clone(),
             transport: None,
+            metrics: state.metrics.clone(),
         };
         drop(lease);
         assert!(matches!(
@@ -2377,6 +2752,132 @@ mod tests {
             key_relay(&state, &viewer, "other_account", "YmxvYg"),
             Err(ErrorCode::InvalidState)
         ));
+    }
+
+    #[tokio::test]
+    async fn the_admin_snapshot_reports_sessions_rooms_and_streams() {
+        let (_sender, receiver) = watch::channel(Arc::new(InviteStore::default()));
+        let state = SignalingState::new(receiver);
+        let _room = state.join_room("live".into()).unwrap();
+        let (_publisher_receiver, mut entry) = publisher_entry("alice");
+        entry.room_id = "live".into();
+        let viewer_events = entry.events.clone();
+        state
+            .publishers
+            .lock()
+            .unwrap()
+            .insert("session_1".into(), entry);
+        let (publisher_queue, _publisher_queue_receiver) = mpsc::channel(MAX_QUEUED_MESSAGES);
+        state.register_session(
+            "session_1".into(),
+            "alice".into(),
+            "live".into(),
+            Some("203.0.113.7".parse().unwrap()),
+            publisher_queue,
+        );
+        state.set_session_role("session_1", SessionRole::Publisher);
+        let (viewer_queue, _viewer_queue_receiver) = mpsc::channel(MAX_QUEUED_MESSAGES);
+        state.register_session(
+            "session_2".into(),
+            "bob".into(),
+            "live".into(),
+            None,
+            viewer_queue,
+        );
+        state.set_session_role("session_2", SessionRole::Viewer);
+        state
+            .publishers
+            .lock()
+            .unwrap()
+            .get_mut("session_1")
+            .unwrap()
+            .viewers
+            .insert(
+                "session_2".into(),
+                ActiveViewer {
+                    account: "bob".into(),
+                    events: viewer_events,
+                },
+            );
+
+        let snapshot = state.admin_snapshot().unwrap();
+        let users = snapshot["users"].as_array().unwrap();
+        assert_eq!(users.len(), 2);
+        assert_eq!(users[0]["username"], "alice");
+        assert_eq!(users[0]["online"], true);
+        assert_eq!(users[0]["connections"][0]["source_ip"], "203.0.113.7");
+        assert_eq!(users[0]["connections"][0]["role"], "publisher");
+        assert_eq!(users[0]["publishing"][0], "session_1");
+        assert_eq!(users[1]["username"], "bob");
+        assert_eq!(users[1]["watching"][0], "session_1");
+        assert_eq!(
+            users[1]["connections"][0]["source_ip"],
+            serde_json::Value::Null
+        );
+
+        let rooms = snapshot["rooms"].as_array().unwrap();
+        assert_eq!(rooms.len(), 1);
+        assert_eq!(rooms[0]["room_id"], "live");
+        assert_eq!(rooms[0]["publishers"][0], "alice");
+        assert_eq!(rooms[0]["viewers"][0], "bob");
+        assert_eq!(rooms[0]["streams"][0], "session_1");
+
+        let streams = snapshot["streams"].as_array().unwrap();
+        assert_eq!(streams.len(), 1);
+        assert_eq!(streams[0]["publisher_id"], "session_1");
+        assert_eq!(streams[0]["username"], "alice");
+        assert_eq!(streams[0]["viewer_count"], 1);
+        assert_eq!(streams[0]["viewers"][0]["username"], "bob");
+        assert_eq!(streams[0]["pending_view_requests"], 0);
+        assert_eq!(streams[0]["connection_state"], "connected");
+
+        // Administrative metadata never carries credentials or key material.
+        let text = snapshot.to_string();
+        assert!(!text.contains("password"));
+        assert!(!text.contains("argon2"));
+        assert!(!text.contains("publisher_key"));
+    }
+
+    #[tokio::test]
+    async fn the_panel_closes_a_session_and_stops_a_stream_through_the_session_owner() {
+        let (_sender, receiver) = watch::channel(Arc::new(InviteStore::default()));
+        let state = SignalingState::new(receiver);
+        let (session_events, mut session_receiver) = mpsc::channel(MAX_QUEUED_MESSAGES);
+        state.register_session(
+            "session_1".into(),
+            "alice".into(),
+            "live".into(),
+            None,
+            session_events,
+        );
+        assert!(state.disconnect_session("session_1").is_ok());
+        assert!(matches!(
+            session_receiver.recv().await,
+            Some(ConnectionEvent::Close(CloseReason::Revoked))
+        ));
+        assert!(state.disconnect_session("missing").is_err());
+
+        let (_publisher_receiver, mut entry) = publisher_entry("alice");
+        entry.room_id = "live".into();
+        state
+            .publishers
+            .lock()
+            .unwrap()
+            .insert("session_1".into(), entry);
+        let (stream_events, mut stream_receiver) = mpsc::channel(MAX_QUEUED_MESSAGES);
+        state
+            .publishers
+            .lock()
+            .unwrap()
+            .get_mut("session_1")
+            .unwrap()
+            .events = stream_events;
+        assert!(state.stop_stream("session_1").is_ok());
+        assert!(matches!(
+            stream_receiver.recv().await,
+            Some(ConnectionEvent::Close(CloseReason::Revoked))
+        ));
+        assert!(state.stop_stream("missing").is_err());
     }
 
     #[test]
@@ -2587,7 +3088,7 @@ mod network_tests {
     use crate::{
         app_with_signaling,
         auth::{InviteFile, create_invite_with_display_name},
-        config::{Config, TlsFiles},
+        config::{Config, DEFAULT_MAX_UNAUTHENTICATED_SESSIONS, TlsFiles},
         listener::{BoundedListener, tls_acceptor_from_der},
     };
     use dass_protocol::ControlLimits;
@@ -2665,6 +3166,8 @@ mod network_tests {
                 max_concurrent_requests: 128,
                 max_control_message_bytes: MAX_MESSAGE_BYTES,
             },
+            resources: Default::default(),
+            transport_mode: crate::transport::TransportMode::Local,
             request_timeout: Duration::from_secs(5),
             tls: Some(TlsFiles {
                 certificate: "unused".into(),

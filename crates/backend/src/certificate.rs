@@ -20,12 +20,12 @@ pub struct Validity {
 pub fn validity(der: &[u8]) -> Option<Validity> {
     let certificate = der_sequence(der)?;
     // Certificate ::= SEQUENCE { tbsCertificate, signatureAlgorithm, signature }
-    let tbs = der_sequence(certificate.1)?;
+    let tbs = der_sequence(certificate.0)?;
     // TBSCertificate ::= SEQUENCE { version?, serialNumber, signature, issuer,
     //                             validity, subject, ... }
     // The validity is the only direct child sequence that holds exactly two
     // time values; the issuer and subject hold attribute sets instead.
-    let mut rest = tbs.1;
+    let mut rest = tbs.0;
     while !rest.is_empty() {
         let (tag, content, remainder) = der_element(rest)?;
         rest = remainder;

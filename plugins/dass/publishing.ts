@@ -97,6 +97,12 @@ export class PublishController {
         operation?.abort.abort();
         operation?.peer?.close();
         operation?.signaling?.close();
+        // Teardown stops the captured tracks even when the host release is
+        // uncertain: a stopped track can never leak another frame.
+        const stream = operation?.capture?.stream;
+        if (stream && typeof stream.getTracks === "function") {
+            for (const track of stream.getTracks()) track.stop();
+        }
         operation?.capture?.release();
         this.update({ phase: "idle", message, candidates: [], pendingViewers: [], approvedViewers: [] });
     }

@@ -45,6 +45,13 @@ impl TransportMode {
             Self::Public => "public",
         }
     }
+
+    /// Loopback is allowed only in the explicit local test environment.
+    /// All other unsafe address ranges remain blocked in both modes.
+    pub fn permits_media_address(self, ip: IpAddr) -> bool {
+        let ip = normalize(ip);
+        !is_unsafe_media_address(ip) || (self == Self::Local && ip.is_loopback())
+    }
 }
 
 /// Why a candidate or a datagram source was refused. Fixed codes only:
@@ -93,7 +100,8 @@ pub fn normalize(ip: IpAddr) -> IpAddr {
 
 /// Loopback, unspecified, link-local, multicast, broadcast, carrier-grade NAT,
 /// documentation, benchmarking, IPv4-mapped and known cloud metadata addresses
-/// are never valid media endpoints. Private space (RFC1918 and unique-local)
+/// are unsafe media endpoints by default. Local mode explicitly permits
+/// loopback for testing. Private space (RFC1918 and unique-local)
 /// is a separate concern: it is usable in the local test environment only.
 pub fn is_unsafe_media_address(ip: IpAddr) -> bool {
     match normalize(ip) {
@@ -113,8 +121,7 @@ fn is_unsafe_media_address_v4(address: Ipv4Addr) -> bool {
         // carrier-grade NAT.
         return true;
     }
-    if (a == 192 && b == 0 && c == 0)
-        || (a == 192 && b == 0 && c == 2)
+    if (a == 192 && b == 0 && (c == 0 || c == 2))
         || (a == 192 && b == 88 && c == 99)
         || (a == 198 && (18..=19).contains(&b))
         || (a == 198 && b == 51 && c == 100)
@@ -232,6 +239,9 @@ impl MediaAdmission {
     /// Whether this session may carry media at all.
     pub fn admits_media(&self) -> bool {
         match self.mode {
+            TransportMode::Local if self.auto_lan => self.observed_peer.is_some_and(|ip| {
+                self.mode.permits_media_address(ip) && is_private_or_loopback(ip)
+            }),
             TransportMode::Local => {
                 self.observed_peer.is_some()
                     || !self.allowed_peers.is_empty()
@@ -249,7 +259,7 @@ impl MediaAdmission {
             return Err(Refusal::PrivilegedPort);
         }
         let ip = normalize(endpoint.ip());
-        if is_unsafe_media_address(ip) {
+        if !self.mode.permits_media_address(ip) {
             return Err(Refusal::UnsafeAddress);
         }
         match self.mode {
@@ -354,6 +364,48 @@ mod tests {
     }
 
     #[test]
+    fn automatic_lan_admission_requires_a_safe_observed_local_peer() {
+        for observed in [
+            None,
+            Some("8.8.8.8"),
+            Some("169.254.169.254"),
+            Some("192.168.1.255"),
+        ] {
+            let policy = MediaAdmission::new(
+                TransportMode::Local,
+                observed.map(|address| address.parse().unwrap()),
+                HashSet::from(["127.0.0.1:50000".parse().unwrap()]),
+                HashSet::from(["192.168.1.9".parse().unwrap()]),
+                true,
+            );
+            assert!(!policy.admits_media(), "admitted {observed:?}");
+        }
+        for observed in ["192.168.1.8", "fd00::1", "127.0.0.1", "::1"] {
+            assert!(local(Some(observed), true).admits_media());
+        }
+    }
+
+    #[test]
+    fn loopback_media_is_permitted_only_in_local_mode() {
+        for address in ["127.0.0.1", "::1", "::ffff:127.0.0.1"] {
+            let ip: IpAddr = address.parse().unwrap();
+            assert!(TransportMode::Local.permits_media_address(ip));
+            assert!(!TransportMode::Public.permits_media_address(ip));
+            assert!(!is_global_unicast(ip));
+            let endpoint = SocketAddr::new(ip, 50000);
+            let local = local(Some(address), true);
+            assert!(local.candidate_verdict(endpoint).is_ok());
+            let mut peers = HashSet::new();
+            peers.insert(endpoint);
+            assert!(local.source_verdict(endpoint, &peers).is_ok());
+            let public = public(Some(address));
+            assert!(!public.admits_media());
+            assert!(public.candidate_verdict(endpoint).is_err());
+            assert!(public.source_verdict(endpoint, &peers).is_err());
+        }
+    }
+
+    #[test]
     fn dangerous_addresses_are_never_media_endpoints() {
         for address in [
             "0.0.0.0",
@@ -385,6 +437,10 @@ mod tests {
                 is_unsafe_media_address(ip),
                 "accepted unsafe address {address}"
             );
+            assert!(!TransportMode::Public.permits_media_address(ip));
+            if !normalize(ip).is_loopback() {
+                assert!(!TransportMode::Local.permits_media_address(ip));
+            }
         }
         for address in ["8.8.8.8", "203.0.114.1", "2606:4700::1111"] {
             let ip: IpAddr = address.parse().unwrap();
@@ -395,7 +451,7 @@ mod tests {
     #[test]
     fn an_ipv4_mapped_peer_is_classified_by_the_ipv4_rules() {
         let mapped: IpAddr = "::ffff:203.0.114.9".parse().unwrap();
-        assert_eq!(normalize(mapped), "203.0.114.9".parse().unwrap());
+        assert_eq!(normalize(mapped), "203.0.114.9".parse::<IpAddr>().unwrap());
         assert!(is_global_unicast(mapped));
         let private: IpAddr = "::ffff:192.168.1.1".parse().unwrap();
         assert!(is_private(private));
@@ -404,13 +460,7 @@ mod tests {
 
     #[test]
     fn private_space_is_separate_from_unsafe_space() {
-        for address in [
-            "10.0.0.1",
-            "172.16.5.4",
-            "192.168.1.8",
-            "127.0.0.1",
-            "fd00::1",
-        ] {
+        for address in ["10.0.0.1", "172.16.5.4", "192.168.1.8", "fd00::1"] {
             let ip: IpAddr = address.parse().unwrap();
             assert!(!is_unsafe_media_address(ip), "rejected {address}");
             assert!(!is_global_unicast(ip), "accepted {address} as global");
@@ -424,18 +474,16 @@ mod tests {
     fn public_admission_binds_candidates_to_the_observed_peer() {
         let policy = public(Some("8.8.8.8"));
         assert!(policy.admits_media());
-        assert_eq!(
+        assert!(
             policy
                 .candidate_verdict("8.8.8.8:51234".parse().unwrap())
-                .unwrap(),
-            ()
+                .is_ok()
         );
         // A different port is normal: a NAT rewrites the client's port.
-        assert_eq!(
+        assert!(
             policy
                 .candidate_verdict("8.8.8.8:40000".parse().unwrap())
-                .unwrap(),
-            ()
+                .is_ok()
         );
         for endpoint in [
             "1.1.1.1:51234",
@@ -464,11 +512,10 @@ mod tests {
     fn public_sources_may_use_a_nat_rewritten_port_but_not_another_address() {
         let policy = public(Some("8.8.8.8"));
         let peers = HashSet::new();
-        assert_eq!(
+        assert!(
             policy
                 .source_verdict("8.8.8.8:40001".parse().unwrap(), &peers)
-                .unwrap(),
-            ()
+                .is_ok()
         );
         for endpoint in ["1.1.1.1:40001", "8.8.8.8:53", "10.0.0.1:40001"] {
             assert!(
@@ -484,11 +531,10 @@ mod tests {
     fn local_admission_keeps_the_lan_test_environment() {
         let policy = local(Some("192.168.1.8"), true);
         assert!(policy.admits_media());
-        assert_eq!(
+        assert!(
             policy
                 .candidate_verdict("192.168.1.8:50000".parse().unwrap())
-                .unwrap(),
-            ()
+                .is_ok()
         );
         for endpoint in [
             "192.168.1.9:50000",
@@ -504,11 +550,10 @@ mod tests {
         // Automatic LAN admission only accepts signalled session endpoints.
         let mut peers = HashSet::new();
         peers.insert("192.168.1.8:50000".parse().unwrap());
-        assert_eq!(
+        assert!(
             policy
                 .source_verdict("192.168.1.8:50000".parse().unwrap(), &peers)
-                .unwrap(),
-            ()
+                .is_ok()
         );
         assert!(
             policy

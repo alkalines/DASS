@@ -21,6 +21,8 @@ form, article { border: 1px solid #fff; padding: 20px; margin: 20px 0; }
 table { width: 100%; border-collapse: collapse; margin: 20px 0; }
 td, th { text-align: left; padding: 12px; border-bottom: 1px solid #fff; overflow-wrap: anywhere; }
 .hint { font-size: 14px; line-height: 1.6; }
+section.events { border: 1px solid #fff; padding: 20px; margin: 20px 0; }
+section.events h2 { margin-top: 0; }
 #message:not(:empty) { border: 1px solid #fff; padding: 12px; }
 :focus-visible { outline: 2px solid #fff; outline-offset: 4px; }
 @media (max-width: 600px) { header { flex-direction: column; } header, main, footer { padding: 16px; } }

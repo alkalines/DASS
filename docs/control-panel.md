@@ -2,24 +2,43 @@
 
 Discord Alternative ScreenShare (DASS) has an optional black-and-white control
 panel served by the existing Rust backend, with no extra server or frontend
-runtime. It has exactly three pages:
+runtime. It has exactly three pages and a small shared operational log:
 
 - **Users**: add, edit, reset passwords and remove DASS accounts; edit display
-  names only. Validation is shown before saving, including the password's UTF-8
-  byte count; a new password must contain 12–512 bytes. Account management
-  grants no stream or room permissions: stream admission is decided live by
-  each publisher through approval prompts inside the client.
+  names only. The list also shows whether an account is online, its current
+  authenticated connections with their server-observed source addresses, the
+  DASS rooms it is in and its publishing/watching activity. Validation is
+  shown before saving, including the password's UTF-8 byte count; a new
+  password must contain 12–512 bytes. Account management grants no stream or
+  room permissions: stream admission is decided live by each publisher
+  through approval prompts inside the client.
 - **Rooms**: a read-only grouping view of joined DASS sessions; rooms carry no
-  authority and cannot be blocked or granted. The page can disconnect all DASS
-  sessions as a blunt containment action.
-- **Streams**: list connected publishers with viewer and pending-request counts.
-  **Browser playback is unavailable**: the experimental media implementation
-  has one viewer slot backend-wide and signaling accepts only the Discord
-  client origin. Watch through a publisher-approved DASS client. Admin
+  authority and cannot be blocked or granted. The page distinguishes
+  publishers, viewers and connected members who are not watching, and lists
+  the active streams of each room. It is DASS membership, not verified
+  Discord call membership, and seeing a room grants no access to its streams.
+- **Streams**: connected publishers with the room, the start time, the
+  current viewers and their accounts, the viewer count, the bounded
+  pending-request count, the connection state and the measured ingress/egress
+  bitrate of the live media sessions. **Browser playback is unavailable**:
+  signaling accepts only the Discord client origin, and the panel never
+  receives media. Watch through a publisher-approved DASS client. Admin
   authentication never grants media permissions.
+- **Recent events**: a bounded operational log shown on every page with a
+  timestamp, a severity and a fixed event code (session join and close, stream
+  start and stop, view approval, denial and removal, failed authentication,
+  administrative actions and operational errors such as a failed media session
+  or a rate-limited client). The log never contains addresses, account names,
+  credentials, keys, SDP, frames or raw signaling payloads.
+
+Session-level actions live on the **Streams** page: stopping a stream ends
+that publisher's route and its approved viewer routes, and disconnecting a
+viewer session ends that viewer's connection. Both act through the owning
+connection's bounded event queue, so they cannot grant access to anything.
+The blunt "disconnect all DASS sessions" action is also on that page.
 
 This is new implementation, **not runtime-accepted or production-ready**. Existing
-LAN transport limitations, lack of E2EE and readiness 503 remain unchanged.
+transport limitations, the open pilot gates and readiness 503 remain unchanged.
 
 ## Enable Basic authentication
 
@@ -109,11 +128,13 @@ it against the configured hash. Do not use the hash as the login password.
 - Writes validate the complete bounded account policy, save with mode 0600 via a
   synced temporary file and atomic rename, then notify signaling. Write failure
   fails authorization closed. Filesystem work/hashing runs in bounded workers.
-- **Every policy edit and disconnect action closes all DASS connections**, not
-  just one selected room/user. This conservative experimental behavior prevents
-  stale authorization and releases RTC-owned UDP admission. Capture/viewer cleanup
+- **Every policy edit closes all DASS connections**, not just one selected
+  room/user. This conservative experimental behavior prevents stale
+  authorization and releases RTC-owned UDP admission. Capture/viewer cleanup
   on real clients still needs acceptance. Normal Discord voice is independent;
-  DASS streams are not restarted automatically.
+  DASS streams are not restarted automatically. The panel's own session and
+  stream actions are narrower: they close exactly the selected session or
+  stream and its viewer routes.
 - Rooms are implicit client contexts for discovery grouping only. They carry no
   grants, block flags or persistent media state; a publisher's client decides
   stream admission per request. Account removal or password reset is the only
@@ -133,10 +154,13 @@ it against the configured hash. Do not use the hash as the login password.
 
 ## Validation
 
-Frontend UI-logic tests passed with Bun 1.4.3: **8 tests, 40 assertions** using a
+Frontend UI-logic tests passed with Bun 1.4.3: **12 tests, 61 assertions** using a
 small fake DOM. The browser script also bundled successfully. This checks page
-rendering, request headers/payloads, validation and error handling, not real browser Basic Auth
-or backend/media behavior. Run locally with `bun test ./tests/admin`.
+rendering, request headers/payloads, validation, error handling, the live
+connection and activity columns, the stream viewer/bitrate columns, the stop
+and disconnect requests and the bounded event log. It does not check real
+browser Basic Auth or backend/media behavior. Run locally with
+`bun test ./tests/admin`.
 
 Docker socket access was denied in the agent environment. Rust formatting, Clippy,
 compilation and tests **have not run** for this change. No server was started and
@@ -151,9 +175,12 @@ docker compose build backend
 The build checks formatting, denies Clippy warnings, runs locked workspace tests
 and builds the release image. New tests cover credential parsing, panel route
 authentication, CSRF refusal, durable account CRUD, hash redaction, legacy
-document fail-closed loading and policy-change notifications. They remain
-**unexecuted** here.
+document fail-closed loading, policy-change notifications, the administrative
+snapshot of sessions, rooms and streams, and the refusal of stream/session
+actions for an unknown identifier. They remain **unexecuted** here.
+
 GUI/runtime acceptance should additionally check browser Basic login, user password
 reset/removal, restart persistence, containment during live media, actual TCP source
-addresses, release of UDP admission and unauthorized panel access. Build success
-alone is not runtime/security evidence.
+addresses, release of UDP admission, the panel's stop and disconnect actions
+against live sessions, and unauthorized panel access. Build success alone is not
+runtime/security evidence.

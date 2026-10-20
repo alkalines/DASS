@@ -198,6 +198,11 @@ pub fn router(state: AdminState) -> Router {
         )
         .route("/admin/api/status", get(status))
         .route("/admin/api/disconnect", post(disconnect))
+        .route(
+            "/admin/api/sessions/{session_id}/disconnect",
+            post(disconnect_session),
+        )
+        .route("/admin/api/streams/{publisher_id}/stop", post(stop_stream))
         .route_layer(middleware::from_fn_with_state(state.clone(), authenticate))
         .with_state(state)
 }
@@ -454,6 +459,38 @@ async fn remove_user(State(state): State<AdminState>, Path(username): Path<Strin
 
 async fn disconnect(State(state): State<AdminState>) -> Response {
     mutate(state, |_| Ok(())).await
+}
+
+/// Close one live session. The panel may end a session; it never gains the
+/// ability to receive the stream it stopped.
+async fn disconnect_session(
+    State(state): State<AdminState>,
+    Path(session_id): Path<String>,
+) -> Response {
+    if session_id.is_empty() || session_id.len() > 128 {
+        return (StatusCode::BAD_REQUEST, "invalid session").into_response();
+    }
+    match state.signaling.disconnect_session(&session_id) {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err("session not found") => (StatusCode::NOT_FOUND, "session not found").into_response(),
+        Err(error) => (StatusCode::SERVICE_UNAVAILABLE, error).into_response(),
+    }
+}
+
+/// Stop one publisher's stream. The publisher's teardown ends its approved
+/// viewer routes with it.
+async fn stop_stream(
+    State(state): State<AdminState>,
+    Path(publisher_id): Path<String>,
+) -> Response {
+    if publisher_id.is_empty() || publisher_id.len() > 128 {
+        return (StatusCode::BAD_REQUEST, "invalid stream").into_response();
+    }
+    match state.signaling.stop_stream(&publisher_id) {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err("stream not found") => (StatusCode::NOT_FOUND, "stream not found").into_response(),
+        Err(error) => (StatusCode::SERVICE_UNAVAILABLE, error).into_response(),
+    }
 }
 
 async fn mutate(
@@ -742,6 +779,35 @@ mod tests {
             StatusCode::NO_CONTENT
         );
         assert!(receiver.has_changed().unwrap());
+    }
+
+    #[tokio::test]
+    async fn stream_and_session_actions_require_authentication_and_a_known_id() {
+        let (_directory, state, _) = fixture();
+        let app = router(state);
+        for path in [
+            "/admin/api/sessions/missing/disconnect",
+            "/admin/api/streams/missing/stop",
+        ] {
+            // Unauthenticated writes never reach the session owner.
+            assert_eq!(
+                app.clone()
+                    .oneshot(request(path, "POST", false, "{}"))
+                    .await
+                    .unwrap()
+                    .status(),
+                StatusCode::UNAUTHORIZED
+            );
+            // An authenticated action for an unknown session or stream is refused.
+            assert_eq!(
+                app.clone()
+                    .oneshot(request(path, "POST", true, "{}"))
+                    .await
+                    .unwrap()
+                    .status(),
+                StatusCode::NOT_FOUND
+            );
+        }
     }
 
     #[test]

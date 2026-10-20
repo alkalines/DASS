@@ -22,6 +22,12 @@ export function createEquibopCapture(bridge?: EquibopCaptureBridge) {
         logDiagnostic("capture picker requested");
         try {
             const lease = await bridge.capture(signal);
+            // The picker may have been closed while the host was still starting.
+            // A cancelled capture must never leave a live lease behind.
+            if (signal.aborted) {
+                await lease.release();
+                throw new Error("The DASS capture was cancelled.");
+            }
             logDiagnostic("capture acquired", { audioSelected: lease.audioSelected });
             return lease;
         } catch (error) {

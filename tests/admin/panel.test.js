@@ -34,7 +34,7 @@ function descendants(element) {
     return [element, ...element.children.flatMap(descendants)];
 }
 
-async function setup(page, response) {
+async function setup(page, responses = {}) {
     const root = new Element("body");
     const main = new Element("main");
     const title = new Element("h1"); title.id = "title";
@@ -58,7 +58,9 @@ async function setup(page, response) {
         confirm: () => true,
         fetch: async (url, options) => {
             requests.push({ url, ...options });
-            return { ok: true, status: options.method === "GET" ? 200 : 204, json: async () => response };
+            const key = url.split("/").pop();
+            const payload = responses[key] ?? responses.default ?? {};
+            return { ok: true, status: options.method === "GET" ? 200 : 204, json: async () => payload };
         }
     };
     runInNewContext(source.replace(/run\(load\);\s*$/, "globalThis.pageReady = run(load);"), context);
@@ -66,10 +68,12 @@ async function setup(page, response) {
     return { context, document, requests, title, content, message };
 }
 
+const EMPTY_METRICS = { events: [] };
+
 describe("DASS control panel", () => {
     test("users render as text, not HTML, and editing does not reveal a hash", async () => {
         const user = { username: "alice", display_name: "<img src=x>" };
-        const fixture = await setup("users", [user]);
+        const fixture = await setup("users", { users: [user], status: { users: [], rooms: [], streams: [], metrics: EMPTY_METRICS } });
         expect(fixture.title.textContent).toBe("Users");
         expect(fixture.content.textContent).toContain("<img src=x>");
         expect(fixture.requests[0].url).toBe("/admin/api/users");
@@ -83,7 +87,7 @@ describe("DASS control panel", () => {
     });
 
     test("user writes use the CSRF header and only password/display-name fields", async () => {
-        const fixture = await setup("users", []);
+        const fixture = await setup("users", { users: [], status: { users: [], rooms: [], streams: [], metrics: EMPTY_METRICS } });
         fixture.context.editUser();
         const editor = fixture.document.querySelector("#user-editor");
         const inputs = descendants(editor).filter(element => element.tag === "input");
@@ -104,20 +108,57 @@ describe("DASS control panel", () => {
         expect(fixture.message.textContent).toContain("User saved");
     });
 
+    test("users show online state, observed source addresses and activity", async () => {
+        const fixture = await setup("users", {
+            users: [{ username: "alice", display_name: "Alice" }, { username: "bob" }],
+            status: {
+                users: [{
+                    username: "alice",
+                    online: true,
+                    connections: [{ session_id: "session_1", room_id: "live", role: "publisher", source_ip: "203.0.113.7", connected_at_unix_seconds: 1700000000 }],
+                    rooms: ["live"],
+                    publishing: ["stream_1"],
+                    watching: []
+                }],
+                rooms: [], streams: [], metrics: EMPTY_METRICS
+            }
+        });
+        expect(fixture.content.textContent).toContain("online");
+        expect(fixture.content.textContent).toContain("offline");
+        expect(fixture.content.textContent).toContain("203.0.113.7");
+        expect(fixture.content.textContent).toContain("publisher");
+        expect(fixture.content.textContent).toContain("stream_1");
+        // The offline account has no live connection details.
+        expect(fixture.content.textContent).toContain("no live connections");
+    });
+
     test("rooms are a read-only grouping view without block controls", async () => {
-        const fixture = await setup("rooms", { rooms: [{ room_id: "live", members: 2 }], streams: [] });
+        const fixture = await setup("rooms", {
+            status: {
+                rooms: [{ room_id: "live", members: 3, publishers: ["alice"], viewers: ["bob"], others: ["carol"], streams: ["stream_1"] }],
+                streams: [], metrics: EMPTY_METRICS
+            }
+        });
         expect(fixture.title.textContent).toBe("Rooms");
         const rows = descendants(fixture.content).filter(element => element.tag === "tr");
         expect(rows.length).toBe(2);
         expect(fixture.content.textContent).toContain("read-only");
         expect(fixture.content.textContent).not.toContain("Blocked");
-        expect(fixture.content.textContent).toContain("Disconnect all DASS sessions");
-        // Only the disconnect endpoint remains; no room write request exists.
+        // Publishers, viewers and plain members are distinguished.
+        expect(fixture.content.textContent).toContain("alice");
+        expect(fixture.content.textContent).toContain("bob");
+        expect(fixture.content.textContent).toContain("carol");
+        // Session actions belong to the Streams page, so the rooms page never writes.
         expect(fixture.requests.every(request => request.method === "GET")).toBe(true);
     });
 
     test("stream page reports browser playback unavailable and lists pending requests", async () => {
-        const fixture = await setup("streams", { streams: [{ username: "alice", room_id: "room_1", publisher_id: "stream_1", viewer_count: 1, pending_view_requests: 2 }], watch_available: false });
+        const fixture = await setup("streams", {
+            status: {
+                streams: [{ username: "alice", room_id: "room_1", publisher_id: "stream_1", viewer_count: 1, pending_view_requests: 2, started_at_unix_seconds: 1700000000, connection_state: "connected", ingress_bytes_per_second: 2048, egress_bytes_per_second: 4096, viewers: [{ session_id: "viewer_1", username: "bob" }] }],
+                watch_available: false, metrics: EMPTY_METRICS
+            }
+        });
         expect(fixture.title.textContent).toBe("Streams");
         expect(fixture.content.textContent).toContain("Browser watching is not available");
         expect(fixture.content.textContent).toContain("alice");
@@ -126,8 +167,56 @@ describe("DASS control panel", () => {
         expect(descendants(fixture.content).some(element => element.tag === "video")).toBe(false);
     });
 
+    test("streams show who watches whom, the start time and measured bitrates", async () => {
+        const fixture = await setup("streams", {
+            status: {
+                streams: [{
+                    username: "alice", room_id: "room_1", publisher_id: "stream_1", viewer_count: 1,
+                    pending_view_requests: 0, started_at_unix_seconds: 1700000000, connection_state: "connected",
+                    ingress_bytes_per_second: 2048, egress_bytes_per_second: 4096,
+                    viewers: [{ session_id: "viewer_1", username: "bob" }]
+                }],
+                metrics: EMPTY_METRICS
+            }
+        });
+        expect(fixture.content.textContent).toContain("bob (viewer_1)");
+        expect(fixture.content.textContent).toContain("2023-11-14");
+        expect(fixture.content.textContent).toContain("2.05 kB/s");
+        expect(fixture.content.textContent).toContain("4.10 kB/s");
+        expect(fixture.content.textContent).toContain("connected");
+    });
+
+    test("stopping a stream posts to the stream endpoint with the CSRF header", async () => {
+        const fixture = await setup("streams", {
+            status: {
+                streams: [{ username: "alice", room_id: "room_1", publisher_id: "stream_1", viewer_count: 0, pending_view_requests: 0, started_at_unix_seconds: 1700000000, connection_state: "connected", viewers: [] }],
+                metrics: EMPTY_METRICS
+            }
+        });
+        const stop = descendants(fixture.content).find(element => element.tag === "button" && element.textContent === "Stop stream");
+        expect(stop).toBeDefined();
+        await stop.listeners.click();
+        const write = fixture.requests.find(request => request.method === "POST");
+        expect(write.url).toBe("/admin/api/streams/stream_1/stop");
+        expect(write.headers["X-DASS-Admin"]).toBe("1");
+        expect(write.headers["Content-Type"]).toBe("application/json");
+    });
+
+    test("every page shows the bounded operational log", async () => {
+        const fixture = await setup("rooms", {
+            status: {
+                rooms: [], streams: [],
+                metrics: { events: [{ at_unix_seconds: 1700000000, severity: "warning", code: "login_failed" }] }
+            }
+        });
+        expect(fixture.content.textContent).toContain("Recent events");
+        expect(fixture.content.textContent).toContain("login_failed");
+        expect(fixture.content.textContent).toContain("warning");
+        expect(fixture.content.textContent).toContain("2023-11-14");
+    });
+
     test("API failures are shown without leaving buttons disabled", async () => {
-        const fixture = await setup("users", []);
+        const fixture = await setup("users", { users: [], status: { users: [], rooms: [], streams: [], metrics: EMPTY_METRICS } });
         fixture.context.fetch = async () => ({ ok: false, status: 401 });
         await fixture.context.run(fixture.context.loadUsers);
         expect(fixture.message.textContent).toContain("Administrator login was rejected");
@@ -135,7 +224,7 @@ describe("DASS control panel", () => {
     });
 
     test("short passwords are rejected visibly before any write request", async () => {
-        const fixture = await setup("users", []);
+        const fixture = await setup("users", { users: [], status: { users: [], rooms: [], streams: [], metrics: EMPTY_METRICS } });
         fixture.context.editUser();
         const editor = fixture.document.querySelector("#user-editor");
         const inputs = descendants(editor).filter(element => element.tag === "input");
@@ -152,7 +241,7 @@ describe("DASS control panel", () => {
     });
 
     test("password length uses UTF-8 bytes rather than character count", async () => {
-        const fixture = await setup("users", []);
+        const fixture = await setup("users", { users: [], status: { users: [], rooms: [], streams: [], metrics: EMPTY_METRICS } });
         fixture.context.editUser();
         const editor = fixture.document.querySelector("#user-editor");
         const inputs = descendants(editor).filter(element => element.tag === "input");
@@ -164,7 +253,7 @@ describe("DASS control panel", () => {
     });
 
     test("a successful save followed by a failed refresh is not reported as a failed save", async () => {
-        const fixture = await setup("users", []);
+        const fixture = await setup("users", { users: [], status: { users: [], rooms: [], streams: [], metrics: EMPTY_METRICS } });
         fixture.context.editUser();
         const editor = fixture.document.querySelector("#user-editor");
         const inputs = descendants(editor).filter(element => element.tag === "input");

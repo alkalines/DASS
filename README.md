@@ -11,6 +11,7 @@ Early-stage project for an Equicord plugin and self-hosted Rust screensharing ba
 - [Session setup and Share-button DASS workflow](docs/session-workflow.md)
 - [LAN accounts and automatic client UDP admission](docs/lan-accounts.md)
 - [Optional Users / Rooms / Streams control panel](docs/control-panel.md)
+- [Capture consent, teardown and client privacy](docs/capture-consent.md)
 - [Experimental authenticated directory and DASS viewer](docs/watching.md)
 
 The proposed architecture uses Equibop's existing capture pipeline and a Rust
