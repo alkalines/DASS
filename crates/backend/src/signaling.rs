@@ -3422,9 +3422,7 @@ mod network_tests {
             .unwrap();
         assert!(matches!(frame, ClientFrame::Close(_)));
         for _ in 0..100 {
-            if server.state.unauthenticated.available_permits()
-                == DEFAULT_MAX_LOGIN_HANDSHAKES
-            {
+            if server.state.unauthenticated.available_permits() == DEFAULT_MAX_LOGIN_HANDSHAKES {
                 return;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;

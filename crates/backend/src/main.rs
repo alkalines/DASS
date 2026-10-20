@@ -41,7 +41,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Some("create-user") => create_user_file(&arguments),
             Some("create-admin") => create_admin_file(&arguments),
             Some("set-user") | Some("set-admin") => provision_database(&arguments),
-            _ => Err("usage: dass-backend set-user ... | set-admin ... | create-invite ... | create-user ... | create-admin ..."),
+            _ => Err(
+                "usage: dass-backend set-user ... | set-admin ... | create-invite ... | create-user ... | create-admin ...",
+            ),
         };
         return result.map_err(Into::into);
     }
@@ -50,24 +52,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             return Err("DASS environment values must be UTF-8".into());
         }
     }
-    let database_path = std::env::var("DASS_DATABASE_FILE")
-        .unwrap_or_else(|_| "/var/lib/dass/dass.sqlite3".into());
-    if database_path.is_empty() { return Err("empty SQLite database path".into()); }
-    let database = Database::open(PathBuf::from(database_path), |name| std::env::var(name).ok())?;
+    let database_path =
+        std::env::var("DASS_DATABASE_FILE").unwrap_or_else(|_| "/var/lib/dass/dass.sqlite3".into());
+    if database_path.is_empty() {
+        return Err("empty SQLite database path".into());
+    }
+    let database = Database::open(PathBuf::from(database_path), |name| {
+        std::env::var(name).ok()
+    })?;
     let settings = database.settings()?;
     let config = database.config(&settings)?;
     let tls = config.tls.as_ref().map(tls_acceptor).transpose()?;
     let transport = TransportConfig::from_lookup(tls.is_some(), config.transport_mode, |name| {
-        settings.0.get(name).cloned().or_else(|| std::env::var(name).ok())
+        settings
+            .0
+            .get(name)
+            .cloned()
+            .or_else(|| std::env::var(name).ok())
     })?;
     let admin_credentials = database.credentials()?;
     let resources = config.resources;
     let (sender, receiver) = watch::channel(Arc::new(database.store()?));
-    let state = SignalingState::new(receiver).with_transport(transport).with_limits(resources);
+    let state = SignalingState::new(receiver)
+        .with_transport(transport)
+        .with_limits(resources);
     let panel = if admin_credentials.is_empty() {
         None
     } else {
-        Some(AdminState::new(database.document()?, database.path().to_path_buf(), sender.clone(), state.clone()))
+        Some(AdminState::new(
+            database.document()?,
+            database.path().to_path_buf(),
+            sender.clone(),
+            state.clone(),
+        ))
     };
     let listener = BoundedListener::new_with_limit(
         tokio::net::TcpListener::bind(config.listen_addr).await?,
@@ -229,7 +246,9 @@ fn create_admin_file(arguments: &[String]) -> Result<(), &'static str> {
 
 fn provision_database(arguments: &[String]) -> Result<(), &'static str> {
     if arguments.len() != 4 {
-        return Err("usage: dass-backend set-user|set-admin DATABASE_FILE PASSWORD_FILE USERNAME (backend must be stopped)");
+        return Err(
+            "usage: dass-backend set-user|set-admin DATABASE_FILE PASSWORD_FILE USERNAME (backend must be stopped)",
+        );
     }
     let password = read_account_password(&arguments[2])?;
     let user = create_user(arguments[3].clone(), &password, None)?;

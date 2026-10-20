@@ -147,9 +147,11 @@ or replace `set-admin` with `set-user` for offline account provisioning.
 
 ## Validation (pending Docker execution)
 
-The new dependency is pinned `rusqlite` 0.40.1 (MIT), with default features
+The new dependency is pinned `rusqlite` 0.39.0 (MIT), with default features
 disabled and bundled SQLite (public domain). SQLite is compiled into the Rust
 executable, not run as another service. No host SQLite library is required.
+The 0.40.x series uses `cfg_select!`, unavailable on the pinned Rust 1.90
+toolchain; 0.39.0 avoids that incompatibility. Full Docker validation is pending.
 
 For this intentional dependency addition only, resolve the lockfile in Docker:
 

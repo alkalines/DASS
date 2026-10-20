@@ -287,7 +287,11 @@ pub(crate) fn bootstrap_administrator() -> Result<User, &'static str> {
         .hash_password_with_salt(b"admin", &salt)
         .map_err(|_| "credential hashing failed")?
         .to_string();
-    Ok(User { username: "admin".into(), password_hash, display_name: None })
+    Ok(User {
+        username: "admin".into(),
+        password_hash,
+        display_name: None,
+    })
 }
 
 /// Admin-only creation: caller delivers the returned credential out of band.
