@@ -14,14 +14,18 @@ The local types retain their upstream package identity, and Equicord's dependenc
 alias remains `@vencord/discord-types`. No React, Electron or media dependency is
 added by DASS. Bun then resolved the upstream ranges intentionally to generate
 this lock. It is not an exact reproduction of the upstream pnpm lock graph.
-Peer warnings were reported during resolution; lint, full typecheck and builds
-passed, but this is not a dependency/security audit or runtime compatibility test.
+The adapter removes `zip-local`, imported only from Equicord's separate web
+build script. This adapter runs only the desktop and Equibop build script. Bun
+overrides DOMPurify to 3.4.17 and Moment to 2.31.0, including the Moment
+dependency declared by the local type package. These are adapter-only manifest
+changes; upstream sources and manifests remain unchanged. Peer warnings may be
+reported during resolution.
 
 Normal builds copy this lock into the dedicated checkout and use
 `bun install --frozen-lockfile --ignore-scripts`. Dependency lifecycle scripts are
 not needed for the validated build. Upstream `pnpm-lock.yaml` is never removed or
-edited. The full upstream dependency set is retained, including packages for
-unrelated Equicord plugins; DASS does not invoke external encoders or helpers.
+edited. Other dependencies for unrelated Equicord plugins remain; DASS does not
+invoke external encoders or helpers.
 
 Revision or dependency changes require an intentional update of the build adapter
 and this lock, review of changed licenses/native requirements, and repeat lint,

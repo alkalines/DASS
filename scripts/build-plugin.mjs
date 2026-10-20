@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, unlinkSync, writeFile
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { adaptEquicordManifest } from "./equicordManifest.mjs";
 
 const EQUICORD_REVISION = "e0e85c8d4f6dc73aac9368cf3f4b2200eac4d4b4";
 const rootDirectory = fileURLToPath(new URL("../", import.meta.url));
@@ -55,11 +56,11 @@ try {
     });
     if (upstreamManifest.status !== 0) throw new Error("Cannot read pinned Equicord manifest.");
     const originalManifest = upstreamManifest.stdout;
-    const adaptedManifest = originalManifest.replace('"link:packages/discord-types"', '"file:packages/discord-types"');
-    if (adaptedManifest === originalManifest) throw new Error("Pinned local-types dependency did not match.");
+    const previousAdapterManifest = originalManifest.replace('"link:packages/discord-types"', '"file:packages/discord-types"');
+    const adaptedManifest = adaptEquicordManifest(originalManifest);
     const manifestPath = join(checkoutDirectory, "package.json");
     const currentManifest = readFileSync(manifestPath, "utf8");
-    if (currentManifest !== originalManifest && currentManifest !== adaptedManifest) {
+    if (currentManifest !== originalManifest && currentManifest !== previousAdapterManifest && currentManifest !== adaptedManifest) {
         throw new Error("Equicord package.json has user changes; refusing to overwrite it.");
     }
 

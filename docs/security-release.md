@@ -137,14 +137,23 @@ pin was changed and no advisory was suppressed.
 
 | Locked dependency / path | Registry result and initial scope |
 | --- | --- |
-| `braces@3.0.3` ← `micromatch` ← build/lint globbing | High: [GHSA-vfj7-8cjw-p6xm](https://github.com/advisories/GHSA-vfj7-8cjw-p6xm), stack-exhaustion DoS. Review build-input handling and a compatible patched dependency resolution. |
-| `dompurify@3.2.7` ← `monaco-editor@0.55.1` | Multiple moderate/low XSS/sanitization advisories, including [GHSA-v2wj-7wpq-c8vv](https://github.com/advisories/GHSA-v2wj-7wpq-c8vv) and [GHSA-hpcv-96wg-7vj8](https://github.com/advisories/GHSA-hpcv-96wg-7vj8). Upstream `browser/monaco.ts` imports Monaco. Establish desktop/Equibop bundle reachability and sanitization options; do not infer safety from DASS not importing it directly. Retain the full audit output privately with release evidence. |
-| `jszip@2.7.0` ← `zip-local@0.3.5` | Moderate: [GHSA-36fh-84j7-cv5h](https://github.com/advisories/GHSA-36fh-84j7-cv5h), path traversal. Upstream `scripts/build/buildWeb.mjs` imports `zip-local`; the DASS adapter builds desktop/Equibop, not web. Reachability/exclusion still needs maintainer confirmation. |
-| `moment@2.22.2` declared by local `@equicord/discord-types` | High: [GHSA-8hfj-j24r-96c4](https://github.com/advisories/GHSA-8hfj-j24r-96c4) and [GHSA-wc69-rhjr-hc9g](https://github.com/advisories/GHSA-wc69-rhjr-hc9g). The lock also resolves top-level `moment@2.31.0`; the local types package imports `Moment` in a `.d.ts`. Verify installed resolution/runtime bundle before deciding applicability. |
+| `braces@3.0.3` ← `micromatch` ← build/lint globbing | **Open, high:** [GHSA-vfj7-8cjw-p6xm](https://github.com/advisories/GHSA-vfj7-8cjw-p6xm), stack-exhaustion DoS. As of 2026-10-20, npm publishes no version newer than 3.0.3 and the advisory gives no patched release. Keep open; do not suppress or claim the scan is clean. |
+| `dompurify@3.4.17` ← `monaco-editor@0.55.1` | Updated in the adapter lock. Current GitHub npm advisory data includes [GHSA-6688-9rhm-gjv2](https://github.com/advisories/GHSA-6688-9rhm-gjv2) and [GHSA-p98j-92pf-mc4p](https://github.com/advisories/GHSA-p98j-92pf-mc4p), both affecting through 3.4.15 and fixed in 3.4.16; 3.4.17 is the current published release and is outside those ranges. Earlier recorded advisories, including [GHSA-v2wj-7wpq-c8vv](https://github.com/advisories/GHSA-v2wj-7wpq-c8vv) and [GHSA-hpcv-96wg-7vj8](https://github.com/advisories/GHSA-hpcv-96wg-7vj8), are also outside its affected ranges. Monaco is web-only in the pinned build graph; retain it for Equicord's web build and do not infer sanitization behavior from DASS not importing it. |
+| `jszip` ← `zip-local@0.3.5` | Removed from the dedicated adapter manifest, not overridden incompatibly. Pinned upstream `scripts/build/buildWeb.mjs` alone imports `zip-local`; the adapter invokes `scripts/build/build.mjs` and produces desktop and Equibop targets only. Automated manifest tests assert this source/target separation. The upstream web build retains its original dependency and is outside this adapter's artifacts. |
+| `moment@2.31.0` declared by local `@equicord/discord-types` | Adapter override updates the local package's nested resolution from 2.22.2 to 2.31.0. This is outside [GHSA-8hfj-j24r-96c4](https://github.com/advisories/GHSA-8hfj-j24r-96c4) (<2.29.2) and [GHSA-wc69-rhjr-hc9g](https://github.com/advisories/GHSA-wc69-rhjr-hc9g) (<2.29.4). The local declaration imports Moment as a type; the override also prevents installation of the vulnerable nested copy. |
 
-Rust, Electron, Equibop/native and container-image advisory/license review are
-still unperformed. Dependency remediation must be an intentional reviewed update
-with new frozen-lock validation, not an incidental pin advance during this task.
+The 2026-10-20 remediation intentionally updated the adapter-only Bun lock and
+manifest constraints, without advancing either upstream submodule. A current
+`bun audit --json` reports only the open braces finding above; it exits 1 and is
+not a clean scan. Rust, Electron, Equibop/native and container-image advisory and
+license review remain unperformed. Review the LGPL local types and GPL Equicord
+license context, and check native requirements on shipped dependencies before
+release. Registry metadata lists DOMPurify 3.4.17 as `(MPL-2.0 OR Apache-2.0)`
+and Moment 2.31.0 as MIT; no native/OS dependencies were introduced. Removing
+the web-only JSZip 2.7.0 tree also removes its `(MIT OR GPL-3.0)` licensing
+choice, `pako`, and zip-local's `async`, `graceful-fs` and `q` dependencies from
+this adapter lock. No deployment or production approval follows from this
+remediation.
 
 From the **repository root**:
 
