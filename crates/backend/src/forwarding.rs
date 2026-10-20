@@ -21,20 +21,24 @@ pub struct MediaHub {
 }
 
 struct PublisherRegistration {
+    identity: Arc<()>,
     room_id: String,
     publisher_id: String,
-    viewer: Option<(String, mpsc::Sender<ForwardPacket>, bool)>,
+    viewer: Option<(String, Arc<()>, mpsc::Sender<ForwardPacket>, bool)>,
     keyframes: mpsc::Sender<()>,
 }
 
 pub struct PublisherEndpoint {
     hub: Arc<MediaHub>,
+    identity: Arc<()>,
     publisher_id: String,
     keyframes: mpsc::Receiver<()>,
 }
 
 pub struct SubscriberEndpoint {
     hub: Arc<MediaHub>,
+    publisher_identity: Arc<()>,
+    identity: Arc<()>,
     publisher_id: String,
     subscriber_id: String,
     packets: mpsc::Receiver<ForwardPacket>,
@@ -55,7 +59,9 @@ impl MediaHub {
             return Err(RouteFailure);
         }
         let (sender, receiver) = mpsc::channel(1);
+        let identity = Arc::new(());
         *registration = Some(PublisherRegistration {
+            identity: identity.clone(),
             room_id: room_id.into(),
             publisher_id: publisher_id.into(),
             viewer: None,
@@ -63,6 +69,7 @@ impl MediaHub {
         });
         Ok(PublisherEndpoint {
             hub: self.clone(),
+            identity,
             publisher_id: publisher_id.into(),
             keyframes: receiver,
         })
@@ -85,9 +92,12 @@ impl MediaHub {
             })
             .ok_or(RouteFailure)?;
         let (sender, receiver) = mpsc::channel(PACKET_QUEUE_CAPACITY);
-        publisher.viewer = Some((subscriber_id.into(), sender, false));
+        let identity = Arc::new(());
+        publisher.viewer = Some((subscriber_id.into(), identity.clone(), sender, false));
         Ok(SubscriberEndpoint {
             hub: self.clone(),
+            publisher_identity: publisher.identity.clone(),
+            identity,
             publisher_id: publisher_id.into(),
             subscriber_id: subscriber_id.into(),
             packets: receiver,
@@ -116,7 +126,7 @@ impl MediaHub {
             && publisher
                 .viewer
                 .as_ref()
-                .is_some_and(|(id, _, _)| id == subscriber_id)
+                .is_some_and(|(id, _, _, _)| id == subscriber_id)
         {
             publisher.viewer = None;
         }
@@ -133,9 +143,12 @@ impl PublisherEndpoint {
         let mut registration = self.hub.publisher.lock().map_err(|_| RouteFailure)?;
         let publisher = registration
             .as_mut()
-            .filter(|publisher| publisher.publisher_id == self.publisher_id)
+            .filter(|publisher| {
+                publisher.publisher_id == self.publisher_id
+                    && Arc::ptr_eq(&publisher.identity, &self.identity)
+            })
             .ok_or(RouteFailure)?;
-        if let Some((_, sender, true)) = &publisher.viewer {
+        if let Some((_, _, sender, true)) = &publisher.viewer {
             match sender.try_send(packet) {
                 Ok(()) => {}
                 // A slow viewer loses its route rather than growing a queue or
@@ -154,10 +167,11 @@ impl PublisherEndpoint {
         self.hub.publisher.lock().ok().is_some_and(|registration| {
             registration.as_ref().is_some_and(|publisher| {
                 publisher.publisher_id == self.publisher_id
+                    && Arc::ptr_eq(&publisher.identity, &self.identity)
                     && publisher
                         .viewer
                         .as_ref()
-                        .is_some_and(|(_, _, ready)| *ready)
+                        .is_some_and(|(_, _, _, ready)| *ready)
             })
         })
     }
@@ -170,10 +184,13 @@ impl SubscriberEndpoint {
         let registration = self.hub.publisher.lock().map_err(|_| RouteFailure)?;
         if !registration.as_ref().is_some_and(|publisher| {
             publisher.publisher_id == self.publisher_id
+                && Arc::ptr_eq(&publisher.identity, &self.publisher_identity)
                 && publisher
                     .viewer
                     .as_ref()
-                    .is_some_and(|(id, _, _)| id == &self.subscriber_id)
+                    .is_some_and(|(id, identity, _, _)| {
+                        id == &self.subscriber_id && Arc::ptr_eq(identity, &self.identity)
+                    })
         }) {
             return Err(RouteFailure);
         }
@@ -186,21 +203,40 @@ impl SubscriberEndpoint {
 
     pub fn request_keyframe(&self) {
         // A capacity-one queue coalesces requests; no unbounded feedback traffic.
-        let _ = self.keyframes.try_send(());
+        if let Ok(registration) = self.hub.publisher.lock()
+            && registration.as_ref().is_some_and(|publisher| {
+                publisher.publisher_id == self.publisher_id
+                    && Arc::ptr_eq(&publisher.identity, &self.publisher_identity)
+                    && publisher
+                        .viewer
+                        .as_ref()
+                        .is_some_and(|(id, identity, _, _)| {
+                            id == &self.subscriber_id && Arc::ptr_eq(identity, &self.identity)
+                        })
+            })
+        {
+            let _ = self.keyframes.try_send(());
+        }
     }
 
     pub fn set_ready(&self) -> Result<(), RouteFailure> {
         let mut registration = self.hub.publisher.lock().map_err(|_| RouteFailure)?;
         let publisher = registration
             .as_mut()
-            .filter(|publisher| publisher.publisher_id == self.publisher_id)
+            .filter(|publisher| {
+                publisher.publisher_id == self.publisher_id
+                    && Arc::ptr_eq(&publisher.identity, &self.publisher_identity)
+            })
             .ok_or(RouteFailure)?;
-        let (_, _, ready) = publisher
+        let (_, _, _, ready) = publisher
             .viewer
             .as_mut()
-            .filter(|(id, _, _)| id == &self.subscriber_id)
+            .filter(|(id, route_identity, _, _)| {
+                id == &self.subscriber_id && Arc::ptr_eq(route_identity, &self.identity)
+            })
             .ok_or(RouteFailure)?;
         *ready = true;
+        drop(registration);
         self.request_keyframe();
         Ok(())
     }
@@ -209,9 +245,10 @@ impl SubscriberEndpoint {
 impl Drop for PublisherEndpoint {
     fn drop(&mut self) {
         if let Ok(mut registration) = self.hub.publisher.lock()
-            && registration
-                .as_ref()
-                .is_some_and(|publisher| publisher.publisher_id == self.publisher_id)
+            && registration.as_ref().is_some_and(|publisher| {
+                publisher.publisher_id == self.publisher_id
+                    && Arc::ptr_eq(&publisher.identity, &self.identity)
+            })
         {
             *registration = None;
         }
@@ -223,10 +260,13 @@ impl Drop for SubscriberEndpoint {
         if let Ok(mut registration) = self.hub.publisher.lock()
             && let Some(publisher) = registration.as_mut()
             && publisher.publisher_id == self.publisher_id
+            && Arc::ptr_eq(&publisher.identity, &self.publisher_identity)
             && publisher
                 .viewer
                 .as_ref()
-                .is_some_and(|(id, _, _)| id == &self.subscriber_id)
+                .is_some_and(|(id, identity, _, _)| {
+                    id == &self.subscriber_id && Arc::ptr_eq(identity, &self.identity)
+                })
         {
             publisher.viewer = None;
         }
@@ -275,5 +315,49 @@ mod tests {
         drop(publisher);
         assert!(replacement.try_packet().is_err());
         assert!(hub.publish("room", "new_source").is_ok());
+    }
+
+    #[test]
+    fn stale_endpoints_cannot_mutate_replacement_routes_with_reused_ids() {
+        let hub = Arc::new(MediaHub::default());
+        let stale_publisher = hub.publish("room", "source").unwrap();
+        let stale_viewer = hub.subscribe("room", "source", "viewer").unwrap();
+        hub.close_publisher("source");
+
+        let replacement_publisher = hub.publish("room", "source").unwrap();
+        let mut replacement_viewer = hub.subscribe("room", "source", "viewer").unwrap();
+        assert!(stale_publisher.forward(packet()).is_err());
+        assert!(stale_viewer.set_ready().is_err());
+        drop(stale_publisher);
+        drop(stale_viewer);
+
+        replacement_viewer.set_ready().unwrap();
+        replacement_publisher.forward(packet()).unwrap();
+        assert!(replacement_viewer.try_packet().unwrap().is_some());
+    }
+
+    #[test]
+    fn stale_viewer_identity_cannot_read_or_mutate_same_publisher_replacement() {
+        let hub = Arc::new(MediaHub::default());
+        let mut publisher = hub.publish("room", "source").unwrap();
+        let mut stale_viewer = hub.subscribe("room", "source", "viewer").unwrap();
+        stale_viewer.set_ready().unwrap();
+        assert!(publisher.take_keyframe_request());
+        publisher.forward(packet()).unwrap();
+
+        hub.drop_viewer("source", "viewer");
+        let mut replacement_viewer = hub.subscribe("room", "source", "viewer").unwrap();
+        assert!(stale_viewer.try_packet().is_err());
+        assert!(stale_viewer.set_ready().is_err());
+        stale_viewer.request_keyframe();
+        assert!(!publisher.has_ready_viewer());
+        assert!(!publisher.take_keyframe_request());
+        drop(stale_viewer);
+
+        replacement_viewer.set_ready().unwrap();
+        assert!(publisher.has_ready_viewer());
+        assert!(publisher.take_keyframe_request());
+        publisher.forward(packet()).unwrap();
+        assert!(replacement_viewer.try_packet().unwrap().is_some());
     }
 }

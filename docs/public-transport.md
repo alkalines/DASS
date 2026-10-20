@@ -173,7 +173,7 @@ hostile client.
 | `DASS_MAX_UNAUTHENTICATED_SESSIONS` | 16 | 1–256 sessions before login |
 | `DASS_MAX_TCP_CONNECTIONS` | 128 | 1–4096 accepted TCP connections |
 | `DASS_MAX_PASSWORD_VERIFICATIONS` | 2 | 1–16 concurrent password hashes |
-| `DASS_MAX_MEDIA_SESSIONS` | 2 | 1–64 concurrent media sessions |
+| `DASS_MAX_MEDIA_SESSIONS` | 2 | 1–64 concurrent media-session admission permits; increasing it does not increase forwarding topology |
 | `DASS_MAX_PACKETS_PER_SECOND` | 2000 | 1–20000 UDP datagrams per media session |
 | `DASS_MAX_INGRESS_BYTES_PER_SECOND` | 2000000 | media bytes per session per second |
 | `DASS_MAX_EGRESS_BYTES_PER_SECOND` | 4000000 | forwarded bytes per session per second |
@@ -185,9 +185,11 @@ of media sessions times the per-session egress budget. Application limits
 cannot prevent upstream link saturation; hosting-provider DDoS protection and
 the residual availability risk stay with the operator.
 
-The media topology is still one publisher and one viewer per stream, with one
-in-process queue of 32 packets between them. Multi-viewer fan-out is roadmap
-section 9, not this build.
+The media topology is still one publisher and one viewer **backend-wide**, with
+one in-process queue of 32 packets between them. `DASS_MAX_MEDIA_SESSIONS` is a
+transport admission ceiling, not a capacity setting; values above two do not
+enable additional routes. Multi-user forwarding is roadmap section 9, not this
+build.
 
 ## Operational metrics
 

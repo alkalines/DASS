@@ -17,7 +17,7 @@ inspection here is an AI-assisted review, **not an audit** or an exhaustive list
 | Recipient keys are selected by mutable account state | **Client-side race fixes implemented; independent review/retest still required.** Request/device keys are snapshotted by request ID, duplicate IDs cannot replace them, and view decisions are serialized. Account membership generations invalidate outstanding requests on deny/block/removal; late trust results and request-closed events remove pending state. Delivery and rekey bind to an immutable membership token/key and recheck it after async wrapping and relay; identity confirm/verify actions address one request. Request-key state is bounded to 16 entries and cleared on trust-read failure, decision failure or closure. Deferred-promise tests exercise same-account competing devices and withdrawal during approval; generated ECDH identities verify a relayed blob unwraps only for the approved device, and a removed identity cannot unwrap a replacement device's epoch blob. Tests also verify closed requests cannot be approved and unconfirmed removal stops publishing fail-closed. **Not established:** authenticity of malicious backend events, rollback-safe persistent pin writes, cancellation of a relay already in flight before withdrawal, account-to-device uniqueness, or admission-history isolation below. |
 | Admission-history isolation | A newly approved viewer triggers a fresh epoch; the publisher snapshots the approved one-device-per-account roster, wraps the fresh key only for those exact members, checks membership after asynchronous wrapping and each relay, and fails publishing closed if wrapping or relay fails. The send epoch is committed only after all wraps complete; publishing startup with no viewers does not install an epoch. Removal invalidates that member before the serialized removal/rekey operation, excluding it from future distribution. Generated ECDH identity tests record a frame under the prior key and confirm the newly admitted identity cannot decrypt it while existing approved identities unwrap the new epoch. A controlled deferred-wrap test removes a joining viewer before wrap completion and confirms no key is relayed to that viewer and the send epoch advances monotonically for the remaining member. These are client unit-test results, not independent cryptographic review or browser/media acceptance. Previously authorized recipients may record or share plaintext/ciphertext while authorized; rekeying cannot retract it. |
 | Internet, client and overload acceptance missing | The public observed-peer policy has unit coverage, including a regression that spoofed UDP sources do not consume a valid session's packet-rate budget; this is not hostile network integration or a rate-limit/DoS test. Real Equibop capture/consent/leakage checks, NAT/loss/reconnect behavior and resource ceilings still need measured end-to-end evidence. Existing user-confirmed LAN behavior predates these security changes. |
-| Capacity is a feasibility topology | `MediaHub` in `crates/backend/src/forwarding.rs` owns one global publisher and one viewer. Configurable session counts do not implement multi-publisher/multi-viewer forwarding or account/source fairness. Do not raise limits or advertise public multi-user support. |
+| Capacity is a feasibility topology | `MediaHub` in `crates/backend/src/forwarding.rs` owns one global publisher and one viewer. Configurable session counts do not implement multi-publisher/multi-viewer forwarding or account/source fairness. Endpoints are bound to publisher and viewer registration identities, so stale handles cannot read queued output, change readiness, send keyframe feedback, or tear down a replacement route that reuses the same IDs. Regression coverage exercises replacement isolation along with second-publisher/viewer refusal, wrong room/source rejection, bounded queue overflow and queued-output teardown. These route checks are not concurrency/load evidence. Do not raise limits or advertise public multi-user support. |
 
 The replay bitmap previously retained arbitrarily long history and could shift by
 a 64-bit counter jump. Order F bounds it to 256 bits, rejects out-of-range counters
@@ -86,10 +86,12 @@ The deterministic client parser corpus is **not** coverage-guided Rust protocol
 fuzzing, hostile WSS/RTC integration, browser media acceptance or a crypto audit.
 Run coverage-guided backend parser/SDP/ICE fuzzing in Docker and retain minimized
 synthetic reproducers before closing 7.1; no fuzz campaign is claimed here.
-The Rust regression for spoofed-source packet-budget isolation is added to the
-`rtc` owner tests, but has not been compiled or run in this authoring session;
-it does not establish protection from spoofed-traffic floods or upstream link
-saturation.
+The Rust regressions for spoofed-source packet-budget isolation and forwarding
+publisher/viewer route replacement identity are present in the `rtc` owner and
+`forwarding` tests. They were not run from the agent session; the subsequent
+operator-reported Docker build for `c74dd68` ran the locked workspace test gate.
+They do not establish protection from spoofed-traffic floods, upstream link
+saturation, or multi-user isolation under concurrency/load.
 
 Validation on 2026-10-20 (Bun 1.4.3, Node v24.18.0): protocol freshness passed;
 311 client/admin tests passed, including admission-history isolation and deferred
@@ -113,6 +115,17 @@ shown. The missing-buildx warning was non-blocking: the classic builder complete
 This is operator-reported backend build evidence, not client/E2EE validation. No
 real-client Internet test, independent review, deployment, recovery drill or capacity
 measurement ran as part of this task.
+
+After the formatting and Clippy fixes were amended into `c74dd68`, the operator
+reported **“Built and running.”** This is operator-reported evidence that the
+subsequent canonical `docker compose build backend` completed and the service was
+started. That canonical build covers formatting, denied-warning Clippy, locked
+workspace tests and the locked release image. No full output, test count or image
+ID was supplied for this build; the earlier `0607280a5e17` image record above is
+historical and is not attributed to `c74dd68`. “Running” does not establish health
+or readiness, GUI/client interoperability, E2EE acceptance, Internet or overload
+behavior, measured capacity, or operator authorization for public exposure. No
+Docker, server, network or client checks were run by the agent for this report.
 
 ### Dependency review and build provenance
 

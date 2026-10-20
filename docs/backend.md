@@ -222,7 +222,7 @@ Without those private files, the default remains local discovery only.
 | `DASS_RTC_BIND_IP`, `DASS_RTC_ADVERTISED_IP` | unset | Bind and advertised media addresses; same family, and the advertised address must be globally routable in the public mode |
 | `DASS_RTC_FIRST_PORT` | unset | First UDP media port; the transport binds two consecutive ports |
 | `DASS_RTC_AUTO_LAN_PEERS`, `DASS_RTC_ALLOWED_PEERS`, `DASS_RTC_TRUSTED_CLIENT_IPS` | unset | Local-mode test tools only; the public mode refuses them |
-| `DASS_MAX_MEDIA_SESSIONS` | 2 | 1–64 concurrent media sessions |
+| `DASS_MAX_MEDIA_SESSIONS` | 2 | 1–64 concurrent media-session admission permits; increasing it does not increase forwarding topology |
 | `DASS_MAX_PACKETS_PER_SECOND` | 2000 | 1–20000 UDP datagrams per media session |
 | `DASS_MAX_INGRESS_BYTES_PER_SECOND` | 2000000 | Media bytes per session per second |
 | `DASS_MAX_EGRESS_BYTES_PER_SECOND` | 4000000 | Forwarded bytes per session per second |
