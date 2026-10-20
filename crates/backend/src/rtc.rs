@@ -765,14 +765,6 @@ impl MediaPeer {
 
     pub async fn receive(&mut self, bytes: &[u8], source: SocketAddr) -> Result<(), MediaFailure> {
         let now = Instant::now();
-        if now.duration_since(self.rate_started) >= Duration::from_secs(1) {
-            self.rate_started = now;
-            self.packets_in_window = 0;
-        }
-        self.packets_in_window += 1;
-        if self.packets_in_window > self.limits.max_packets_per_second {
-            return Err(MediaFailure);
-        }
         if !self.offered || bytes.len() > MAX_DATAGRAM_BYTES {
             return Ok(());
         }
@@ -785,6 +777,17 @@ impl MediaPeer {
             .is_err()
         {
             return Ok(());
+        }
+        // Charge only datagrams admitted to this media session. Otherwise an
+        // unrelated spoofed source can consume the observed peer's packet
+        // budget and make the owner close a healthy session.
+        if now.duration_since(self.rate_started) >= Duration::from_secs(1) {
+            self.rate_started = now;
+            self.packets_in_window = 0;
+        }
+        self.packets_in_window += 1;
+        if self.packets_in_window > self.limits.max_packets_per_second {
+            return Err(MediaFailure);
         }
         if !self
             .ingress
@@ -1643,6 +1646,33 @@ mod tests {
             peer.receive(&[0; 16], "198.51.100.4:50000".parse().unwrap())
                 .await
                 .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn spoofed_datagrams_do_not_consume_observed_peer_packet_budget() {
+        let mut config = public_config().unwrap().unwrap();
+        config.limits.max_packets_per_second = 1;
+        let observed: IpAddr = "203.0.114.10".parse().unwrap();
+        let mut peer = MediaPeer::bind_for_session(&config, Some(observed))
+            .await
+            .unwrap();
+        peer.offered = true;
+
+        for _ in 0..2 {
+            peer.receive(&[0; 16], "198.51.100.4:50000".parse().unwrap())
+                .await
+                .unwrap();
+        }
+        assert_eq!(peer.packets_in_window, 0);
+        peer.receive(&[0; 16], "203.0.114.10:50000".parse().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(peer.packets_in_window, 1);
+        assert!(
+            peer.receive(&[0; 16], "203.0.114.10:50000".parse().unwrap())
+                .await
+                .is_err()
         );
     }
 
