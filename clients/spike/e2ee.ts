@@ -331,10 +331,12 @@ export async function unwrapEpochKey(
 // ---------------------------------------------------------------------------
 
 const workerBootstrap = `
-const codecs = new Map(); // epoch -> { cipher, counter, replay }
+const codecs = new Map(); // epoch -> { cipher, keyBytes, replay }
+let installQueue = Promise.resolve();
 let sendEpoch = -1;
 let sendCounter = 0n;
-let role = null;
+let highestInstalledEpoch = -1;
+let retiredBelow = 0;
 
 function dropStaleEpochs() {
     while (codecs.size > ${FRAME_CONSTANTS.maxEpochs}) {
@@ -345,28 +347,49 @@ function dropStaleEpochs() {
 async function transformFrame(event) {
     const transformer = event.transformer;
     const port = transformer.options && transformer.options.port;
+    const role = transformer.options && transformer.options.role;
     if (port) {
         port.onmessage = message => {
             const data = message.data || {};
             if (data.type === "epoch") {
-                (async () => {
-                    codecs.set(data.epoch, {
-                        cipher: await MediaFrameCipher.create(new Uint8Array(data.keyBytes)),
-                        counter: 0n,
-                        replay: new ReplayWindow()
-                    });
-                    dropStaleEpochs();
-                    if (data.send === true) {
+                // MessagePorts for audio/video share this worker. Serialize imports and
+                // treat byte-identical duplicate installs as no-ops, preserving counters
+                // and replay windows across every transform attached to the peer.
+                installQueue = installQueue.then(async () => {
+                    if (!Number.isInteger(data.epoch) || data.epoch < 0 || data.epoch > 0xFFFFFFFF) throw new Error("Invalid DASS epoch.");
+                    if (data.epoch < retiredBelow || data.epoch < highestInstalledEpoch - (${FRAME_CONSTANTS.maxEpochs} - 1)) {
+                        port.postMessage({ type: "epochResult", id: data.id, epoch: data.epoch, status: "stale" });
+                        return;
+                    }
+                    const keyBytes = new Uint8Array(data.keyBytes);
+                    const existing = codecs.get(data.epoch);
+                    if (existing) {
+                        if (existing.keyBytes.length !== keyBytes.length || existing.keyBytes.some((byte, index) => byte !== keyBytes[index])) throw new Error("Conflicting DASS epoch key.");
+                    } else {
+                        codecs.set(data.epoch, { cipher: await MediaFrameCipher.create(keyBytes), keyBytes, replay: new ReplayWindow() });
+                        highestInstalledEpoch = Math.max(highestInstalledEpoch, data.epoch);
+                        dropStaleEpochs();
+                    }
+                    if (data.send === true && data.epoch > sendEpoch) {
                         sendEpoch = data.epoch;
                         sendCounter = 0n;
                     }
-                })().catch(error => {
+                    port.postMessage({ type: "epochResult", id: data.id, epoch: data.epoch, status: "installed" });
+                }).catch(error => {
                     // Fail closed and visibly: without a cipher every frame is
                     // dropped instead of leaving this peer in plaintext.
                     console.error("DASS E2EE epoch installation failed.", error);
+                    port.postMessage({ type: "epochResult", id: data.id, epoch: data.epoch, status: "rejected" });
                 });
             } else if (data.type === "dropBelow") {
-                for (const epoch of codecs.keys()) if (epoch < data.epoch) codecs.delete(epoch);
+                installQueue = installQueue.then(() => {
+                    if (Number.isInteger(data.epoch) && data.epoch >= 0) retiredBelow = Math.max(retiredBelow, data.epoch);
+                    for (const epoch of codecs.keys()) if (epoch < data.epoch) codecs.delete(epoch);
+                    port.postMessage({ type: "retirementResult", id: data.id, epoch: data.epoch });
+                }).catch(error => {
+                    console.error("DASS E2EE epoch retirement failed.", error);
+                    port.postMessage({ type: "retirementResult", id: data.id, epoch: data.epoch, status: "rejected" });
+                });
             }
         };
         port.start();
@@ -400,7 +423,6 @@ async function transformFrame(event) {
 }
 
 self.onrtctransform = event => {
-    role = event.transformer.options.role === "encrypt" ? "encrypt" : "decrypt";
     transformFrame(event);
 };
 `;

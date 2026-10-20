@@ -101,6 +101,93 @@ describe("transform worker scope", () => {
         expect(window.admit(0xFFFFFFFFFFFFFFFFn)).toBe(false);
         await expect(cipher.encrypt(0x100000000, 9n, FRAME)).rejects.toThrow();
     });
+
+    test("preserves counters/replay across duplicates and orders conflicting and stale epoch controls", async () => {
+        type EncodedFrame = { data: ArrayBuffer; };
+        type WorkerScope = { onrtctransform?: (event: { transformer: { options: { role: string; port: MessagePort; }; readable: ReadableStream<EncodedFrame>; writable: WritableStream<EncodedFrame>; }; }) => void; };
+        const scope: WorkerScope = {};
+        new Function("self", `${transformWorkerSource()};`)(scope);
+        const makeTransform = (role: "encrypt" | "decrypt") => {
+            const channel = new MessageChannel();
+            let enqueue!: (frame: EncodedFrame) => void;
+            let closeInput!: () => void;
+            const readable = new ReadableStream<EncodedFrame>({ start(controller) {
+                enqueue = frame => controller.enqueue(frame);
+                closeInput = () => controller.close();
+            } });
+            let outputController!: ReadableStreamDefaultController<EncodedFrame>;
+            const output = new ReadableStream<EncodedFrame>({ start(controller) { outputController = controller; } });
+            const reader = output.getReader();
+            const writable = new WritableStream<EncodedFrame>({ write(frame) { outputController.enqueue(frame); }, close() { outputController.close(); } });
+            let nextId = 0;
+            const acknowledgements = new Map<number, (event: MessageEvent) => void>();
+            channel.port1.onmessage = event => acknowledgements.get(event.data.id)?.(event);
+            scope.onrtctransform!({ transformer: { options: { role, port: channel.port2 }, readable, writable } });
+            const control = (type: "epoch" | "dropBelow", epoch: number, keyBytes?: Uint8Array, send = false) => new Promise<MessageEvent>(resolve => {
+                const id = ++nextId;
+                acknowledgements.set(id, event => { acknowledgements.delete(id); resolve(event); });
+                channel.port1.postMessage({ type, id, epoch, keyBytes: keyBytes?.slice().buffer, send });
+            });
+            return {
+                async install(epoch: number, keyBytes: Uint8Array, send: boolean) {
+                    return (await control("epoch", epoch, keyBytes, send)).data.status as string;
+                },
+                async retire(epoch: number) { await control("dropBelow", epoch); },
+                async sendFrame(data: ArrayBuffer) {
+                    const result = reader.read();
+                    enqueue({ data });
+                    return result;
+                },
+                pushFrame(data: ArrayBuffer) { enqueue({ data }); },
+                readFrame() { return reader.read(); },
+                async close() {
+                    closeInput();
+                    await reader.cancel();
+                    channel.port1.close();
+                    channel.port2.close();
+                }
+            };
+        };
+        const key = generateEpochKey();
+        const encryptA = makeTransform("encrypt");
+        const encryptB = makeTransform("encrypt");
+        expect(await encryptA.install(11, key, true)).toBe("installed");
+        expect(await encryptB.install(11, key, true)).toBe("installed");
+        const firstEncrypted = await encryptA.sendFrame(FRAME);
+        const alternateFrame = new TextEncoder().encode("another frame").buffer;
+        const secondEncrypted = await encryptB.sendFrame(alternateFrame);
+        const firstCiphertext = firstEncrypted.value.data;
+        const counters = [firstCiphertext, secondEncrypted.value.data].map(bytes => new DataView(bytes).getBigUint64(4));
+        expect(new Set(counters).size).toBe(2);
+        expect(await encryptA.install(11, key, true)).toBe("installed");
+        const afterDuplicate = await encryptA.sendFrame(FRAME);
+        expect(new DataView(afterDuplicate.value.data).getBigUint64(4)).toBe(2n);
+        expect(await encryptA.install(11, generateEpochKey(), true)).toBe("rejected");
+        const afterConflict = await encryptA.sendFrame(FRAME);
+        expect(new DataView(afterConflict.value.data).getBigUint64(4)).toBe(3n);
+        const rekey = generateEpochKey();
+        expect(await encryptA.install(12, rekey, true)).toBe("installed");
+        expect(await encryptA.install(11, key, true)).toBe("installed");
+        const afterOutOfOrder = await encryptA.sendFrame(FRAME);
+        expect(new DataView(afterOutOfOrder.value.data).getUint32(0)).toBe(12);
+        expect(new DataView(afterOutOfOrder.value.data).getBigUint64(4)).toBe(0n);
+
+        const decryptA = makeTransform("decrypt");
+        const decryptB = makeTransform("decrypt");
+        expect(await decryptA.install(11, key, false)).toBe("installed");
+        expect(await decryptB.install(11, key, false)).toBe("installed");
+        expect((await decryptA.sendFrame(firstCiphertext)).value.data).toEqual(FRAME);
+        expect(await decryptA.install(11, key, false)).toBe("installed");
+        decryptB.pushFrame(firstCiphertext);
+        decryptB.pushFrame(secondEncrypted.value.data);
+        expect(await decryptB.install(11, key, false)).toBe("installed");
+        expect((await decryptB.readFrame()).value.data).toEqual(alternateFrame);
+        const retirement = decryptA.retire(12);
+        const staleInstall = decryptA.install(11, key, false);
+        await retirement;
+        expect(await staleInstall).toBe("stale");
+        for (const transform of [encryptA, encryptB, decryptA, decryptB]) await transform.close();
+    });
 });
 
 describe("replay window", () => {

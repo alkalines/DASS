@@ -13,7 +13,7 @@ inspection here is an AI-assisted review, **not an audit** or an exhaustive list
 | Finding | Evidence / required resolution |
 | --- | --- |
 | Unreviewed media cryptography | `clients/spike/e2ee.ts` explicitly implements a project-specific SFrame-shaped format, not RFC 9605. No published interoperability vectors or independent cryptographic review. Select a maintained reviewed implementation/protocol and validate sender/track separation, usage limits, membership and malicious-signaling behavior before confidentiality claims. |
-| Worker epoch installation can reset live counters/replay state | `workerBootstrap` in `e2ee.ts` installs the same epoch on every attached port, creates fresh replay state, and resets shared `sendCounter` after asynchronous key derivation. Repeated installation or overlapping audio/video initialization can reuse a key/nonce or reset replay history. Require serialized/idempotent installation, sender/track binding and actual multi-transform worker tests before the pilot. Integer range checks added in order F do not fix this lifecycle issue. |
+| Worker epoch lifecycle and media-context binding | The previous `workerBootstrap` could replace an epoch's replay state and reset a live send counter on duplicate or out-of-order asynchronous installs. The worker now serializes installs and retirement, treats a byte-identical install as idempotent, rejects conflicting same-epoch keys, advances sender epoch state monotonically, shares the per-epoch send counter/replay window across attached audio/video transform ports, and keeps encrypt/decrypt role local to each transform. Isolated worker event/stream tests exercise duplicate installs after traffic, counter continuity across sender transforms and rekey ordering, conflicting-key rejection, queued retirement versus stale installation, and replay rejection across receiver transforms. **This repairs the identified local lifecycle race only; it does not establish sender/track cryptographic binding.** The project-specific frame format still has no independent crypto review or published vectors; protocol-level sender/track separation, membership and malicious-signaling validation remain pilot blockers. |
 | Recipient keys are selected by mutable account state | `plugins/dass/publishing.ts` stores `viewerKeys` by account; `deliverEpoch` looks it up after the asynchronous approval decision. Review concurrent requests/device replacement so a request cannot approve one pinned key and distribute the epoch to another. Bind immutable request/device key material to approval, pinning and key delivery; test malicious signaling and overlapping requests. |
 | Admission history isolation is not established | `deliverEpoch` sends an existing current epoch to newly approved viewers. A recipient with previously recorded ciphertext for that epoch could decrypt it; do not claim past-content isolation. Review admission rekeying and the intended history guarantee. |
 | Internet, client and overload acceptance missing | The public observed-peer policy, real Equibop capture/consent/leakage checks, NAT/loss/reconnect behavior and resource ceilings need measured end-to-end evidence. Existing user-confirmed LAN behavior predates these security changes. |
@@ -50,13 +50,17 @@ Run coverage-guided backend parser/SDP/ICE fuzzing in Docker and retain minimize
 synthetic reproducers before closing 7.1; no fuzz campaign is claimed here.
 
 Validation on 2026-10-20 (Bun 1.4.3, Node v24.18.0): protocol freshness passed;
-302 client/admin tests passed; the plugin adapter passed lint, full typecheck and
+303 client/admin tests passed (including the worker lifecycle regression); the plugin adapter passed lint, full typecheck and
 desktop/Equibop builds. Provenance collection correctly returned nonzero for the
 working tree with these uncommitted edits and confirmed both clean upstream pins.
 The staged module was additionally bundled with the checkout's esbuild and its
 generated worker evaluated in an isolated scope: frame round-trip, maximum counter
 jump/replay rejection and epoch-range rejection passed. This does not exercise
-actual `RTCRtpScriptTransform` events or the open multi-transform epoch race.
+real-browser `RTCRtpScriptTransform` interoperability or actual client audio/video
+behavior. The local worker event/stream harness exercises the duplicate-install
+multi-port lifecycle regression but is not browser acceptance. These checks do
+not constitute independent review of the project-specific cryptographic protocol;
+sender/track cryptographic binding remains unresolved.
 The agent's Docker build attempt failed with socket permission denied. The operator
 subsequently supplied a successful `docker compose build backend` result, producing
 image `0607280a5e17` (`alkalines-dass-backend:latest`). Formatting, denied-warning
