@@ -1,0 +1,182 @@
+name: Release
+
+on:
+  push:
+    branches: ["release/**"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Stable version, for example 0.1.0
+        required: true
+        type: string
+      component:
+        description: Release contents
+        required: true
+        default: all
+        type: choice
+        options: [all, backend]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dass-stable-release
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    outputs:
+      version: ${{ steps.plan.outputs.version }}
+      tag: ${{ steps.plan.outputs.tag }}
+      component: ${{ steps.plan.outputs.component }}
+      image: ${{ steps.plan.outputs.image }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.3
+      - run: bun test ./tests/release ./tests/admin
+      - id: plan
+        run: node scripts/release-plan.mjs
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+          RELEASE_COMPONENT: ${{ inputs.component }}
+      - name: Reject reused tags and backend versions
+        env:
+          TAG: ${{ steps.plan.outputs.tag }}
+          VERSION: ${{ steps.plan.outputs.version }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if git rev-parse --verify "refs/tags/$TAG" >/dev/null 2>&1; then
+            echo "This release tag already exists. Use a new version."
+            exit 1
+          fi
+          gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq '.[] | select(.draft == false and .prerelease == false) | .tag_name' > /tmp/release-tags
+          node --input-type=module <<'JS'
+          import { readFileSync } from 'node:fs';
+          import { compareVersions } from './scripts/release-plan.mjs';
+          for (const tag of readFileSync('/tmp/release-tags', 'utf8').trim().split('\n')) {
+            const match = /^(?:backend-)?v(\d+\.\d+\.\d+)$/.exec(tag);
+            if (match && compareVersions(process.env.VERSION, match[1]) <= 0) {
+              throw new Error('Release versions must increase across full and backend-only releases.');
+            }
+          }
+          JS
+
+  plugin:
+    needs: plan
+    if: needs.plan.outputs.component == 'all'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.3
+      - run: bun test ./tests/plugin ./tests/release ./tests/admin
+      - run: bun scripts/build-plugin.mjs
+        env:
+          DASS_RELEASE_VERSION: ${{ needs.plan.outputs.version }}
+      - name: Package complete custom Equicord bundle
+        env:
+          VERSION: ${{ needs.plan.outputs.version }}
+        run: |
+          mkdir -p artifacts
+          cp docs/releasing.md build/Equicord/dist/DASS-INSTALL.md
+          cp vendor/Equicord/LICENSE build/Equicord/dist/LICENSE-Equicord
+          printf 'Corresponding source: https://github.com/%s/tree/%s\nInitialize pinned submodules and use scripts/build-plugin.mjs.\n' "$GITHUB_REPOSITORY" "$GITHUB_SHA" > build/Equicord/dist/DASS-SOURCE.txt
+          (cd build/Equicord && zip -r "$GITHUB_WORKSPACE/artifacts/dass-equicord-$VERSION.zip" dist)
+          cd artifacts
+          sha256sum *.zip > SHA256SUMS
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: plugin-release
+          path: artifacts/
+          if-no-files-found: error
+
+  publish:
+    needs: [plan, plugin]
+    if: always() && needs.plan.result == 'success' && (needs.plugin.result == 'success' || needs.plugin.result == 'skipped')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        if: needs.plan.outputs.component == 'all'
+        with:
+          name: plugin-release
+          path: artifacts
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: Validate, build and publish backend
+        id: image
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          target: runtime
+          platforms: linux/amd64
+          push: true
+          tags: ${{ needs.plan.outputs.image }}:${{ needs.plan.outputs.version }}
+          build-args: DASS_RELEASE_VERSION=${{ needs.plan.outputs.version }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ needs.plan.outputs.version }}
+          provenance: mode=max
+          sbom: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Create immutable tag and stable GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.plan.outputs.version }}
+          TAG: ${{ needs.plan.outputs.tag }}
+          COMPONENT: ${{ needs.plan.outputs.component }}
+          IMAGE: ${{ needs.plan.outputs.image }}
+          DIGEST: ${{ steps.image.outputs.digest }}
+        run: |
+          mkdir -p artifacts
+          jq -n --arg version "$VERSION" --arg image "$IMAGE" --arg digest "$DIGEST" --arg revision "$GITHUB_SHA" '{version: $version, image: $image, digest: $digest, revision: $revision, platform: "linux/amd64"}' > artifacts/backend-image.json
+          cat > release-notes.md <<EOF
+          Discord Alternative ScreenShare (DASS) $VERSION ($COMPONENT).
+
+          Experimental release. Build success is not runtime compatibility or production-readiness evidence.
+
+          Backend: \`$IMAGE:$VERSION\`
+          Immutable image: \`$IMAGE@$DIGEST\`
+          Image platform: linux/amd64. Backend updates are manual; preserve your configuration and database volume.
+
+          The Equicord ZIP, when present, contains the complete custom build, not a loose plugin.
+          Equibop publishing still requires the matching custom host capture bridge; stock Equibop and Discord Desktop publishing are not established by this artifact.
+
+          Installation and limitations: https://github.com/$GITHUB_REPOSITORY/blob/$GITHUB_SHA/docs/releasing.md
+          EOF
+          gh release create "$TAG" artifacts/* --target "$GITHUB_SHA" --title "DASS $VERSION ($COMPONENT)" --notes-file release-notes.md --latest
+      - name: Advance stable backend aliases after publication
+        env:
+          IMAGE: ${{ needs.plan.outputs.image }}
+          DIGEST: ${{ steps.image.outputs.digest }}
+        run: docker buildx imagetools create --tag "$IMAGE:stable" --tag "$IMAGE:latest" "$IMAGE@$DIGEST"

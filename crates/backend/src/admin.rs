@@ -158,6 +158,7 @@ pub fn router(state: AdminState) -> Router {
         .route("/admin/settings", get(page))
         .route("/admin/administrators", get(page))
         .route("/admin/app.js", get(script))
+        .route("/admin/updates.js", get(update_script))
         .route("/admin/style.css", get(stylesheet))
         .route("/admin/api/users", get(users))
         .route(
@@ -165,6 +166,7 @@ pub fn router(state: AdminState) -> Router {
             axum::routing::put(save_user).delete(remove_user),
         )
         .route("/admin/api/status", get(status))
+        .route("/admin/api/version", get(version))
         .route("/admin/api/settings", get(settings).put(save_settings))
         .route("/admin/api/administrators", get(administrators))
         .route(
@@ -190,6 +192,19 @@ async fn script() -> impl IntoResponse {
         [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
         include_str!("admin/app.js"),
     )
+}
+
+async fn update_script() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        include_str!("admin/updates.js"),
+    )
+}
+
+async fn version() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "version": option_env!("DASS_RELEASE_VERSION").unwrap_or("0.1.0-dev")
+    }))
 }
 
 async fn stylesheet() -> impl IntoResponse {
@@ -259,7 +274,7 @@ async fn authenticate(State(state): State<AdminState>, request: Request, next: N
         ("x-frame-options", "DENY"),
         (
             "content-security-policy",
-            "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
+            "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self' https://api.github.com; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
         ),
     ] {
         response.headers_mut().insert(
@@ -718,9 +733,11 @@ mod tests {
             "/admin/settings",
             "/admin/administrators",
             "/admin/app.js",
+            "/admin/updates.js",
             "/admin/style.css",
             "/admin/api/users",
             "/admin/api/status",
+            "/admin/api/version",
             "/admin/api/settings",
             "/admin/api/administrators",
         ] {
@@ -739,6 +756,22 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         assert!(response.headers().contains_key("content-security-policy"));
+    }
+
+    #[tokio::test]
+    async fn authenticated_version_reports_the_compiled_release() {
+        let (_directory, state, _) = fixture();
+        let response = router(state)
+            .oneshot(request("/admin/api/version", "GET", true, ""))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), 4096).await.unwrap();
+        let document: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            document["version"],
+            option_env!("DASS_RELEASE_VERSION").unwrap_or("0.1.0-dev")
+        );
     }
 
     #[tokio::test]

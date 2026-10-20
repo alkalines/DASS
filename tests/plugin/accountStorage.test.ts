@@ -5,7 +5,8 @@ let secureBackend = "gnome_libsecret";
 let encryptionAvailable = true;
 let sequence = 0;
 const encryptedPayloads = new Map<string, string>();
-mock.module("electron", () => ({ safeStorage: {
+const openedReleaseUrls: string[] = [];
+mock.module("electron", () => ({ shell: { openExternal: async (url: string) => { openedReleaseUrls.push(url); } }, safeStorage: {
     isEncryptionAvailable: () => encryptionAvailable,
     getSelectedStorageBackend: () => secureBackend,
     encryptString: (plaintext: string) => {
@@ -30,6 +31,15 @@ Object.assign(globalThis, { VencordNative: { pluginHelpers: { DASS: {
 } } } });
 const storage = await import("../../plugins/dass/accountStorage");
 const account = { backendUrl: "https://dass.example", username: "alice", password: "a_separate_password" };
+
+test("release links only open the fixed project and validated stable versions", async () => {
+    for (const value of [undefined, null, {}, "https://evil.invalid", "../../evil", "0.1.0-rc.1", "0.1.0?x=y"]) {
+        await native.openPluginRelease(undefined as never, value);
+    }
+    expect(openedReleaseUrls).toEqual([]);
+    await native.openPluginRelease(undefined as never, "0.2.0");
+    expect(openedReleaseUrls).toEqual(["https://github.com/alkalines/DASS/releases/tag/v0.2.0"]);
+});
 
 test("remembered storage persists only native-produced ciphertext and can forget it", async () => {
     await storage.writeRememberedAccount(account);

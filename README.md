@@ -10,6 +10,7 @@ Early-stage project for an Equicord plugin and self-hosted Rust screensharing ba
 - [Docker-only backend development](docs/backend.md)
 - [Public Internet transport, admission model and resource budget](docs/public-transport.md)
 - [Build and install the plugin in Equicord or Equibop](docs/plugin.md)
+- [GitHub Releases, GHCR images and update notices](docs/releasing.md)
 - [Session setup and Share-button DASS workflow](docs/session-workflow.md)
 - [LAN accounts and automatic client UDP admission](docs/lan-accounts.md)
 - [Optional Users / Rooms / Streams control panel](docs/control-panel.md)

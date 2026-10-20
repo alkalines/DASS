@@ -7,6 +7,8 @@ WORKDIR /workspace
 RUN mkdir -p /opt/cargo /workspace/target && chmod 1777 /opt/cargo /workspace/target
 
 FROM tooling AS builder
+ARG DASS_RELEASE_VERSION=0.1.0-dev
+ENV DASS_RELEASE_VERSION=${DASS_RELEASE_VERSION}
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 COPY tests/plugin/fixtures/scaffold-capabilities.json ./tests/plugin/fixtures/scaffold-capabilities.json

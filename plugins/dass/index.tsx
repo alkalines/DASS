@@ -35,6 +35,7 @@ import { stopSpikeTest } from "./spikeTest";
 import { streamQualityLabel, streamTrackQuality } from "./streamPresentation";
 import { startStreamSounds } from "./streamSounds";
 import { StreamSidebarBody } from "./streamUi";
+import { startUpdateNotifications } from "./updateNotifications";
 import { WatchController } from "./watching";
 
 const currentCall = () => SelectedChannelStore.getVoiceChannelId();
@@ -53,6 +54,7 @@ let unsubscribePublishStatus: (() => void) | undefined;
 let unsubscribeAccountStatus: (() => void) | undefined;
 let unsubscribeDirectoryStatus: (() => void) | undefined;
 let stopStreamSounds: (() => void) | undefined;
+let stopUpdateNotifications: (() => void) | undefined;
 let gridWatchEpoch = 0;
 
 function stopGridWatching() {
@@ -117,6 +119,15 @@ function AccountConfiguration() {
 }
 
 const settings = definePluginSettings({
+    checkUpdates: {
+        type: OptionType.BOOLEAN,
+        description: "Check this project's public GitHub Releases on startup and offer a manual download. No automatic installation.",
+        default: true,
+        onChange(enabled: boolean) {
+            stopUpdateNotifications?.();
+            stopUpdateNotifications = pluginActive && enabled ? startUpdateNotifications() : undefined;
+        }
+    },
     defaultDass: {
         type: OptionType.BOOLEAN,
         description: "Prefer DASS in the transport chooser. Sharing always requires an explicit Discord or DASS choice.",
@@ -151,6 +162,7 @@ const settings = definePluginSettings({
 function startRuntime() {
     if (pluginActive) return;
     pluginActive = true;
+    if (settings.store.checkUpdates) stopUpdateNotifications = startUpdateNotifications();
     const buildWarning = getDiscordBuildWarning(Number(window.GLOBAL_ENV.BUILD_NUMBER));
     if (buildWarning && !buildWarningShown) {
         buildWarningShown = true;
@@ -191,6 +203,8 @@ function startRuntime() {
 function stopRuntime() {
     logDiagnostic("plugin stopped");
     pluginActive = false;
+    stopUpdateNotifications?.();
+    stopUpdateNotifications = undefined;
     stopStreamSounds?.();
     stopStreamSounds = undefined;
     unsubscribeWatchStatus?.();

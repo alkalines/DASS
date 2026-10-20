@@ -4,7 +4,38 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
-import { type IpcMainInvokeEvent, safeStorage } from "electron";
+import { type IpcMainInvokeEvent, safeStorage, shell } from "electron";
+
+import { DASS_VERSION } from "./releaseInfo";
+import { fetchPluginUpdate, pluginReleaseUrl } from "./releaseUpdates";
+
+let updateRequest: AbortController | undefined;
+
+export async function getPluginUpdate(_: IpcMainInvokeEvent): Promise<string | undefined> {
+    updateRequest?.abort();
+    const request = new AbortController();
+    updateRequest = request;
+    const timeout = setTimeout(() => request.abort(), 10_000);
+    try {
+        return await fetchPluginUpdate(DASS_VERSION, request.signal);
+    } catch {
+        return undefined;
+    } finally {
+        clearTimeout(timeout);
+        if (updateRequest === request) updateRequest = undefined;
+    }
+}
+
+export function cancelPluginUpdate(_: IpcMainInvokeEvent): void {
+    updateRequest?.abort();
+    updateRequest = undefined;
+}
+
+export async function openPluginRelease(_: IpcMainInvokeEvent, version: unknown): Promise<void> {
+    if (typeof version !== "string" || version.length > 64) return;
+    const url = pluginReleaseUrl(version);
+    if (url) await shell.openExternal(url).catch(() => {});
+}
 
 const VERSION = 2;
 const MAX_BACKEND_ORIGIN_LENGTH = 320;

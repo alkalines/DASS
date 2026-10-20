@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { adaptEquicordManifest } from "./equicordManifest.mjs";
+import { parseVersion } from "./release-plan.mjs";
 
 const EQUICORD_REVISION = "e0e85c8d4f6dc73aac9368cf3f4b2200eac4d4b4";
 const rootDirectory = fileURLToPath(new URL("../", import.meta.url));
@@ -80,6 +81,10 @@ try {
         .replaceAll('"../../clients/spike/diagnostics"', '"./diagnostics"')
         .replaceAll('"../../clients/spike/e2ee"', '"./e2ee"')
         .replaceAll('"../../crates/protocol/generated/signaling"', '"./protocolSignaling"')]));
+    if (process.env.DASS_RELEASE_VERSION) {
+        parseVersion(process.env.DASS_RELEASE_VERSION);
+        sources.set("releaseInfo.ts", sources.get("releaseInfo.ts").replace('"0.1.0-dev"', JSON.stringify(process.env.DASS_RELEASE_VERSION)));
+    }
     const clientSources = [
         ["diagnostics.ts", "clients/spike/diagnostics.ts", [
             ['/** Callers', 'import { Logger } from "@utils/Logger";\n\nconst logger = new Logger("DASS");\n\n/** Callers'],
