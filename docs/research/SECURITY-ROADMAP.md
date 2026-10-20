@@ -49,6 +49,11 @@ This order describes implementation, not permission to deploy. Section 10 applie
 to every assigned task. Related work can be grouped into one assignment; do not
 spawn agents from this document without explicit authorization.
 
+For order F's repeatable validation, release evidence requirements and maintenance/
+incident procedures, use [Security release gates](../security-release.md) and the
+repository [security policy](../../SECURITY.md). Those procedures do not close the
+pilot/public-hosting gates or substitute for independent review.
+
 Use one shared flow across backend, protocol and client:
 
 ```text

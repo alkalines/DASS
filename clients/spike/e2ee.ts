@@ -149,6 +149,12 @@ export function defineMediaFrameCipher(
 
         /** Encrypt one encoded frame under `epoch`/`counter`; AAD binds the header. */
         async encrypt(epoch: number, counter: bigint, frame: ArrayBuffer): Promise<ArrayBuffer> {
+            // DataView silently truncates overflowing integers. Reject them
+            // before serialization so distinct inputs cannot reuse a nonce.
+            if (!Number.isInteger(epoch) || epoch < 0 || epoch > 0xFFFFFFFF
+                || counter < 0n || counter > 0xFFFFFFFFFFFFFFFFn) {
+                throw new Error("Invalid DASS frame epoch or counter.");
+            }
             if (frame.byteLength > constants.maxFrameBytes) throw new Error("DASS frame exceeds the E2EE bound.");
             const header = new Uint8Array(constants.headerBytes);
             const view = new DataView(header.buffer);
@@ -190,13 +196,17 @@ export function defineReplayWindow(constants: FrameConstants) {
     class FrameReplayWindow {
         private highest = -1n;
         private seen = 0n;
+        private readonly mask = (1n << BigInt(constants.replayWindowBits)) - 1n;
 
         admit(counter: bigint): boolean {
-            if (counter < 0n) return false;
+            if (counter < 0n || counter > 0xFFFFFFFFFFFFFFFFn) return false;
             if (counter <= this.highest - BigInt(constants.replayWindowBits)) return false;
             const delta = this.highest - counter;
             if (delta < 0n) {
-                this.seen = (this.seen << (-delta)) | 1n;
+                // Never shift by an attacker-controlled 64-bit counter or
+                // retain history outside the fixed-size replay window.
+                this.seen = -delta >= BigInt(constants.replayWindowBits)
+                    ? 1n : ((this.seen << (-delta)) | 1n) & this.mask;
                 this.highest = counter;
                 return true;
             }

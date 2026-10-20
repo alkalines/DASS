@@ -4,6 +4,8 @@ Early-stage project for an Equicord plugin and self-hosted Rust screensharing ba
 
 - [Research and implementation plan](docs/research/PLAN.md)
 - [Security roadmap and acceptance gates](docs/research/SECURITY-ROADMAP.md)
+- [Pilot/public release gates, provenance and incident response](docs/security-release.md)
+- [Private vulnerability reporting and security policy](SECURITY.md)
 - [Contributor and agent instructions](AGENTS.md)
 - [Docker-only backend development](docs/backend.md)
 - [Public Internet transport, admission model and resource budget](docs/public-transport.md)
@@ -21,7 +23,9 @@ one-publisher/one-viewer Rust transport has user-reported LAN video evidence.
 The authenticated directory and DASS-owned viewer now have user-reported discovery
 and audio playback evidence. Audio consent and backend checks are also
 user-confirmed; broader runtime acceptance remains pending. This is not a production SFU;
-E2EE is unavailable and readiness remains 503. Native Discord watching is separate.
+The new E2EE client code uses an unreviewed project-specific format: Internet
+pilot/public hosting and server-untrusted confidentiality claims remain blocked.
+Readiness remains 503. Native Discord watching is separate.
 Supported build-634304 Share buttons now connect to the DASS publisher by default,
 with reusable in-memory session access. This new wiring still needs live-client
 acceptance; it does not intercept every Discord share entry point.
@@ -30,7 +34,8 @@ and authenticate on plugin load. LAN media endpoints are then admitted per RTC
 session using the observed WSS peer IP, without manual client-port updates.
 These new account/admission paths still require live-client/backend acceptance.
 There is no separate DASS call button or sharing modal. Call context is derived
-from the current channel; backend grants must authorize it. Diagnostics and the
+from the current channel; rooms are informational and publisher approval controls
+stream admission. Diagnostics and the
 temporary viewer are hidden behind Advanced options. Native stream tiles and
 watch/player integration remain incomplete; this is not yet a drop-in replacement.
 
@@ -46,7 +51,7 @@ then loaded through the private `.secrets/backend.env` file. See the exact
 [account setup commands](docs/lan-accounts.md#generate-the-hash-without-exposing-the-password).
 No `.env` or secrets means loopback-only discovery, not a working media server.
 The optional [control panel](docs/control-panel.md) uses separate HTTP Basic admin
-credentials and persists user/room edits in a Docker volume. With it enabled,
+credentials and persists account edits in a Docker volume. With it enabled,
 environment users are only the initial seed; the persisted policy takes precedence.
 
 To build Equicord with DASS, run `bun scripts/build-plugin.mjs` from this repository

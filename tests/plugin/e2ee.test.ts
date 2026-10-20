@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
     E2EE_FRAME_OVERHEAD_BYTES,
     E2EE_KEY_BYTES,
+    E2EE_MAX_FRAME_BYTES,
     MediaFrameCipher,
     ReplayWindow,
     evaluateIdentity,
@@ -19,6 +20,21 @@ import {
 const FRAME = new TextEncoder().encode("encoded video frame payload").buffer;
 
 describe("media frame cipher", () => {
+    test("rejects integer truncation and oversized frames before encryption", async () => {
+        const cipher = await MediaFrameCipher.create(generateEpochKey());
+        for (const epoch of [-1, 0x100000000, 1.5, NaN, Infinity]) {
+            await expect(cipher.encrypt(epoch, 0n, FRAME)).rejects.toThrow("Invalid DASS frame");
+        }
+        for (const counter of [-1n, 0x10000000000000000n]) {
+            await expect(cipher.encrypt(1, counter, FRAME)).rejects.toThrow("Invalid DASS frame");
+        }
+        await expect(cipher.encrypt(1, 0n, new ArrayBuffer(E2EE_MAX_FRAME_BYTES + 1))).rejects.toThrow();
+        await expect(cipher.decrypt(new ArrayBuffer(E2EE_MAX_FRAME_BYTES + E2EE_FRAME_OVERHEAD_BYTES + 1))).rejects.toThrow();
+        for (const length of [0, 16, 31, 33]) {
+            await expect(MediaFrameCipher.create(new Uint8Array(length))).rejects.toThrow();
+        }
+    });
+
     test("encrypts and decrypts frames with a 12-byte header and 16-byte tag", async () => {
         const cipher = await MediaFrameCipher.create(generateEpochKey());
         const encrypted = new Uint8Array(await cipher.encrypt(7, 3n, FRAME));
@@ -81,10 +97,28 @@ describe("transform worker scope", () => {
         const window = new worker.ReplayWindow();
         expect(window.admit(3n)).toBe(true);
         expect(window.admit(3n)).toBe(false);
+        expect(window.admit(0xFFFFFFFFFFFFFFFFn)).toBe(true);
+        expect(window.admit(0xFFFFFFFFFFFFFFFFn)).toBe(false);
+        await expect(cipher.encrypt(0x100000000, 9n, FRAME)).rejects.toThrow();
     });
 });
 
 describe("replay window", () => {
+    test("bounds history after sustained traffic and a maximum counter jump", () => {
+        const window = new ReplayWindow();
+        for (let counter = 0n; counter < 4096n; counter++) expect(window.admit(counter)).toBe(true);
+        // Inspect retained state as well as behavior: merely rejecting old
+        // counters did not prevent the previous bitmap from growing forever.
+        const state = window as unknown as { seen: bigint; };
+        expect(state.seen.toString(2).length).toBeLessThanOrEqual(256);
+        expect(window.admit(0xFFFFFFFFFFFFFFFFn)).toBe(true);
+        expect(state.seen).toBe(1n);
+        expect(window.admit(0xFFFFFFFFFFFFFFFEn)).toBe(true);
+        expect(window.admit(0xFFFFFFFFFFFFFFFEn)).toBe(false);
+        expect(window.admit(0x10000000000000000n)).toBe(false);
+        expect(window.admit(-1n)).toBe(false);
+    });
+
     test("admits each counter once within the window and rejects repeats", () => {
         const window = new ReplayWindow();
         expect(window.admit(5n)).toBe(true);
