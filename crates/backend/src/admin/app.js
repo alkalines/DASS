@@ -281,9 +281,116 @@ async function loadStreams() {
     content.append(recentEvents(status?.metrics));
 }
 
-document.querySelector("#title").textContent = { users: "Users", rooms: "Rooms", streams: "Streams" }[page];
+async function loadSettings() {
+    const configuration = await api("settings");
+    content.replaceChildren();
+    content.append(node("p", configuration.restart_required
+        ? "Saved settings differ from the running configuration. Restart the backend to apply them."
+        : "Settings are stored in SQLite. Changes require a backend restart.", "hint"));
+    content.append(node("p", "Anonymous access is disabled. Login handshakes are separately bounded. DASS_ADMIN_DATA_FILE records the legacy import source only; it no longer stores live policy.", "hint"));
+    const form = node("form");
+    const inputs = new Map();
+    const readOnly = new Set(configuration.read_only);
+    for (const [key, value] of Object.entries(configuration.saved)) {
+        const input = field(form, key, value);
+        input.maxLength = 4096;
+        input.readOnly = readOnly.has(key);
+        inputs.set(key, input);
+        if (configuration.active[key] !== value) form.append(node("p", `Running value: ${configuration.active[key]}`, "hint"));
+    }
+    const save = node("button", "Save settings (restart required)");
+    save.type = "submit";
+    form.append(save);
+    form.addEventListener("submit", event => {
+        event.preventDefault();
+        return run(async () => {
+            await api("settings", "PUT", Object.fromEntries([...inputs].map(([key, input]) => [key, input.value])));
+            message.textContent = "Settings saved to SQLite. Restart the backend to apply changes.";
+            await loadSettings();
+        });
+    });
+    content.append(form);
+}
+
+function editAdministrator(administrator, currentUsername, required = false) {
+    document.querySelector("#administrator-editor")?.remove();
+    const form = node("form");
+    form.id = "administrator-editor";
+    form.noValidate = true;
+    form.append(node("h2", required ? "Change the initial administrator password" : administrator ? `Reset password for ${administrator.username}` : "Add administrator"));
+    const username = field(form, "Administrator username", administrator?.username);
+    username.required = true;
+    username.maxLength = 64;
+    username.readOnly = Boolean(administrator);
+    const password = field(form, "New password (12–512 UTF-8 bytes)", "", "password");
+    password.autocomplete = "new-password";
+    const confirmation = field(form, "Confirm new password", "", "password");
+    confirmation.autocomplete = "new-password";
+    const save = node("button", "Save administrator");
+    save.type = "submit";
+    form.append(save);
+    if (!required) form.append(button("Cancel", () => form.remove()));
+    form.addEventListener("submit", event => {
+        event.preventDefault();
+        return run(async () => {
+            if (!/^[A-Za-z0-9_-]{1,64}$/.test(username.value)) invalidField(username, "Username must contain 1–64 ASCII letters, digits, underscores or hyphens.");
+            const bytes = new TextEncoder().encode(password.value).length;
+            if (bytes < 12 || bytes > 512) invalidField(password, "Password must contain 12–512 UTF-8 bytes.");
+            if (/\p{Cc}/u.test(password.value)) invalidField(password, "Password must not contain control characters.");
+            if (password.value !== confirmation.value) invalidField(confirmation, "Passwords do not match.");
+            const value = password.value;
+            password.value = confirmation.value = "";
+            await api(`administrators/${encodeURIComponent(username.value)}`, "PUT", { password: value });
+            form.remove();
+            if (username.value === currentUsername) {
+                content.replaceChildren(node("p", "Your password was changed. Refresh and sign in with the new password. The old password is no longer accepted."));
+                message.textContent = "Administrator saved. Sign in again with your new password.";
+            } else {
+                await loadAdministrators();
+                message.textContent = "Administrator saved to SQLite. Changes apply immediately.";
+            }
+        });
+    });
+    content.append(form);
+    (administrator ? password : username).focus();
+}
+
+async function loadAdministrators() {
+    const result = await api("administrators");
+    content.replaceChildren();
+    content.append(node("p", "Administrator credentials are stored in SQLite and are separate from DASS client accounts. All administrators have full panel access. Changes apply immediately; the last administrator cannot be removed.", "hint"));
+    if (result.must_change_password) {
+        content.append(node("p", "The default admin/admin login is for initial setup only. Choose a strong password before accessing any other panel function.", "hint"));
+        editAdministrator({ username: result.current_username }, result.current_username, true);
+        return;
+    }
+    if (result.administrators.length < 32) content.append(button("Add administrator", () => editAdministrator(null, result.current_username)));
+    const body = table(["Administrator", "State", "Actions"]);
+    for (const administrator of result.administrators) {
+        const row = node("tr");
+        row.append(node("td", administrator.username + (administrator.username === result.current_username ? " (you)" : "")));
+        row.append(node("td", administrator.must_change_password ? "Initial password must be changed" : "Active"));
+        const actions = node("td");
+        actions.append(button("Reset password", () => editAdministrator(administrator, result.current_username)));
+        if (result.administrators.length > 1) actions.append(button("Remove", async () => {
+            if (!confirm(`Remove administrator ${administrator.username}? Their credentials will stop working immediately.`)) return;
+            await api(`administrators/${encodeURIComponent(administrator.username)}`, "DELETE", {});
+            if (administrator.username === result.current_username) {
+                content.replaceChildren(node("p", "Your administrator account was removed. Sign in as another administrator to continue."));
+                message.textContent = "Administrator removed.";
+            } else {
+                await loadAdministrators();
+                message.textContent = "Administrator removed.";
+            }
+        }));
+        row.append(actions);
+        body.append(row);
+    }
+}
+
+document.querySelector("#title").textContent = { users: "Users", rooms: "Rooms", streams: "Streams", settings: "Settings", administrators: "Administrators" }[page];
 document.querySelector(`a[href="/admin/${page}"]`)?.setAttribute("aria-current", "page");
-const load = { users: loadUsers, rooms: loadRooms, streams: loadStreams }[page];
+const load = { users: loadUsers, rooms: loadRooms, streams: loadStreams, settings: loadSettings, administrators: loadAdministrators }[page];
 const refresh = button("Refresh", load);
 document.querySelector("main").insertBefore(refresh, content);
 run(load);

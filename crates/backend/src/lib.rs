@@ -2,6 +2,7 @@ pub mod admin;
 pub mod auth;
 pub mod certificate;
 pub mod config;
+pub mod database;
 pub mod forwarding;
 pub mod listener;
 pub mod metrics;

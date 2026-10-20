@@ -195,6 +195,13 @@ per-IP denial-of-service protection.
 
 ## Configuration
 
+**SQLite migration:** accounts, administrators and the resource/LAN settings
+below now live in SQLite. Environment values seed them only once; subsequent
+edits belong in `/admin/settings` and require restart. See
+[SQLite migration and provisioning](sqlite.md) before upgrading. TLS/network
+bootstrap inputs remain environment-based. Legacy account-generation instructions
+describe import seeds, not live storage.
+
 `compose.yaml` is the only Compose file. `.env.example` documents the opt-in LAN
 settings: copy it to `.env` and edit the two IPs for your host. Never select a
 non-loopback `DASS_BIND_IP` while `DASS_INSECURE_LOCAL_DEV=true`. TLS/authentication
@@ -202,20 +209,23 @@ variables belong in `.secrets/backend.env`, loaded without interpolation (raw
 format). Only `.secrets/runtime` is mounted read-only into the backend as
 `/run/dass`; keep password source files out of it. See
 [LAN account setup](lan-accounts.md) for user generation, permissions and startup.
-Without those private files, the default remains local discovery only.
+Without those private files, the default is local setup/discovery without media;
+new account-mode databases also provide the mandatory administrator setup page.
 
 | Variable | Default | Behavior |
 | --- | --- | --- |
-| `DASS_INSECURE_LOCAL_DEV` | unset | Exactly `true` permits isolated loopback/container plaintext; otherwise TLS files and invite policy are required |
+| `DASS_INSECURE_LOCAL_DEV` | unset | Exactly `true` permits isolated loopback/container plaintext; otherwise TLS files are required; no accounts means no client access |
 | `DASS_TLS_CERT_FILE`, `DASS_TLS_KEY_FILE` | unset | Configure both for TLS 1.3; never combine with insecure mode |
-| `DASS_INVITE_FILE` | unset | Enables legacy invite login; TLS requires this or `DASS_USERS`, never both |
-| `DASS_USERS` | unset | Bounded hashed-account JSON; see [LAN accounts](lan-accounts.md) |
+| `DASS_DATABASE_FILE` | `/var/lib/dass/dass.sqlite3` | Persistent SQLite database and journal directory must be writable |
+| `DASS_INVITE_FILE` | unset | One-time legacy invitation import; never combine with account policy |
+| `DASS_USERS` | unset | One-time bounded account seed; existing legacy policy takes precedence |
 | `DASS_LISTEN_ADDR` | `127.0.0.1:8080` | Literal IP/port; Compose sets `0.0.0.0:8080` for container networking |
 | `DASS_MAX_CONCURRENT_REQUESTS` | 128 | 1–1024; immediately reject excess active HTTP handlers with 503 |
-| `DASS_MAX_CONTROL_MESSAGE_BYTES` | 16384 | Discovery-only: 1–65536; with invites: minimum 1024, clamped to protocol maximum 16384; cap HTTP bodies/WS messages |
+| `DASS_MAX_CONTROL_MESSAGE_BYTES` | 16384 | 1024–16384; caps HTTP bodies/WS messages |
 | `DASS_TRANSPORT_MODE` | `local` | `local` is the LAN test environment; `public` is the Internet target and refuses plaintext and LAN allowlists |
 | `DASS_MAX_SESSIONS` | 128 | 1–4096 authenticated signaling sessions |
-| `DASS_MAX_UNAUTHENTICATED_SESSIONS` | 16 | 1–256 signaling sessions before login |
+| `DASS_MAX_UNAUTHENTICATED_SESSIONS` | 0 | Read-only; anonymous access prohibited |
+| `DASS_MAX_LOGIN_HANDSHAKES` | 16 | 1–256 bounded short-lived login handshakes |
 | `DASS_MAX_TCP_CONNECTIONS` | 128 | 1–4096 accepted TCP connections, including handshakes |
 | `DASS_MAX_PASSWORD_VERIFICATIONS` | 2 | 1–16 concurrent password hashes |
 | `DASS_RTC_SPIKE` | unset | Enables the media transport; requires TLS signaling |

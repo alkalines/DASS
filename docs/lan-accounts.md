@@ -2,7 +2,10 @@
 
 Discord Alternative ScreenShare (DASS) supports separate per-person usernames
 and passwords for its experimental Rust transport. The backend stores password
-**hashes**, never the account passwords, in a bounded JSON environment variable.
+**hashes**, never the account passwords, in SQLite. Existing bounded JSON
+environment configuration is now a one-time import source only; see
+[SQLite migration and direct provisioning](sqlite.md). The older hash-generation
+commands below remain optional import tooling, not live configuration edits.
 This replaces repeatedly handing around invite strings or editing client UDP
 ports. It remains LAN-only experimental functionality: one publisher and one
 viewer backend-wide, TLS/DTLS-SRTP, no E2EE, and readiness still returns 503.

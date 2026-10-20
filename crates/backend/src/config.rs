@@ -5,8 +5,8 @@ use dass_protocol::ControlLimits;
 use crate::auth::{InviteStore, MAX_USERS_FILE_BYTES};
 use crate::transport::TransportMode;
 
-/// The default number of signaling sessions that have not authenticated yet.
-pub const DEFAULT_MAX_UNAUTHENTICATED_SESSIONS: usize = 16;
+/// Bounded, short-lived login handshakes; anonymous service access is never allowed.
+pub const DEFAULT_MAX_LOGIN_HANDSHAKES: usize = 16;
 
 /// Bounded service resources. Every queue, socket and worker pool has an
 /// explicit limit so one account or one source cannot monopolize the service.
@@ -15,7 +15,7 @@ pub struct ResourceLimits {
     /// Authenticated signaling sessions.
     pub max_sessions: usize,
     /// Signaling sessions that have not authenticated yet.
-    pub max_unauthenticated_sessions: usize,
+    pub max_login_handshakes: usize,
     /// Accepted TCP connections, including the ones still handshaking.
     pub max_tcp_connections: usize,
     /// Concurrent password verifications.
@@ -26,7 +26,7 @@ impl Default for ResourceLimits {
     fn default() -> Self {
         Self {
             max_sessions: 128,
-            max_unauthenticated_sessions: DEFAULT_MAX_UNAUTHENTICATED_SESSIONS,
+            max_login_handshakes: DEFAULT_MAX_LOGIN_HANDSHAKES,
             max_tcp_connections: 128,
             max_password_verifications: 2,
         }
@@ -78,7 +78,10 @@ impl Config {
         Self::from_lookup(|name| std::env::var(name).ok())
     }
 
-    fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Result<Self, &'static str> {
+    pub fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Result<Self, &'static str> {
+        if lookup("DASS_MAX_UNAUTHENTICATED_SESSIONS").is_some_and(|value| value != "0") {
+            return Err("anonymous access is disabled; unauthenticated sessions must remain 0");
+        }
         let insecure = match lookup("DASS_INSECURE_LOCAL_DEV").as_deref() {
             None | Some("false") => false,
             Some("true") => true,
@@ -168,8 +171,8 @@ impl Config {
             },
             resources: ResourceLimits {
                 max_sessions: bounded_integer(lookup("DASS_MAX_SESSIONS"), 128, 4096)?,
-                max_unauthenticated_sessions: bounded_integer(
-                    lookup("DASS_MAX_UNAUTHENTICATED_SESSIONS"),
+                max_login_handshakes: bounded_integer(
+                    lookup("DASS_MAX_LOGIN_HANDSHAKES"),
                     16,
                     256,
                 )?,
@@ -330,14 +333,15 @@ mod tests {
         let resources = config_with(&[
             ("DASS_INSECURE_LOCAL_DEV", "true"),
             ("DASS_MAX_SESSIONS", "32"),
-            ("DASS_MAX_UNAUTHENTICATED_SESSIONS", "4"),
+            ("DASS_MAX_UNAUTHENTICATED_SESSIONS", "0"),
+            ("DASS_MAX_LOGIN_HANDSHAKES", "4"),
             ("DASS_MAX_TCP_CONNECTIONS", "64"),
             ("DASS_MAX_PASSWORD_VERIFICATIONS", "8"),
         ])
         .unwrap()
         .resources;
         assert_eq!(resources.max_sessions, 32);
-        assert_eq!(resources.max_unauthenticated_sessions, 4);
+        assert_eq!(resources.max_login_handshakes, 4);
         assert_eq!(resources.max_tcp_connections, 64);
         assert_eq!(resources.max_password_verifications, 8);
 
@@ -345,6 +349,8 @@ mod tests {
             ("DASS_MAX_SESSIONS", "0"),
             ("DASS_MAX_SESSIONS", "4097"),
             ("DASS_MAX_UNAUTHENTICATED_SESSIONS", "257"),
+            ("DASS_MAX_LOGIN_HANDSHAKES", "0"),
+            ("DASS_MAX_LOGIN_HANDSHAKES", "257"),
             ("DASS_MAX_TCP_CONNECTIONS", "-1"),
             ("DASS_MAX_PASSWORD_VERIFICATIONS", "17"),
         ] {

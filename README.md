@@ -45,14 +45,16 @@ Bun is used for TypeScript plugin tests and Equibop build tooling, not the serve
 Client tooling can run locally; only backend/Rust tooling is Docker-only.
 
 There is one Compose file: `compose.yaml`. For LAN settings, copy `.env.example`
-to `.env` and set your server IP. **Users are configured in
-`.secrets/accounts/users.json`**, generated with the Docker `create-user` command,
-then loaded through the private `.secrets/backend.env` file. See the exact
-[account setup commands](docs/lan-accounts.md#generate-the-hash-without-exposing-the-password).
-No `.env` or secrets means loopback-only discovery, not a working media server.
+to `.env` and set your server IP. **Accounts, administrators and resource/LAN
+settings are stored in SQLite**. Existing JSON/environment configuration is
+imported once; see [migration and provisioning](docs/sqlite.md).
+No `.env` or secrets means loopback-only setup/discovery, not a working media server.
 The optional [control panel](docs/control-panel.md) uses separate HTTP Basic admin
-credentials and persists account edits in a Docker volume. With it enabled,
-environment users are only the initial seed; the persisted policy takes precedence.
+credentials and persists account edits in a Docker volume. Its Settings page
+edits database configuration; settings changes require a backend restart.
+New account-mode databases without imported administrators start with
+`admin` / `admin`; keep setup private and complete the mandatory password change.
+The Administrators page manages those separate credentials directly in SQLite.
 
 To build Equicord with DASS, run `bun scripts/build-plugin.mjs` from this repository
 root (Bun 1.4.2, Node >=22 and Git required). In Equibop's Developer Options, select

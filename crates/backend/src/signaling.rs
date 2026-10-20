@@ -418,7 +418,7 @@ impl SignalingState {
             invites,
             maximum_message_bytes: MAX_MESSAGE_BYTES,
             connections: Arc::new(Semaphore::new(resources.max_sessions)),
-            unauthenticated: Arc::new(Semaphore::new(resources.max_unauthenticated_sessions)),
+            unauthenticated: Arc::new(Semaphore::new(resources.max_login_handshakes)),
             verifications: Arc::new(Semaphore::new(resources.max_password_verifications)),
             metrics: Arc::new(crate::metrics::Metrics::new()),
             active_accounts: Arc::new(Mutex::new(HashSet::new())),
@@ -436,7 +436,7 @@ impl SignalingState {
     /// bounded, so one account or one source cannot monopolize the service.
     pub fn with_limits(mut self, resources: crate::config::ResourceLimits) -> Self {
         self.connections = Arc::new(Semaphore::new(resources.max_sessions));
-        self.unauthenticated = Arc::new(Semaphore::new(resources.max_unauthenticated_sessions));
+        self.unauthenticated = Arc::new(Semaphore::new(resources.max_login_handshakes));
         self.verifications = Arc::new(Semaphore::new(resources.max_password_verifications));
         self
     }
@@ -3088,7 +3088,7 @@ mod network_tests {
     use crate::{
         app_with_signaling,
         auth::{InviteFile, create_invite_with_display_name},
-        config::{Config, DEFAULT_MAX_UNAUTHENTICATED_SESSIONS, TlsFiles},
+        config::{Config, DEFAULT_MAX_LOGIN_HANDSHAKES, TlsFiles},
         listener::{BoundedListener, tls_acceptor_from_der},
     };
     use dass_protocol::ControlLimits;
@@ -3348,7 +3348,7 @@ mod network_tests {
         let _occupied = server
             .state
             .unauthenticated
-            .acquire_many(DEFAULT_MAX_UNAUTHENTICATED_SESSIONS as u32)
+            .acquire_many(DEFAULT_MAX_LOGIN_HANDSHAKES as u32)
             .await
             .unwrap();
         let result = connect(&server, "https://discord.com", "").await;
@@ -3423,7 +3423,7 @@ mod network_tests {
         assert!(matches!(frame, ClientFrame::Close(_)));
         for _ in 0..100 {
             if server.state.unauthenticated.available_permits()
-                == DEFAULT_MAX_UNAUTHENTICATED_SESSIONS
+                == DEFAULT_MAX_LOGIN_HANDSHAKES
             {
                 return;
             }

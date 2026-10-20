@@ -3,69 +3,45 @@
 
 use crate::{
     auth::{
-        InviteStore, MAX_USERS, MAX_USERS_FILE_BYTES, User, UsersFile, create_user,
+        InviteStore, MAX_USERS, User, UsersFile, create_user,
         valid_identifier, validate_user_fields, validated_hash,
     },
     signaling::SignalingState,
+    database::{Database, Settings},
 };
 use argon2::{Argon2, PasswordVerifier};
 use axum::{
     Json, Router,
-    extract::{Path, Request, State},
+    extract::{Extension, Path, Request, State},
     http::{StatusCode, header},
     middleware::{self, Next},
-    response::{Html, IntoResponse, Response},
+    response::{Html, IntoResponse, Redirect, Response},
     routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
-    fs::{File, OpenOptions},
-    io::{Read, Write},
-    os::unix::fs::OpenOptionsExt,
     path::PathBuf,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 use tokio::sync::{Semaphore, watch};
 
-const MAX_DOCUMENT_BYTES: usize = MAX_USERS_FILE_BYTES + 32_768;
-
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AdminDocument {
     version: u16,
-    users: Vec<User>,
+    pub(crate) users: Vec<User>,
 }
 
 impl AdminDocument {
+    pub fn empty() -> Self { Self::from_users(Vec::new()) }
+
+    pub fn from_users(users: Vec<User>) -> Self { Self { version: 2, users } }
+
+    /// Initialize/open SQLite; the seed is consulted only for a new database.
     pub fn load_or_seed(path: &std::path::Path, seed: &str) -> Result<Self, &'static str> {
-        let document = match File::open(path) {
-            Ok(file) => {
-                let mut bytes = Vec::new();
-                file.take((MAX_DOCUMENT_BYTES + 1) as u64)
-                    .read_to_end(&mut bytes)
-                    .map_err(|_| "cannot read panel data")?;
-                if bytes.len() > MAX_DOCUMENT_BYTES {
-                    return Err("panel data too large");
-                }
-                serde_json::from_slice(&bytes).map_err(|_| "invalid panel data")?
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                let file: UsersFile =
-                    serde_json::from_str(seed).map_err(|_| "invalid account seed")?;
-                let document = Self {
-                    version: file.version,
-                    users: file.users,
-                };
-                document.store()?;
-                document.save(path)?;
-                document
-            }
-            Err(_) => return Err("cannot open panel data"),
-        };
-        document.store()?;
-        Ok(document)
+        Database::open(path.to_path_buf(), |key| (key == "DASS_USERS").then(|| seed.to_owned()))?.document()
     }
 
     pub fn store(&self) -> Result<InviteStore, &'static str> {
@@ -83,31 +59,7 @@ impl AdminDocument {
     }
 
     fn save(&self, path: &std::path::Path) -> Result<(), &'static str> {
-        let bytes = serde_json::to_vec(self).map_err(|_| "cannot encode panel data")?;
-        if bytes.len() > MAX_DOCUMENT_BYTES {
-            return Err("panel data too large");
-        }
-        let parent = path.parent().ok_or("invalid panel data path")?;
-        let temporary = parent.join(format!(".policy-{}", crate::auth::random_identifier()?));
-        let result = (|| {
-            let mut file = OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .mode(0o600)
-                .open(&temporary)
-                .map_err(|_| "cannot create panel data")?;
-            file.write_all(&bytes)
-                .and_then(|_| file.sync_all())
-                .map_err(|_| "cannot write panel data")?;
-            std::fs::rename(&temporary, path).map_err(|_| "cannot replace panel data")?;
-            File::open(parent)
-                .and_then(|directory| directory.sync_all())
-                .map_err(|_| "cannot sync panel data")
-        })();
-        if result.is_err() {
-            let _ = std::fs::remove_file(temporary);
-        }
-        result
+        Database::existing(path.to_path_buf())?.save_document(self)
     }
 }
 
@@ -132,31 +84,34 @@ pub fn parse_credentials(value: &str) -> Result<HashMap<String, String>, &'stati
 
 #[derive(Clone)]
 pub struct AdminState {
-    credentials: Arc<HashMap<String, String>>,
     document: Arc<Mutex<AdminDocument>>,
     path: PathBuf,
     sender: watch::Sender<Arc<InviteStore>>,
     signaling: SignalingState,
     workers: Arc<Semaphore>,
     rate: Arc<Mutex<(Instant, usize)>>,
+    running_settings: Option<Settings>,
 }
 
 impl AdminState {
     pub fn new(
-        credentials: HashMap<String, String>,
         document: AdminDocument,
         path: PathBuf,
         sender: watch::Sender<Arc<InviteStore>>,
         signaling: SignalingState,
     ) -> Self {
+        let running_settings = Database::existing(path.clone()).and_then(|db| db.settings()).ok();
+        let password_workers = running_settings.as_ref()
+            .and_then(|settings| settings.0.get("DASS_MAX_PASSWORD_VERIFICATIONS"))
+            .and_then(|value| value.parse().ok()).unwrap_or(2);
         Self {
-            credentials: Arc::new(credentials),
             document: Arc::new(Mutex::new(document)),
             path,
             sender,
             signaling,
-            workers: Arc::new(Semaphore::new(2)),
+            workers: Arc::new(Semaphore::new(password_workers)),
             rate: Arc::new(Mutex::new((Instant::now(), 0))),
+            running_settings,
         }
     }
 
@@ -172,7 +127,7 @@ impl AdminState {
         change(&mut next)?;
         let store = next.store()?;
         if let Err(error) = next.save(&self.path) {
-            // A rename may already have committed: never keep authorizing stale policy.
+            // A commit error may be ambiguous: never authorize stale policy.
             self.sender.send_replace(Arc::new(InviteStore::default()));
             return Err(error);
         }
@@ -189,6 +144,8 @@ pub fn router(state: AdminState) -> Router {
         .route("/admin/users", get(page))
         .route("/admin/rooms", get(page))
         .route("/admin/streams", get(page))
+        .route("/admin/settings", get(page))
+        .route("/admin/administrators", get(page))
         .route("/admin/app.js", get(script))
         .route("/admin/style.css", get(stylesheet))
         .route("/admin/api/users", get(users))
@@ -197,6 +154,9 @@ pub fn router(state: AdminState) -> Router {
             axum::routing::put(save_user).delete(remove_user),
         )
         .route("/admin/api/status", get(status))
+        .route("/admin/api/settings", get(settings).put(save_settings))
+        .route("/admin/api/administrators", get(administrators))
+        .route("/admin/api/administrators/{username}", axum::routing::put(save_administrator).delete(remove_administrator))
         .route("/admin/api/disconnect", post(disconnect))
         .route(
             "/admin/api/sessions/{session_id}/disconnect",
@@ -296,7 +256,16 @@ async fn authenticate(State(state): State<AdminState>, request: Request, next: N
     response
 }
 
-async fn authenticate_inner(state: AdminState, request: Request, next: Next) -> Response {
+// No Debug/Serialize: the hash is retained only to reject stale administrative
+// writes if the actor is reset or removed while a request is in flight.
+#[derive(Clone)]
+struct AdminIdentity {
+    username: String,
+    password_hash: String,
+    must_change_password: bool,
+}
+
+async fn authenticate_inner(state: AdminState, mut request: Request, next: Next) -> Response {
     // Custom non-simple header + JSON writes require a same-origin JS request.
     // No admin CORS/preflight grants; Basic browser credentials alone cannot CSRF.
     let cross_site = request
@@ -348,24 +317,77 @@ async fn authenticate_inner(state: AdminState, request: Request, next: Next) -> 
     let Ok(permit) = state.workers.clone().try_acquire_owned() else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
-    let users = state.credentials.clone();
-    let verified = tokio::task::spawn_blocking(move || {
+    let path = state.path.clone();
+    let verified = tokio::task::spawn_blocking(move || -> Result<Option<AdminIdentity>, &'static str> {
         let _permit = permit;
-        users
-            .get(&username)
-            .and_then(|hash| validated_hash(hash).ok())
-            .is_some_and(|hash| {
-                Argon2::default()
-                    .verify_password(password.as_bytes(), &hash)
-                    .is_ok()
-            })
+        let database = Database::existing(path)?;
+        let Some((password_hash, must_change_password)) = database.administrator(&username)? else { return Ok(None); };
+        let hash = validated_hash(&password_hash)?;
+        if Argon2::default().verify_password(password.as_bytes(), &hash).is_err() {
+            return Ok(None);
+        }
+        // A credential removed/reset during verification cannot authorize this request.
+        if database.administrator(&username)? != Some((password_hash.clone(), must_change_password)) {
+            return Ok(None);
+        }
+        Ok(Some(AdminIdentity { username, password_hash, must_change_password }))
     })
-    .await
-    .unwrap_or(false);
-    if !verified {
-        return challenge();
+    .await;
+    let identity = match verified {
+        Ok(Ok(Some(identity))) => identity,
+        Ok(Ok(None)) => return challenge(),
+        _ => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    };
+    if identity.must_change_password {
+        let path = request.uri().path();
+        let setup_asset = request.method() == axum::http::Method::GET
+            && matches!(path, "/admin/administrators" | "/admin/app.js" | "/admin/style.css" | "/admin/api/administrators");
+        let own_password_change = request.method() == axum::http::Method::PUT
+            && path == format!("/admin/api/administrators/{}", identity.username);
+        if !setup_asset && !own_password_change {
+            if path.starts_with("/admin/api/") {
+                return (StatusCode::FORBIDDEN, "change the initial administrator password first").into_response();
+            }
+            return Redirect::temporary("/admin/administrators").into_response();
+        }
     }
+    request.extensions_mut().insert(identity);
     next.run(request).await
+}
+
+async fn administrators(State(state): State<AdminState>, Extension(identity): Extension<AdminIdentity>) -> Response {
+    match tokio::task::spawn_blocking(move || Database::existing(state.path)?.administrators()).await {
+        Ok(Ok(administrators)) => Json(serde_json::json!({
+            "current_username": identity.username,
+            "must_change_password": identity.must_change_password,
+            "administrators": administrators.into_iter().map(|(username, must_change_password)| serde_json::json!({ "username": username, "must_change_password": must_change_password })).collect::<Vec<_>>(),
+        })).into_response(),
+        _ => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AdministratorEdit { password: String }
+
+async fn save_administrator(State(state): State<AdminState>, Extension(identity): Extension<AdminIdentity>, Path(username): Path<String>, Json(edit): Json<AdministratorEdit>) -> Response {
+    edit_administrator(state, identity, username, Some(edit.password)).await
+}
+
+async fn remove_administrator(State(state): State<AdminState>, Extension(identity): Extension<AdminIdentity>, Path(username): Path<String>) -> Response {
+    edit_administrator(state, identity, username, None).await
+}
+
+async fn edit_administrator(state: AdminState, identity: AdminIdentity, username: String, password: Option<String>) -> Response {
+    let Ok(permit) = state.workers.clone().try_acquire_owned() else { return StatusCode::SERVICE_UNAVAILABLE.into_response(); };
+    match tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        Database::existing(state.path)?.edit_administrator(&identity.username, &identity.password_hash, &username, password.as_deref())
+    }).await {
+        Ok(Ok(())) => StatusCode::NO_CONTENT.into_response(),
+        Ok(Err(error)) => (StatusCode::BAD_REQUEST, error).into_response(),
+        Err(_) => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    }
 }
 
 fn challenge() -> Response {
@@ -400,6 +422,35 @@ async fn status(State(state): State<AdminState>) -> Response {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
     Json(snapshot).into_response()
+}
+
+async fn settings(State(state): State<AdminState>) -> Response {
+    match tokio::task::spawn_blocking(move || {
+        let saved = Database::existing(state.path)?.settings()?;
+        let active = state.running_settings.ok_or("running settings unavailable")?;
+        Ok::<_, &'static str>(serde_json::json!({
+            "restart_required": saved != active,
+            "saved": saved, "active": active,
+            "read_only": Settings::read_only_keys(),
+        }))
+    }).await {
+        Ok(Ok(value)) => Json(value).into_response(),
+        _ => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    }
+}
+
+async fn save_settings(State(state): State<AdminState>, Json(settings): Json<Settings>) -> Response {
+    let Ok(permit) = state.workers.clone().try_acquire_owned() else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    match tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        Database::existing(state.path)?.save_settings(&settings)
+    }).await {
+        Ok(Ok(())) => StatusCode::NO_CONTENT.into_response(),
+        Ok(Err(error)) => (StatusCode::BAD_REQUEST, error).into_response(),
+        Err(_) => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    }
 }
 
 #[derive(Deserialize)]
@@ -539,13 +590,19 @@ mod tests {
     }
 
     fn fixture() -> (TestDirectory, AdminState, watch::Receiver<Arc<InviteStore>>) {
+        fixture_with_bootstrap(false)
+    }
+
+    fn fixture_with_bootstrap(bootstrap: bool) -> (TestDirectory, AdminState, watch::Receiver<Arc<InviteStore>>) {
         let directory = TestDirectory::new();
         let path = directory.0.join("policy.json");
         let document = AdminDocument::load_or_seed(&path, r#"{"version":2,"users":[]}"#).unwrap();
         let (sender, receiver) = watch::channel(Arc::new(document.store().unwrap()));
-        let user = create_user("admin".into(), "a long admin password", None).unwrap();
+        if !bootstrap {
+            let user = create_user("admin".into(), "a long admin password", None).unwrap();
+            Database::existing(path.clone()).unwrap().provision(user, true).unwrap();
+        }
         let state = AdminState::new(
-            HashMap::from([("admin".into(), user.password_hash)]),
             document,
             path,
             sender,
@@ -579,10 +636,14 @@ mod tests {
             "/admin/users",
             "/admin/rooms",
             "/admin/streams",
+            "/admin/settings",
+            "/admin/administrators",
             "/admin/app.js",
             "/admin/style.css",
             "/admin/api/users",
             "/admin/api/status",
+            "/admin/api/settings",
+            "/admin/api/administrators",
         ] {
             let response = app
                 .clone()
@@ -872,5 +933,81 @@ mod tests {
         ] {
             assert!(parse_credentials(&input).is_err());
         }
+    }
+
+    #[tokio::test]
+    async fn settings_persist_atomically_report_restart_and_cannot_enable_anonymous_access() {
+        let (directory, state, receiver) = fixture();
+        let database = Database::existing(directory.0.join("policy.json")).unwrap();
+        let original = database.settings().unwrap();
+        let app = router(state);
+        let response = app.clone().oneshot(request("/admin/api/settings", "GET", true, "")).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 16_384).await.unwrap();
+        let snapshot: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(snapshot["restart_required"], false);
+        assert_eq!(snapshot["saved"]["DASS_MAX_UNAUTHENTICATED_SESSIONS"], "0");
+        let mut changed = original.clone();
+        changed.0.insert("DASS_MAX_SESSIONS".into(), "64".into());
+        let response = app.clone().oneshot(request("/admin/api/settings", "PUT", true, &serde_json::to_string(&changed).unwrap())).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert_eq!(database.settings().unwrap().0["DASS_MAX_SESSIONS"], "64");
+        assert!(!receiver.has_changed().unwrap()); // no hot reload/disconnection
+        let response = app.clone().oneshot(request("/admin/api/settings", "GET", true, "")).await.unwrap();
+        let body = to_bytes(response.into_body(), 16_384).await.unwrap();
+        let snapshot: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(snapshot["restart_required"], true);
+        assert_eq!(snapshot["active"]["DASS_MAX_SESSIONS"], "128");
+        for (key, value) in [("DASS_MAX_UNAUTHENTICATED_SESSIONS", "1"), ("DASS_ADMIN_DATA_FILE", "/elsewhere"), ("DASS_MAX_SESSIONS", "0")] {
+            let mut invalid = changed.clone();
+            invalid.0.insert(key.into(), value.into());
+            let response = app.clone().oneshot(request("/admin/api/settings", "PUT", true, &serde_json::to_string(&invalid).unwrap())).await.unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            assert!(database.settings().unwrap() == changed);
+        }
+    }
+
+    fn with_authorization(mut request: Request, value: &'static str) -> Request {
+        request.headers_mut().insert(header::AUTHORIZATION, value.parse().unwrap());
+        request
+    }
+
+    #[tokio::test]
+    async fn default_login_only_allows_setup_until_a_strong_password_is_saved() {
+        let (_directory, state, _) = fixture_with_bootstrap(true);
+        let app = router(state);
+        let default_request = |path: &str, method: &str, body: &str| with_authorization(request(path, method, true, body), "Basic YWRtaW46YWRtaW4=");
+        let response = app.clone().oneshot(default_request("/admin/users", "GET", "")).await.unwrap();
+        assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
+        assert_eq!(response.headers()[header::LOCATION], "/admin/administrators");
+        assert_eq!(app.clone().oneshot(default_request("/admin/api/status", "GET", "")).await.unwrap().status(), StatusCode::FORBIDDEN);
+        let response = app.clone().oneshot(default_request("/admin/api/administrators", "GET", "")).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), 4096).await.unwrap();
+        let text = std::str::from_utf8(&bytes).unwrap();
+        assert!(!text.contains("argon2"));
+        assert!(!text.contains("password_hash"));
+        let snapshot: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(snapshot["must_change_password"], true);
+        assert_eq!(app.clone().oneshot(default_request("/admin/api/administrators/other", "PUT", r#"{"password":"a long other password"}"#)).await.unwrap().status(), StatusCode::FORBIDDEN);
+        assert_eq!(app.clone().oneshot(default_request("/admin/api/administrators/admin", "PUT", r#"{"password":"admin"}"#)).await.unwrap().status(), StatusCode::BAD_REQUEST);
+        assert_eq!(app.clone().oneshot(default_request("/admin/api/administrators/admin", "PUT", r#"{"password":"a long admin password"}"#)).await.unwrap().status(), StatusCode::NO_CONTENT);
+        assert_eq!(app.clone().oneshot(default_request("/admin/api/administrators", "GET", "")).await.unwrap().status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(app.oneshot(request("/admin/api/status", "GET", true, "")).await.unwrap().status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn administrator_crud_guards_last_admin_and_revokes_old_passwords_without_restart() {
+        let (directory, state, receiver) = fixture();
+        let app = router(state);
+        assert_eq!(app.clone().oneshot(request("/admin/api/administrators/admin", "DELETE", true, "{}")).await.unwrap().status(), StatusCode::BAD_REQUEST);
+        assert_eq!(app.clone().oneshot(request("/admin/api/administrators/other", "PUT", true, r#"{"password":"a long other password"}"#)).await.unwrap().status(), StatusCode::NO_CONTENT);
+        assert_eq!(app.clone().oneshot(request("/admin/api/administrators/other", "DELETE", true, "{}")).await.unwrap().status(), StatusCode::NO_CONTENT);
+        assert!(Database::existing(directory.0.join("policy.json")).unwrap().administrator("other").unwrap().is_none());
+        assert_eq!(app.clone().oneshot(request("/admin/api/administrators/admin", "PUT", true, r#"{"password":"a new admin password"}"#)).await.unwrap().status(), StatusCode::NO_CONTENT);
+        assert_eq!(app.clone().oneshot(request("/admin/api/status", "GET", true, "")).await.unwrap().status(), StatusCode::UNAUTHORIZED);
+        let fresh = with_authorization(request("/admin/api/status", "GET", true, ""), "Basic YWRtaW46YSBuZXcgYWRtaW4gcGFzc3dvcmQ=");
+        assert_eq!(app.clone().oneshot(fresh).await.unwrap().status(), StatusCode::OK);
+        assert!(!receiver.has_changed().unwrap());
     }
 }

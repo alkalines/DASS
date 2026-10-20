@@ -71,6 +71,74 @@ async function setup(page, responses = {}) {
 const EMPTY_METRICS = { events: [] };
 
 describe("DASS control panel", () => {
+    test("default administrator is shown only the required password-change form", async () => {
+        const fixture = await setup("administrators", { administrators: {
+            current_username: "admin", must_change_password: true,
+            administrators: [{ username: "admin", must_change_password: true }]
+        } });
+        expect(fixture.title.textContent).toBe("Administrators");
+        expect(fixture.content.textContent).toContain("default admin/admin");
+        expect(fixture.content.textContent).not.toContain("Add administrator");
+        const form = fixture.document.querySelector("#administrator-editor");
+        const inputs = descendants(form).filter(element => element.tag === "input");
+        expect(inputs[0].readOnly).toBe(true);
+        inputs[1].value = inputs[2].value = "a long changed password";
+        await form.listeners.submit({ preventDefault() {} });
+        const write = fixture.requests.find(request => request.method === "PUT");
+        expect(write.url).toBe("/admin/api/administrators/admin");
+        expect(write.headers["X-DASS-Admin"]).toBe("1");
+        expect(JSON.parse(write.body)).toEqual({ password: "a long changed password" });
+        expect(inputs[1].value).toBe("");
+        expect(inputs[2].value).toBe("");
+        expect(fixture.content.textContent).toContain("sign in");
+        expect(fixture.requests.length).toBe(2); // no stale-password refresh after own reset
+    });
+
+    test("administrators can be added without exposing hashes and the last has no remove button", async () => {
+        const fixture = await setup("administrators", { administrators: {
+            current_username: "admin", must_change_password: false,
+            administrators: [{ username: "admin", must_change_password: false }]
+        } });
+        expect(fixture.content.textContent).not.toContain("argon2");
+        expect(descendants(fixture.content).some(element => element.tag === "button" && element.textContent === "Remove")).toBe(false);
+        fixture.context.editAdministrator(null, "admin");
+        const form = fixture.document.querySelector("#administrator-editor");
+        const inputs = descendants(form).filter(element => element.tag === "input");
+        inputs[0].value = "operator";
+        inputs[1].value = "a long other password";
+        inputs[2].value = "different";
+        await form.listeners.submit({ preventDefault() {} });
+        expect(fixture.requests.some(request => request.method === "PUT")).toBe(false);
+        expect(fixture.message.textContent).toBe("Passwords do not match.");
+        inputs[2].value = inputs[1].value;
+        await form.listeners.submit({ preventDefault() {} });
+        expect(fixture.requests.find(request => request.method === "PUT").url).toBe("/admin/api/administrators/operator");
+        expect(fixture.message.textContent).toContain("Changes apply immediately");
+    });
+
+    test("settings distinguish saved and active values and keep anonymous access read-only", async () => {
+        const fixture = await setup("settings", { settings: {
+            saved: { DASS_MAX_SESSIONS: "64", DASS_MAX_UNAUTHENTICATED_SESSIONS: "0", DASS_ADMIN_DATA_FILE: "/var/lib/dass/policy.json" },
+            active: { DASS_MAX_SESSIONS: "128", DASS_MAX_UNAUTHENTICATED_SESSIONS: "0", DASS_ADMIN_DATA_FILE: "/var/lib/dass/policy.json" },
+            read_only: ["DASS_MAX_UNAUTHENTICATED_SESSIONS", "DASS_ADMIN_DATA_FILE"],
+            restart_required: true
+        } });
+        expect(fixture.title.textContent).toBe("Settings");
+        expect(fixture.content.textContent).toContain("Restart the backend");
+        expect(fixture.content.textContent).toContain("Running value: 128");
+        const inputs = descendants(fixture.content).filter(element => element.tag === "input");
+        expect(inputs[1].readOnly).toBe(true);
+        expect(inputs[2].readOnly).toBe(true);
+        inputs[0].value = "32";
+        const form = descendants(fixture.content).find(element => element.tag === "form");
+        await form.listeners.submit({ preventDefault() {} });
+        const write = fixture.requests.find(request => request.method === "PUT");
+        expect(write.url).toBe("/admin/api/settings");
+        expect(write.headers["X-DASS-Admin"]).toBe("1");
+        expect(JSON.parse(write.body).DASS_MAX_SESSIONS).toBe("32");
+        expect(fixture.message.textContent).toContain("Settings saved to SQLite");
+    });
+
     test("users render as text, not HTML, and editing does not reveal a hash", async () => {
         const user = { username: "alice", display_name: "<img src=x>" };
         const fixture = await setup("users", { users: [user], status: { users: [], rooms: [], streams: [], metrics: EMPTY_METRICS } });

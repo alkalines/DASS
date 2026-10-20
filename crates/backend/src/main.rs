@@ -1,11 +1,11 @@
 use dass_backend::{
-    admin::{AdminDocument, AdminState, parse_credentials},
+    admin::AdminState,
     app_with_control_panel,
     auth::{
         InviteFile, InviteStore, MAX_ACCOUNT_PASSWORD_BYTES, UsersFile,
         create_invite_with_display_name, create_user,
     },
-    config::Config,
+    database::Database,
     listener::{BoundedListener, PeerAddress, tls_acceptor},
     rtc::TransportConfig,
     signaling::SignalingState,
@@ -40,79 +40,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Some("create-invite") => create_invite_files(&arguments),
             Some("create-user") => create_user_file(&arguments),
             Some("create-admin") => create_admin_file(&arguments),
-            _ => Err("usage: dass-backend create-invite ... | create-user ... | create-admin ..."),
+            Some("set-user") | Some("set-admin") => provision_database(&arguments),
+            _ => Err("usage: dass-backend set-user ... | set-admin ... | create-invite ... | create-user ... | create-admin ..."),
         };
         return result.map_err(Into::into);
     }
-    let config = Config::from_env()?;
-    let tls = config.tls.as_ref().map(tls_acceptor).transpose()?;
-    let transport = TransportConfig::from_env(tls.is_some(), config.transport_mode)?;
-    let admin_credentials = match std::env::var("DASS_ADMIN_USERS") {
-        Ok(value) if value.is_empty() => None,
-        Ok(value) => Some(parse_credentials(&value)?),
-        Err(std::env::VarError::NotPresent) => None,
-        Err(_) => return Err("DASS_ADMIN_USERS must be UTF-8".into()),
-    };
-    if admin_credentials.is_some() && config.users_json.is_none() {
-        return Err("the control panel requires DASS_USERS account mode, not invite mode".into());
+    for (key, value) in std::env::vars_os() {
+        if key.to_str().is_some_and(|key| key.starts_with("DASS_")) && value.to_str().is_none() {
+            return Err("DASS environment values must be UTF-8".into());
+        }
     }
-    let admin_path = PathBuf::from(
-        std::env::var("DASS_ADMIN_DATA_FILE")
-            .unwrap_or_else(|_| "/var/lib/dass/policy.json".into()),
-    );
-    let mut admin_document = None;
+    let database_path = std::env::var("DASS_DATABASE_FILE")
+        .unwrap_or_else(|_| "/var/lib/dass/dass.sqlite3".into());
+    if database_path.is_empty() { return Err("empty SQLite database path".into()); }
+    let database = Database::open(PathBuf::from(database_path), |name| std::env::var(name).ok())?;
+    let settings = database.settings()?;
+    let config = database.config(&settings)?;
+    let tls = config.tls.as_ref().map(tls_acceptor).transpose()?;
+    let transport = TransportConfig::from_lookup(tls.is_some(), config.transport_mode, |name| {
+        settings.0.get(name).cloned().or_else(|| std::env::var(name).ok())
+    })?;
+    let admin_credentials = database.credentials()?;
     let resources = config.resources;
-    let (sender, state, reload_task) = match (config.invite_file.clone(), config.users_json.clone())
-    {
-        (Some(path), None) => {
-            let store = Arc::new(InviteStore::load(&path)?);
-            let (sender, receiver) = watch::channel(store);
-            let reload_task = tokio::spawn(reload_invites(path, sender.clone()));
-            (
-                Some(sender),
-                Some(
-                    SignalingState::new(receiver)
-                        .with_transport(transport)
-                        .with_limits(resources),
-                ),
-                Some(reload_task),
-            )
-        }
-        (None, Some(users_json)) => {
-            // Removing admin login must not resurrect the old environment seed.
-            let store = if admin_credentials.is_some() || admin_path.try_exists()? {
-                let document = AdminDocument::load_or_seed(&admin_path, &users_json)?;
-                let store = Arc::new(document.store()?);
-                admin_document = Some(document);
-                store
-            } else {
-                Arc::new(InviteStore::from_users_bytes(users_json.as_bytes())?)
-            };
-            let (sender, receiver) = watch::channel(store);
-            (
-                Some(sender),
-                Some(
-                    SignalingState::new(receiver)
-                        .with_transport(transport)
-                        .with_limits(resources),
-                ),
-                None,
-            )
-        }
-        (None, None) => (None, None, None),
-        (Some(_), Some(_)) => {
-            return Err("configure only one of DASS_INVITE_FILE or DASS_USERS".into());
-        }
-    };
-    let panel = match (admin_credentials, admin_document) {
-        (Some(credentials), Some(document)) => Some(AdminState::new(
-            credentials,
-            document,
-            admin_path,
-            sender.clone().ok_or("panel account policy unavailable")?,
-            state.clone().ok_or("panel signaling unavailable")?,
-        )),
-        _ => None,
+    let (sender, receiver) = watch::channel(Arc::new(database.store()?));
+    let state = SignalingState::new(receiver).with_transport(transport).with_limits(resources);
+    let panel = if admin_credentials.is_empty() {
+        None
+    } else {
+        Some(AdminState::new(database.document()?, database.path().to_path_buf(), sender.clone(), state.clone()))
     };
     let listener = BoundedListener::new_with_limit(
         tokio::net::TcpListener::bind(config.listen_addr).await?,
@@ -121,18 +76,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     tracing::info!(
         tls = config.tls.is_some(),
-        signaling = state.is_some(),
+        signaling = true,
         transport_mode = config.transport_mode.as_str(),
         "backend listening"
     );
     tracing::warn!("production media and E2EE unavailable; readiness remains false");
-    let abort_reload = reload_task.as_ref().map(|task| task.abort_handle());
     axum::serve(
         listener,
-        app_with_control_panel(config, state, panel)
+        app_with_control_panel(config, Some(state), panel)
             .into_make_service_with_connect_info::<PeerAddress>(),
     )
-    .with_graceful_shutdown(shutdown_signal(sender, abort_reload))
+    .with_graceful_shutdown(shutdown_signal(Some(sender), None))
     .await?;
     Ok(())
 }
@@ -156,25 +110,6 @@ async fn shutdown_signal(
         invites.send_replace(Arc::new(InviteStore::default()));
     }
     tracing::info!("shutdown requested");
-}
-
-async fn reload_invites(path: PathBuf, sender: watch::Sender<Arc<InviteStore>>) {
-    let mut hangup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
-        .expect("install SIGHUP handler");
-    while hangup.recv().await.is_some() {
-        let path = path.clone();
-        let loaded = tokio::task::spawn_blocking(move || InviteStore::load(&path)).await;
-        match loaded {
-            Ok(Ok(store)) => {
-                sender.send_replace(Arc::new(store));
-                tracing::info!("invite policy reloaded; sessions invalidated");
-            }
-            _ => {
-                sender.send_replace(Arc::new(InviteStore::default()));
-                tracing::error!("invite reload failed; all credentials denied");
-            }
-        }
-    }
 }
 
 fn create_invite_files(arguments: &[String]) -> Result<(), &'static str> {
@@ -289,5 +224,17 @@ fn create_admin_file(arguments: &[String]) -> Result<(), &'static str> {
         .and_then(|_| file.sync_all())
         .map_err(|_| "cannot write administrator record file")?;
     tracing::info!("DASS administrator hash record created; password was not written to output");
+    Ok(())
+}
+
+fn provision_database(arguments: &[String]) -> Result<(), &'static str> {
+    if arguments.len() != 4 {
+        return Err("usage: dass-backend set-user|set-admin DATABASE_FILE PASSWORD_FILE USERNAME (backend must be stopped)");
+    }
+    let password = read_account_password(&arguments[2])?;
+    let user = create_user(arguments[3].clone(), &password, None)?;
+    let database = Database::open(PathBuf::from(&arguments[1]), |key| std::env::var(key).ok())?;
+    database.provision(user, arguments[0] == "set-admin")?;
+    tracing::info!("SQLite credential saved; restart backend to load it");
     Ok(())
 }

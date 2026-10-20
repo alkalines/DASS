@@ -107,7 +107,7 @@ impl TransportConfig {
         Self::from_lookup(tls_enabled, mode, |name| std::env::var(name).ok())
     }
 
-    pub(crate) fn from_lookup(
+    pub fn from_lookup(
         tls_enabled: bool,
         mode: TransportMode,
         lookup: impl Fn(&str) -> Option<String>,

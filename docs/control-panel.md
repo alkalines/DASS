@@ -2,7 +2,7 @@
 
 Discord Alternative ScreenShare (DASS) has an optional black-and-white control
 panel served by the existing Rust backend, with no extra server or frontend
-runtime. It has exactly three pages and a small shared operational log:
+runtime. It has five pages and a small shared operational log:
 
 - **Users**: add, edit, reset passwords and remove DASS accounts; edit display
   names only. The list also shows whether an account is online, its current
@@ -30,6 +30,13 @@ runtime. It has exactly three pages and a small shared operational log:
   administrative actions and operational errors such as a failed media session
   or a rate-limited client). The log never contains addresses, account names,
   credentials, keys, SDP, frames or raw signaling payloads.
+- **Settings**: edit SQLite-backed resource limits and LAN admission controls;
+  compare saved and active values. Edits require restart. Anonymous access is
+  fixed at zero; short-lived login handshakes have their own bounded setting.
+- **Administrators**: add administrators, reset passwords and remove administrator
+  accounts, with immediate credential revocation and last-administrator protection.
+  These are separate from client accounts. Initial `admin` / `admin` setup must
+  be completed before accessing other panel functionality.
 
 Session-level actions live on the **Streams** page: stopping a stream ends
 that publisher's route and its approved viewer routes, and disconnecting a
@@ -42,8 +49,19 @@ transport limitations, the open pilot gates and readiness 503 remain unchanged.
 
 ## Enable Basic authentication
 
-The panel is disabled unless `DASS_ADMIN_USERS` contains administrator credentials.
-It requires account mode (`DASS_USERS`), not legacy invite mode. Use **separate,
+**SQLite upgrade:** use [SQLite provisioning/migration](sqlite.md) for new
+installations. The environment/hash-file steps below are legacy import options
+only. Administrators are now read from SQLite after the first import, and removing
+their environment seed does not revoke them. Offline `set-admin` provisions or
+resets an administrator directly without writing JSON/hash records by hand.
+New account-mode databases without imported administrators seed `admin` / `admin`.
+Keep setup private and change that password immediately: the server blocks all
+other panel operations until a strong replacement is saved. The Administrators
+page then manages credentials directly in SQLite without environment edits or
+restart. Existing administrator passwords are preserved during migration.
+
+The panel is disabled unless SQLite contains administrator credentials.
+It requires account mode, not legacy invite mode. Use **separate,
 strong administrator passwords**, never Discord credentials or ordinary client
 passwords. Every configured administrator has full panel privileges.
 
@@ -113,20 +131,18 @@ it against the configured hash. Do not use the hash as the login password.
 
 ## Persistence and policy
 
-- The named `backend-data` Docker volume holds `/var/lib/dass/policy.json`, writable
+- The named `backend-data` Docker volume holds `/var/lib/dass/dass.sqlite3`, writable
   only by backend UID/GID `10001:10001`. The root filesystem remains read-only,
   capability-free and resource-bounded. Protect volume backups: they contain
   password hashes. There is no plaintext password persistence.
-- On first panel startup, `DASS_USERS` seeds the durable policy. Thereafter that
-  file is authoritative: environment account edits **do not overwrite panel edits**.
-  Admin login credentials still come only from the environment and changing them
-  requires container recreation. Removing `DASS_ADMIN_USERS` disables the panel
-  but continues using existing durable account policy, not the old seed.
+- On first database initialization, existing `policy.json` wins over `DASS_USERS`;
+  administrator hashes and resource/LAN settings are imported too. Thereafter
+  SQLite is authoritative. Environment edits do not overwrite it.
 - Do not delete the volume as a routine upgrade/reset. A missing file is initialized
   from the seed; corrupt/unreadable policy stops startup rather than falling back.
   Do not switch to invite mode expecting account/panel policy to apply there.
-- Writes validate the complete bounded account policy, save with mode 0600 via a
-  synced temporary file and atomic rename, then notify signaling. Write failure
+- Writes validate the complete bounded account policy and commit it in a SQLite
+  transaction, then notify signaling. Write failure
   fails authorization closed. Filesystem work/hashing runs in bounded workers.
 - **Every policy edit closes all DASS connections**, not just one selected
   room/user. This conservative experimental behavior prevents stale
@@ -148,17 +164,23 @@ it against the configured hash. Do not use the hash as the login password.
 - No admin CORS permissions are granted. Writes require JSON and a non-simple
   custom header; cross-site browser requests are denied. Responses disable caching,
   framing and inline scripts. Password hashes never appear in panel API responses.
-  Basic checks have a global 8/sec limit and two workers, not a production-grade
+  Basic checks have a global 8/sec limit and a bounded worker pool (default two), not a production-grade
   brute-force defense. Browser Basic credential caching has no reliable server-side
   logout; use a private browser session and close it when finished.
 
 ## Validation
 
-Frontend UI-logic tests passed with Bun 1.4.3: **12 tests, 61 assertions** using a
+SQLite backend migration/settings tests have been added but have not yet run in
+Docker. The dependency lockfile update and full validation commands are in
+[SQLite validation](sqlite.md#validation-pending-docker-execution). Earlier
+validation counts below predate SQLite and must not be treated as evidence for it.
+
+Frontend UI-logic tests passed with Bun 1.4.3: **17 tests, 94 assertions** using a
 small fake DOM. The browser script also bundled successfully. This checks page
 rendering, request headers/payloads, validation, error handling, the live
 connection and activity columns, the stream viewer/bitrate columns, the stop
-and disconnect requests and the bounded event log. It does not check real
+and disconnect requests, the bounded event log, SQLite settings form and
+administrator setup/management forms. It does not check real
 browser Basic Auth or backend/media behavior. Run locally with
 `bun test ./tests/admin`.
 

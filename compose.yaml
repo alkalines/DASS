@@ -4,7 +4,9 @@ services:
       context: .
       target: runtime
     # Compose >= 2.30: raw preserves Argon2 '$' in DASS_USERS/DASS_ADMIN_USERS.
-    # Optional panel auth: DASS_ADMIN_USERS=USER1:ARGON2HASH;USER2:ARGON2HASH
+    # Legacy administrator import: DASS_ADMIN_USERS=USER1:ARGON2HASH;USER2:ARGON2HASH
+    # New account-mode databases default to admin/admin, with mandatory password
+    # change before other panel access. Keep setup private until changed.
     # Put this in the raw private env file below, NOT interpolated .env.
     # Optional so the default loopback discovery scaffold needs no secrets.
     env_file:
@@ -14,11 +16,13 @@ services:
     environment:
       DASS_INSECURE_LOCAL_DEV: "${DASS_INSECURE_LOCAL_DEV:-true}"
       DASS_LISTEN_ADDR: "0.0.0.0:8080"
-      DASS_MAX_CONCURRENT_REQUESTS: "128"
-      DASS_MAX_CONTROL_MESSAGE_BYTES: "16384"
-      # Bounded service resources (roadmap 5.2). Every limit is explicit.
+      # Bootstrap inputs only: after the first successful migration, edit these
+      # in /admin/settings. Existing SQLite values always win over the env.
+      DASS_DATABASE_FILE: "/var/lib/dass/dass.sqlite3"
+      DASS_MAX_CONCURRENT_REQUESTS: "${DASS_MAX_CONCURRENT_REQUESTS:-128}"
+      DASS_MAX_CONTROL_MESSAGE_BYTES: "${DASS_MAX_CONTROL_MESSAGE_BYTES:-16384}"
       DASS_MAX_SESSIONS: "${DASS_MAX_SESSIONS:-128}"
-      DASS_MAX_UNAUTHENTICATED_SESSIONS: "${DASS_MAX_UNAUTHENTICATED_SESSIONS:-16}"
+      DASS_MAX_UNAUTHENTICATED_SESSIONS: "${DASS_MAX_UNAUTHENTICATED_SESSIONS:-0}"
       DASS_MAX_TCP_CONNECTIONS: "${DASS_MAX_TCP_CONNECTIONS:-128}"
       DASS_MAX_PASSWORD_VERIFICATIONS: "${DASS_MAX_PASSWORD_VERIFICATIONS:-2}"
       DASS_ADMIN_DATA_FILE: "/var/lib/dass/policy.json"
@@ -45,7 +49,7 @@ services:
     volumes:
       # Only runtime TLS/invite files belong here, never password source files.
       - ./.secrets/runtime:/run/dass:ro
-      # Writable account policy only; the container root filesystem stays read-only.
+      # Writable SQLite database/journal and legacy import; root stays read-only.
       - backend-data:/var/lib/dass
     read_only: true
     cap_drop: [ALL]

@@ -278,6 +278,18 @@ pub fn random_identifier() -> Result<String, &'static str> {
     Ok(identifier)
 }
 
+/// Only for first-run administrator setup. The caller MUST persist the forced
+/// password-change flag; ordinary accounts retain the strong password policy.
+pub(crate) fn bootstrap_administrator() -> Result<User, &'static str> {
+    let mut salt = [0u8; 16];
+    getrandom::fill(&mut salt).map_err(|_| "random source unavailable")?;
+    let password_hash = hasher()
+        .hash_password_with_salt(b"admin", &salt)
+        .map_err(|_| "credential hashing failed")?
+        .to_string();
+    Ok(User { username: "admin".into(), password_hash, display_name: None })
+}
+
 /// Admin-only creation: caller delivers the returned credential out of band.
 pub fn create_invite(invite_id: String) -> Result<(Invite, String), &'static str> {
     create_invite_with_display_name(invite_id, None)
