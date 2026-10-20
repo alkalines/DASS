@@ -62,7 +62,10 @@ export interface PublishDependencies {
 export class PublishController {
     private active = false;
     private operation?: { abort: AbortController; contextId: string; peer?: SpikePeer; signaling?: SpikeSignaling; capture?: CaptureLease; sessionId?: string;
-        identity?: E2eeIdentity; store?: IdentityStore; epoch?: number; epochKey?: Uint8Array; viewerKeys?: Map<string, string>; };
+        identity?: E2eeIdentity; store?: IdentityStore; epoch?: number; epochKey?: Uint8Array;
+        /** Only keys attached to a successfully approved request are eligible for delivery/rekey. */
+        viewerKeys?: Map<string, string>; requestKeys?: Map<string, { viewerId: string; key: string; trust: IdentityTrust; deciding?: boolean }>;
+        membershipVersions?: Map<string, number>; membershipTokens?: Map<string, object>; membershipQueue?: Promise<void>; };
     private contextCheck?: ReturnType<typeof setInterval>;
     private sourceChange?: AbortController;
     private listeners = new Set<() => void>();
@@ -214,21 +217,32 @@ export class PublishController {
                     // publisher explicitly re-confirms — never silently trusted.
                     const { store } = operation;
                     if (!store) return;
+                    const requestKeys = operation.requestKeys ??= new Map();
+                    // A duplicate request id cannot replace the device/key of an
+                    // already observed request while its asynchronous trust check runs.
+                    if (requestKeys.has(viewRequest.request_id) || requestKeys.size >= 16) return;
+                    const requestKey = { viewerId: viewRequest.viewer_id, key: viewRequest.viewer_key, trust: { kind: "first-contact" } as IdentityTrust };
+                    requestKeys.set(viewRequest.request_id, requestKey);
+                    operation.signaling?.onViewRequestClosed?.(operation.sessionId!, viewRequest.request_id, () => {
+                        if (requestKeys.get(viewRequest.request_id) !== requestKey) return;
+                        requestKeys.delete(viewRequest.request_id);
+                        this.update({ ...this.status, pendingViewers: this.status.pendingViewers.filter(viewer => viewer.requestId !== viewRequest.request_id) });
+                    });
                     void store.readPeer(viewRequest.viewer_id)
-                        .then(pin => evaluateIdentity(pin, viewRequest.viewer_key))
+                        .then(pin => evaluateIdentity(pin, requestKey.key))
                         .then(trust => {
-                            if (!this.current(operation)) return;
+                            if (!this.current(operation) || requestKeys.get(viewRequest.request_id) !== requestKey) return;
+                            requestKey.trust = trust;
                             const pending = [...this.status.pendingViewers.filter(existing => existing.requestId !== viewRequest.request_id),
                                 { requestId: viewRequest.request_id, viewerId: viewRequest.viewer_id, displayName: viewRequest.viewer_display_name, trust }];
-                            operation.viewerKeys?.set(viewRequest.viewer_id, viewRequest.viewer_key);
-                            operation.viewerKeys ??= new Map([[viewRequest.viewer_id, viewRequest.viewer_key]]);
                             this.update({ ...this.status, pendingViewers: pending });
                             // The safety number needs a digest, so it fills in
                             // once it is computed.
                             const { identity } = operation;
                             if (!identity) return;
-                            void safetyNumber(identity.publicKey, viewRequest.viewer_key).then(safety => {
-                                if (!this.current(operation)) return;
+                            void safetyNumber(identity.publicKey, requestKey.key).then(safety => {
+                                if (!this.current(operation) || requestKeys.get(viewRequest.request_id) !== requestKey
+                                    || !this.status.pendingViewers.some(viewer => viewer.requestId === viewRequest.request_id)) return;
                                 this.update({
                                     ...this.status,
                                     pendingViewers: this.status.pendingViewers.map(viewer =>
@@ -236,7 +250,10 @@ export class PublishController {
                                 });
                             });
                         })
-                        .catch(() => logDiagnostic("view request trust evaluation failed", {}, true));
+                        .catch(() => {
+                            if (requestKeys.get(viewRequest.request_id) === requestKey) requestKeys.delete(viewRequest.request_id);
+                            logDiagnostic("view request trust evaluation failed", {}, true);
+                        });
                 });
             }
             if (this.current(operation)) this.update({ ...this.status, phase: "publishing", message: "DASS negotiation complete. The stream appears in the directory once media connects. Close this panel to keep sharing, or Stop sharing to end capture." });
@@ -257,29 +274,85 @@ export class PublishController {
     async decideView(requestId: string, decision: "approve" | "deny" | "block") {
         const { operation } = this;
         if (!operation?.signaling || !operation.sessionId || !this.current(operation)) return;
+        const prior = operation.membershipQueue ?? Promise.resolve();
+        const next = prior.then(() => this.decideViewQueued(operation, requestId, decision));
+        operation.membershipQueue = next.then(() => {}, () => {});
+        await next;
+    }
+
+    private async decideViewQueued(operation: NonNullable<PublishController["operation"]>, requestId: string, decision: "approve" | "deny" | "block") {
+        if (!operation.signaling || !operation.sessionId || !this.current(operation)) return;
         const request = this.status.pendingViewers.find(pending => pending.requestId === requestId);
-        if (decision === "approve" && request?.trust.kind === "changed") {
+        const requestKey = operation.requestKeys?.get(requestId);
+        if (!request || !requestKey || requestKey.viewerId !== request.viewerId || requestKey.deciding) return;
+        if (decision === "approve" && requestKey.trust.kind === "changed") {
             this.update({ ...this.status, message: "This viewer's E2EE identity changed. Confirm the new identity before approving." });
             return;
         }
-        if (decision === "approve" && this.dependencies.requireVerifiedViewers?.() && request?.trust.kind !== "verified") {
+        if (decision === "approve" && this.dependencies.requireVerifiedViewers?.() && requestKey.trust.kind !== "verified") {
             this.update({ ...this.status, message: "This viewer's identity is not independently verified. Compare the safety number before approving." });
             return;
         }
+        if (decision === "approve" && operation.viewerKeys?.has(requestKey.viewerId)) {
+            this.update({ ...this.status, message: "This account already has an approved device. Remove it before approving another device key." });
+            return;
+        }
+        const versions = operation.membershipVersions ??= new Map();
+        const hadMembership = operation.viewerKeys?.has(requestKey.viewerId) ?? false;
+        if (decision !== "approve") {
+            versions.set(requestKey.viewerId, (versions.get(requestKey.viewerId) ?? 0) + 1);
+            for (const [id, pending] of operation.requestKeys ?? []) {
+                if (id !== requestId && pending.viewerId === requestKey.viewerId) operation.requestKeys!.delete(id);
+            }
+            operation.viewerKeys?.delete(requestKey.viewerId);
+            operation.membershipTokens?.delete(requestKey.viewerId);
+            this.update({ ...this.status,
+                pendingViewers: this.status.pendingViewers.filter(pending => pending.viewerId !== requestKey.viewerId || pending.requestId === requestId),
+                approvedViewers: this.status.approvedViewers.filter(viewer => viewer.viewerId !== requestKey.viewerId),
+            });
+        }
+        const version = versions.get(requestKey.viewerId) ?? 0;
         try {
+            requestKey.deciding = true;
             await operation.signaling.decideView(operation.sessionId, requestId, decision);
         } catch (error) {
             logDiagnostic("publisher decision failed", { code: error instanceof SpikeSignalingError ? error.code : "unknown" }, true);
+            if (operation.requestKeys?.get(requestId) === requestKey) operation.requestKeys.delete(requestId);
+            if (this.current(operation)) this.update({ ...this.status, pendingViewers: this.status.pendingViewers.filter(pending => pending.requestId !== requestId) });
+            if (decision !== "approve" && hadMembership && this.current(operation)) {
+                this.fail(operation, "Viewer denial/removal could not be confirmed. Publishing stopped fail-closed.");
+                return;
+            }
             if (this.current(operation)) this.update({ ...this.status, message: "The DASS decision could not be sent; the request expired unapproved." });
             return;
         }
-        if (!this.current(operation)) return;
+        if (!this.current(operation) || operation.requestKeys?.get(requestId) !== requestKey
+            || (versions.get(requestKey.viewerId) ?? 0) !== version) return;
+        operation.requestKeys?.delete(requestId);
         const pendingViewers = this.status.pendingViewers.filter(pending => pending.requestId !== requestId);
         const approvedViewers = decision === "approve" && request
             ? [...this.status.approvedViewers.filter(viewer => viewer.viewerId !== request.viewerId), { viewerId: request.viewerId }]
             : this.status.approvedViewers;
         this.update({ ...this.status, pendingViewers, approvedViewers });
-        if (decision === "approve" && request) await this.deliverEpoch(operation, request.viewerId);
+        if (decision === "approve" && request) {
+            // Never permit a second device request for the same account to
+            // replace an admitted key. It must be removed before re-approval.
+            operation.viewerKeys ??= new Map();
+            operation.viewerKeys.set(requestKey.viewerId, requestKey.key);
+            const token = {};
+            (operation.membershipTokens ??= new Map()).set(requestKey.viewerId, token);
+            await this.deliverEpoch(operation, requestKey.viewerId, requestKey.key, token);
+        } else if (decision !== "approve" && request) {
+            for (const [id, pending] of operation.requestKeys ?? []) {
+                if (pending.viewerId === requestKey.viewerId) operation.requestKeys!.delete(id);
+            }
+            operation.viewerKeys?.delete(requestKey.viewerId);
+            operation.membershipTokens?.delete(requestKey.viewerId);
+            this.update({ ...this.status,
+                pendingViewers: this.status.pendingViewers.filter(pending => pending.viewerId !== requestKey.viewerId),
+                approvedViewers: this.status.approvedViewers.filter(viewer => viewer.viewerId !== requestKey.viewerId),
+            });
+        }
         // Deny/block can also evict an already-approved session of the same
         // account; rotate so it cannot decrypt further frames.
         if (decision !== "approve" && operation.epoch !== undefined) await this.rotateEpoch(operation);
@@ -291,10 +364,9 @@ export class PublishController {
      * backend only forwards the ciphertext. Past-epoch content is not released
      * to newly admitted viewers.
      */
-    private async deliverEpoch(operation: NonNullable<PublishController["operation"]>, viewerId: string) {
+    private async deliverEpoch(operation: NonNullable<PublishController["operation"]>, viewerId: string, viewerKey: string, membershipToken: object) {
         if (!operation.peer || !operation.signaling || !operation.identity || !operation.sessionId) return;
-        const viewerKey = operation.viewerKeys?.get(viewerId);
-        if (!viewerKey || !operation.peer || !operation.identity || !operation.sessionId || !operation.signaling) return;
+        if (!viewerKey || operation.viewerKeys?.get(viewerId) !== viewerKey || !operation.peer || !operation.identity || !operation.sessionId || !operation.signaling) return;
         if (operation.epoch === undefined || !operation.epochKey) {
             operation.epoch = 1;
             operation.epochKey = generateEpochKey();
@@ -302,9 +374,18 @@ export class PublishController {
         }
         try {
             const blob = await wrapEpochKey(operation.identity, viewerKey, `stream/${operation.sessionId}`, operation.epoch, operation.epochKey);
+            if (!this.current(operation) || operation.viewerKeys?.get(viewerId) !== viewerKey || operation.membershipTokens?.get(viewerId) !== membershipToken
+                || !this.status.approvedViewers.some(viewer => viewer.viewerId === viewerId)) return;
             await operation.signaling.keyRelay(operation.sessionId, viewerId, blob);
+            if (!this.current(operation) || operation.viewerKeys?.get(viewerId) !== viewerKey || operation.membershipTokens?.get(viewerId) !== membershipToken) return;
             const pin = await operation.store?.readPeer(viewerId);
-            if (!pin) await operation.store?.writePeer(viewerId, { key: viewerKey, fingerprint: await identityFingerprint(viewerKey), verified: false });
+            if (!pin && this.current(operation) && operation.viewerKeys?.get(viewerId) === viewerKey
+                && operation.membershipTokens?.get(viewerId) === membershipToken) {
+                const fingerprint = await identityFingerprint(viewerKey);
+                if (this.current(operation) && operation.viewerKeys?.get(viewerId) === viewerKey
+                    && operation.membershipTokens?.get(viewerId) === membershipToken)
+                    await operation.store?.writePeer(viewerId, { key: viewerKey, fingerprint, verified: false });
+            }
         } catch (error) {
             logDiagnostic("epoch key relay failed", { code: error instanceof SpikeSignalingError ? error.code : "unknown" }, true);
         }
@@ -321,8 +402,14 @@ export class PublishController {
             const stillApproved = this.status.approvedViewers.some(viewer => viewer.viewerId === viewerId);
             if (!stillApproved) continue;
             try {
-                const blob = await wrapEpochKey(operation.identity, operation.viewerKeys!.get(viewerId)!, `stream/${operation.sessionId}`, operation.epoch, operation.epochKey);
+                const viewerKey = operation.viewerKeys!.get(viewerId)!;
+                const membershipToken = operation.membershipTokens?.get(viewerId);
+                if (!membershipToken) continue;
+                const blob = await wrapEpochKey(operation.identity, viewerKey, `stream/${operation.sessionId}`, operation.epoch, operation.epochKey);
+                if (!this.current(operation) || operation.viewerKeys?.get(viewerId) !== viewerKey
+                    || operation.membershipTokens?.get(viewerId) !== membershipToken || !this.status.approvedViewers.some(viewer => viewer.viewerId === viewerId)) continue;
                 await operation.signaling.keyRelay(operation.sessionId, viewerId, blob);
+                if (!this.current(operation) || operation.viewerKeys?.get(viewerId) !== viewerKey || operation.membershipTokens?.get(viewerId) !== membershipToken) continue;
             } catch {
                 logDiagnostic("epoch rekey relay failed", {}, true);
             }
@@ -334,47 +421,69 @@ export class PublishController {
     async removeViewer(viewerId: string) {
         const { operation } = this;
         if (!operation?.signaling || !operation.sessionId || !this.current(operation)) return;
-        try {
-            await operation.signaling.removeViewer(operation.sessionId, viewerId);
-        } catch (error) {
-            logDiagnostic("viewer removal failed", { code: error instanceof SpikeSignalingError ? error.code : "unknown" }, true);
-            return;
+        const versions = operation.membershipVersions ??= new Map();
+        versions.set(viewerId, (versions.get(viewerId) ?? 0) + 1);
+        for (const [requestId, pending] of operation.requestKeys ?? []) {
+            if (pending.viewerId === viewerId) operation.requestKeys!.delete(requestId);
         }
-        if (!this.current(operation)) return;
+        operation.membershipTokens?.delete(viewerId);
+        // Revoke local delivery eligibility before awaiting the backend so a
+        // queued wrap/rekey completion cannot relay to a removed account.
         operation.viewerKeys?.delete(viewerId);
-        this.update({
-            ...this.status,
+        this.update({ ...this.status,
             pendingViewers: this.status.pendingViewers.filter(pending => pending.viewerId !== viewerId),
             approvedViewers: this.status.approvedViewers.filter(viewer => viewer.viewerId !== viewerId),
         });
+        const prior = operation.membershipQueue ?? Promise.resolve();
+        const next = prior.then(() => operation.signaling!.removeViewer(operation.sessionId!, viewerId));
+        operation.membershipQueue = next.then(() => {}, () => {});
+        try {
+            await next;
+        } catch (error) {
+            logDiagnostic("viewer removal failed", { code: error instanceof SpikeSignalingError ? error.code : "unknown" }, true);
+            this.fail(operation, "Viewer removal could not be confirmed. Publishing stopped fail-closed.");
+            return;
+        }
+        if (!this.current(operation)) return;
         await this.rotateEpoch(operation);
     }
 
     /** Explicitly accept a viewer's changed E2EE identity after review. */
-    async acceptViewerIdentity(viewerId: string) {
+    async acceptViewerIdentity(requestId: string) {
         const { operation } = this;
-        const key = operation?.viewerKeys?.get(viewerId);
-        if (!key) return;
-        await operation?.store?.writePeer(viewerId, { key, fingerprint: await identityFingerprint(key), verified: false });
+        const pending = this.status.pendingViewers.find(viewer => viewer.requestId === requestId);
+        const requestKey = pending && operation?.requestKeys?.get(requestId);
+        const key = requestKey?.key;
+        if (!operation?.store || !requestKey || !key) return;
+        const fingerprint = await identityFingerprint(key);
+        if (!this.current(operation) || operation.requestKeys?.get(requestId) !== requestKey) return;
+        await operation.store.writePeer(pending!.viewerId, { key, fingerprint, verified: false });
+        if (!this.current(operation) || operation.requestKeys?.get(requestId) !== requestKey) return;
+        requestKey.trust = { kind: "tofu" };
         this.update({
             ...this.status,
             pendingViewers: this.status.pendingViewers.map(pending =>
-                pending.viewerId === viewerId ? { ...pending, trust: { kind: "tofu" } } : pending),
+                pending.requestId === requestId ? { ...pending, trust: { kind: "tofu" } } : pending),
         });
     }
 
     /** Mark a viewer's identity as independently verified after the
      * participants compared the safety number over an independent channel. */
-    async verifyViewerIdentity(viewerId: string) {
+    async verifyViewerIdentity(requestId: string) {
         const { operation } = this;
-        const key = operation?.viewerKeys?.get(viewerId);
-        if (!operation?.store || !key) return;
-        await operation.store.writePeer(viewerId, { key, fingerprint: await identityFingerprint(key), verified: true });
-        if (!this.current(operation)) return;
+        const pending = this.status.pendingViewers.find(viewer => viewer.requestId === requestId);
+        const requestKey = pending && operation?.requestKeys?.get(requestId);
+        const key = requestKey?.key;
+        if (!operation?.store || !requestKey || !key) return;
+        const fingerprint = await identityFingerprint(key);
+        if (!this.current(operation) || operation.requestKeys?.get(requestId) !== requestKey) return;
+        await operation.store.writePeer(pending!.viewerId, { key, fingerprint, verified: true });
+        if (!this.current(operation) || operation.requestKeys?.get(requestId) !== requestKey) return;
+        requestKey.trust = { kind: "verified" };
         this.update({
             ...this.status,
             pendingViewers: this.status.pendingViewers.map(pending =>
-                pending.viewerId === viewerId ? { ...pending, trust: { kind: "verified" } } : pending),
+                pending.requestId === requestId ? { ...pending, trust: { kind: "verified" } } : pending),
         });
     }
 

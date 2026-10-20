@@ -106,9 +106,9 @@ export function SettingsPanel({ session, publisher, watching, discovery, localCa
                     {pending.safetyNumber && <Paragraph>Safety number: {pending.safetyNumber}. Compare it with the viewer over an independent channel before trusting the identity.</Paragraph>}
                     <div className="vc-dass-actions">
                         {pending.trust?.kind === "changed"
-                            ? <Button size="small" variant="dangerPrimary" onClick={() => void publisher.acceptViewerIdentity(pending.viewerId)}>Accept new identity</Button>
+                            ? <Button size="small" variant="dangerPrimary" onClick={() => void publisher.acceptViewerIdentity(pending.requestId)}>Accept new identity</Button>
                             : <Button size="small" onClick={() => void publisher.decideView(pending.requestId, "approve")}>Approve</Button>}
-                        {pending.trust?.kind !== "verified" && <Button size="small" variant="secondary" onClick={() => void publisher.verifyViewerIdentity(pending.viewerId)}>Mark identity verified</Button>}
+                        {pending.trust?.kind !== "verified" && <Button size="small" variant="secondary" onClick={() => void publisher.verifyViewerIdentity(pending.requestId)}>Mark identity verified</Button>}
                         <Button size="small" variant="secondary" onClick={() => void publisher.decideView(pending.requestId, "deny")}>Deny</Button>
                         <Button size="small" variant="dangerPrimary" onClick={() => void publisher.decideView(pending.requestId, "block")}>Block</Button>
                     </div>

@@ -6,6 +6,7 @@ import { hasAcceptedPublishCapture, PublishController } from "../../plugins/dass
 import { DassSession } from "../../plugins/dass/session";
 import { createShareSelection } from "../../plugins/dass/discordAdapter";
 import { memoryIdentityStore } from "./helpers/e2eeStore";
+import { generateIdentity, unwrapEpochKey } from "../../clients/spike/e2ee";
 
 function fixture(options: { requireVerifiedViewers?: boolean; } = {}) {
     const session = new DassSession();
@@ -17,14 +18,21 @@ function fixture(options: { requireVerifiedViewers?: boolean; } = {}) {
     let failure: SpikeSignalingError | undefined;
     let presenceListener: ((presence: ViewerPresence) => void) | undefined;
     let viewRequestListener: ((request: { request_id: string; viewer_id: string; viewer_display_name: string; viewer_key: string; }) => void) | undefined;
+    const requestClosedListeners = new Map<string, () => void>();
+    let publisherPublicKey = "";
+    let decisionGate: Promise<void> | undefined;
+    let releaseDecision: (() => void) | undefined;
+    let rejectRemoval = false;
     const decisions: Array<{ requestId: string; decision: string; }> = [];
+    const keyRelays: Array<{ viewerId: string; blob: string; }> = [];
     const removals: string[] = [];
     const signalingClosed = new AbortController();
     const signaling = { closed: signalingClosed.signal, close: () => signalingClosed.abort(),
         onViewRequests: (_session: string, listener: typeof viewRequestListener) => { viewRequestListener = listener; },
-        decideView: async (_session: string, requestId: string, decision: string) => { decisions.push({ requestId, decision }); },
-        removeViewer: async (_session: string, viewerId: string) => { removals.push(viewerId); },
-        keyRelay: async () => {}
+        onViewRequestClosed: (_session: string, requestId: string, listener: () => void) => { requestClosedListeners.set(requestId, listener); },
+        decideView: async (_session: string, requestId: string, decision: string) => { decisions.push({ requestId, decision }); await decisionGate; },
+        removeViewer: async (_session: string, viewerId: string) => { removals.push(viewerId); if (rejectRemoval) throw new Error("remove failed"); },
+        keyRelay: async (_session: string, viewerId: string, blob: string) => { keyRelays.push({ viewerId, blob }); }
     } as unknown as SpikeSignaling;
     const peerClosed = new AbortController();
     const peer = { closed: peerClosed.signal, candidates: ["candidate:1 1 UDP 1 192.168.1.2 50000 typ host"],
@@ -32,6 +40,7 @@ function fixture(options: { requireVerifiedViewers?: boolean; } = {}) {
         setSendEpoch: () => {}, retireEpochsBelow: () => {},
         activate: async (options: any) => {
              events.push("activate");
+              publisherPublicKey = options.e2ee.identityPublicKey;
              presenceListener = options.onViewerPresence;
             expect(options.roomId).toBe("authorized_room");
             expect(options.credential).toBe("separate_secret");
@@ -55,7 +64,11 @@ function fixture(options: { requireVerifiedViewers?: boolean; } = {}) {
     return { session, controller, bridge, events, peer, lease, signalingClosed, releases: () => releases,
         presence: (change: ViewerPresence["change"], viewerCount: number) => presenceListener?.({ type: "viewer_presence", session_id: "publisher_session", change, viewer_count: viewerCount }),
         request: (request: { request_id: string; viewer_id: string; viewer_display_name: string; viewer_key: string; }) => viewRequestListener?.(request),
-        decisions, removals,
+        closeRequest: (requestId: string) => requestClosedListeners.get(requestId)?.(),
+        decisions, removals, keyRelays, publisherPublicKey: () => publisherPublicKey,
+        holdDecision: () => { decisionGate = new Promise<void>(resolve => { releaseDecision = resolve; }); },
+        releaseDecision: () => { decisionGate = undefined; releaseDecision?.(); releaseDecision = undefined; },
+        failRemoval: () => { rejectRemoval = true; },
         deny: () => { deny = true; }, failConnection: (error: SpikeSignalingError) => { failure = error; }, exit: () => { context = undefined; controller.reset(); } };
 }
 
@@ -345,9 +358,21 @@ test("publisher sees pending view requests and decides them manually", async () 
             { requestId: "req_1", viewerId: "alice", displayName: "Alice" }
         ]);
         expect(pending[0].trust.kind).toBe("first-contact");
+        // A backend event reusing the request ID with a different device key
+        // cannot mutate the key that the publisher is reviewing.
+        f.request({ request_id: "req_1", viewer_id: "mallory", viewer_display_name: "Mallory", viewer_key: "bWFsbG9yeS1rZXk" });
+        await Promise.resolve();
+        await Promise.resolve();
+        expect(f.controller.getSnapshot().pendingViewers[0]).toMatchObject({ requestId: "req_1", viewerId: "alice" });
         await f.controller.decideView("req_1", "approve");
         expect(f.decisions).toEqual([{ requestId: "req_1", decision: "approve" }]);
         expect(f.controller.getSnapshot().pendingViewers).toEqual([]);
+        expect(f.controller.getSnapshot().approvedViewers).toEqual([{ viewerId: "alice" }]);
+        f.request({ request_id: "req_2", viewer_id: "alice", viewer_display_name: "Alice's other device", viewer_key: "YW5vdGhlci1rZXk" });
+        await Promise.resolve();
+        await Promise.resolve();
+        await f.controller.decideView("req_2", "approve");
+        expect(f.decisions).toEqual([{ requestId: "req_1", decision: "approve" }]);
         expect(f.controller.getSnapshot().approvedViewers).toEqual([{ viewerId: "alice" }]);
         await f.controller.removeViewer("alice");
         expect(f.removals).toEqual(["alice"]);
@@ -366,8 +391,103 @@ test("a publisher that requires verified identities refuses an unverified viewer
         expect(f.decisions).toEqual([]);
         expect(f.controller.getSnapshot().message).toContain("not independently verified");
         // A verified viewer is admitted.
-        await f.controller.verifyViewerIdentity("alice");
+        await f.controller.verifyViewerIdentity("req_1");
         await f.controller.decideView("req_1", "approve");
         expect(f.decisions).toEqual([{ requestId: "req_1", decision: "approve" }]);
+    } finally { f.controller.stop(); }
+});
+
+test("overlapping same-account approvals serialize and relay only the exact approved device key", async () => {
+    const f = fixture();
+    const firstDevice = await generateIdentity();
+    const secondDevice = await generateIdentity();
+    try {
+        await f.controller.publish("https://dass.example", f.bridge);
+        f.request({ request_id: "device_1", viewer_id: "alice", viewer_display_name: "Alice device 1", viewer_key: firstDevice.publicKey });
+        f.request({ request_id: "device_2", viewer_id: "alice", viewer_display_name: "Alice device 2", viewer_key: secondDevice.publicKey });
+        await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
+        f.holdDecision();
+        const first = f.controller.decideView("device_1", "approve");
+        const second = f.controller.decideView("device_2", "approve");
+        while (f.decisions.length === 0) await Promise.resolve();
+        expect(f.decisions).toEqual([{ requestId: "device_1", decision: "approve" }]);
+        f.releaseDecision();
+        await Promise.all([first, second]);
+        expect(f.decisions).toEqual([{ requestId: "device_1", decision: "approve" }]);
+        expect(f.keyRelays).toHaveLength(1);
+        const { epoch, keyBytes } = await unwrapEpochKey(firstDevice, f.publisherPublicKey(), "stream/publisher_session", f.keyRelays[0].blob);
+        expect(epoch).toBe(1);
+        expect(keyBytes).toHaveLength(32);
+        await expect(unwrapEpochKey(secondDevice, f.publisherPublicKey(), "stream/publisher_session", f.keyRelays[0].blob)).rejects.toThrow();
+    } finally { f.controller.stop(); }
+});
+
+test("withdrawal invalidates an approval awaiting its backend response before any key relay", async () => {
+    const f = fixture();
+    const device = await generateIdentity();
+    try {
+        await f.controller.publish("https://dass.example", f.bridge);
+        f.request({ request_id: "withdraw_race", viewer_id: "alice", viewer_display_name: "Alice", viewer_key: device.publicKey });
+        await Promise.resolve(); await Promise.resolve();
+        f.holdDecision();
+        const approving = f.controller.decideView("withdraw_race", "approve");
+        while (f.decisions.length === 0) await Promise.resolve();
+        const removing = f.controller.removeViewer("alice");
+        f.releaseDecision();
+        await Promise.all([approving, removing]);
+        expect(f.keyRelays).toEqual([]);
+        expect(f.removals).toEqual(["alice"]);
+        expect(f.controller.getSnapshot().approvedViewers).toEqual([]);
+    } finally { f.controller.stop(); }
+});
+
+test("closed requests are removed and cannot be approved later", async () => {
+    const f = fixture();
+    const device = await generateIdentity();
+    try {
+        await f.controller.publish("https://dass.example", f.bridge);
+        f.request({ request_id: "expired_request", viewer_id: "alice", viewer_display_name: "Alice", viewer_key: device.publicKey });
+        await Promise.resolve(); await Promise.resolve();
+        f.closeRequest("expired_request");
+        await f.controller.decideView("expired_request", "approve");
+        expect(f.decisions).toEqual([]);
+        expect(f.keyRelays).toEqual([]);
+        expect(f.controller.getSnapshot().pendingViewers).toEqual([]);
+    } finally { f.controller.stop(); }
+});
+
+test("unconfirmed viewer removal stops publishing fail-closed", async () => {
+    const f = fixture();
+    const device = await generateIdentity();
+    try {
+        await f.controller.publish("https://dass.example", f.bridge);
+        f.request({ request_id: "remove_fail", viewer_id: "alice", viewer_display_name: "Alice", viewer_key: device.publicKey });
+        await Promise.resolve(); await Promise.resolve(); await f.controller.decideView("remove_fail", "approve");
+        f.failRemoval();
+        await f.controller.removeViewer("alice");
+        expect(f.controller.getSnapshot().phase).toBe("failed");
+        expect(f.controller.getSnapshot().message).toContain("stopped fail-closed");
+        expect(f.peer.closed.aborted).toBe(true);
+    } finally { f.controller.stop(); }
+});
+
+test("remove and re-approve of an account binds the new epoch blob to the new device identity", async () => {
+    const f = fixture();
+    const oldDevice = await generateIdentity();
+    const newDevice = await generateIdentity();
+    try {
+        await f.controller.publish("https://dass.example", f.bridge);
+        f.request({ request_id: "old_device", viewer_id: "alice", viewer_display_name: "Alice old", viewer_key: oldDevice.publicKey });
+        await Promise.resolve(); await Promise.resolve(); await f.controller.decideView("old_device", "approve");
+        await f.controller.removeViewer("alice");
+        f.request({ request_id: "new_device", viewer_id: "alice", viewer_display_name: "Alice new", viewer_key: newDevice.publicKey });
+        await Promise.resolve(); await Promise.resolve();
+        await f.controller.acceptViewerIdentity("new_device");
+        await f.controller.decideView("new_device", "approve");
+        expect(f.keyRelays).toHaveLength(2);
+        await expect(unwrapEpochKey(oldDevice, f.publisherPublicKey(), "stream/publisher_session", f.keyRelays[1].blob)).rejects.toThrow();
+        const unwrapped = await unwrapEpochKey(newDevice, f.publisherPublicKey(), "stream/publisher_session", f.keyRelays[1].blob);
+        expect(unwrapped.epoch).toBe(2);
+        expect(unwrapped.keyBytes).toHaveLength(32);
     } finally { f.controller.stop(); }
 });

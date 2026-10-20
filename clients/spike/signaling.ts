@@ -78,7 +78,7 @@ export class SpikeSignaling {
     private expiryTimer?: ReturnType<typeof setTimeout>;
     private publisherPresence?: { sessionId: string; viewerCount: number; listener: (presence: ViewerPresence) => void; };
     private viewRequestListener?: { sessionId: string; listener: (request: ViewRequest) => void; };
-    private viewRequestClosed?: { sessionId: string; requestId: string; listener: () => void; };
+    private viewRequestClosed = new Map<string, { sessionId: string; listener: () => void; }>();
     private viewDecisionListener?: { sessionId: string; requestId: string; listener: (decision: ViewDecision) => void; };
     private keyRelayListener?: { listener: (relay: KeyRelay) => void; };
     private earlyDecisions: ViewDecision[] = [];
@@ -160,10 +160,9 @@ export class SpikeSignaling {
             }
             if (message.operation.type === "view_request_closed") {
                 const update = message.operation;
-                const closed = this.viewRequestClosed;
-                if (closed && message.request_id === "server_view_request_closed" && update.session_id === closed.sessionId
-                    && update.request_id === closed.requestId) {
-                    this.viewRequestClosed = undefined;
+                const closed = this.viewRequestClosed.get(update.request_id);
+                if (closed && message.request_id === "server_view_request_closed" && update.session_id === closed.sessionId) {
+                    this.viewRequestClosed.delete(update.request_id);
                     closed.listener();
                 }
                 // A closed prompt for another request is informational; ignore it.
@@ -245,6 +244,11 @@ export class SpikeSignaling {
     onViewRequests(sessionId: string, listener: (request: ViewRequest) => void) {
         if (this.viewRequestListener) throw new Error("DASS view requests are already handled.");
         this.viewRequestListener = { sessionId, listener };
+    }
+
+    /** Observe a request being closed/expired after it has been pushed. */
+    onViewRequestClosed(sessionId: string, requestId: string, listener: () => void) {
+        this.viewRequestClosed.set(requestId, { sessionId, listener });
     }
 
     /** Publisher decision for a pending request ID from a `view_request` push. */
@@ -348,7 +352,7 @@ export class SpikeSignaling {
         this.active = false;
         this.publisherPresence = undefined;
         this.viewRequestListener = undefined;
-        this.viewRequestClosed = undefined;
+        this.viewRequestClosed.clear();
         this.viewDecisionListener = undefined;
         this.keyRelayListener = undefined;
         clearTimeout(this.expiryTimer);
