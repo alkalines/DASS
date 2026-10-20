@@ -56,6 +56,8 @@ export interface PublishDependencies {
     identityStore: () => Promise<IdentityStore>;
     /** Publisher policy: admit only independently verified viewers. */
     requireVerifiedViewers?: () => boolean;
+    /** Override for deterministic async key-wrap race tests. */
+    wrapEpochKey?: typeof wrapEpochKey;
 }
 
 /** Owns publishing independently of settings/modal mounting and Discord's native stream. */
@@ -358,26 +360,14 @@ export class PublishController {
         if (decision !== "approve" && operation.epoch !== undefined) await this.rotateEpoch(operation);
     }
 
-    /**
-     * Rotate the media epoch and relay it to an approved viewer. A fresh
-     * 256-bit key is wrapped under ECDH with the viewer's pinned identity; the
-     * backend only forwards the ciphertext. Past-epoch content is not released
-     * to newly admitted viewers.
-     */
+    /** Rotate membership to a fresh epoch and persist the newly accepted identity pin. */
     private async deliverEpoch(operation: NonNullable<PublishController["operation"]>, viewerId: string, viewerKey: string, membershipToken: object) {
-        if (!operation.peer || !operation.signaling || !operation.identity || !operation.sessionId) return;
-        if (!viewerKey || operation.viewerKeys?.get(viewerId) !== viewerKey || !operation.peer || !operation.identity || !operation.sessionId || !operation.signaling) return;
-        if (operation.epoch === undefined || !operation.epochKey) {
-            operation.epoch = 1;
-            operation.epochKey = generateEpochKey();
-            try { operation.peer.setSendEpoch(operation.epoch, operation.epochKey); } catch { return; }
-        }
+        // A newly admitted viewer must never receive an epoch that protected
+        // frames before their approval. Rotate for the entire immutable roster.
+        await this.rotateEpoch(operation);
+        if (!this.current(operation) || operation.viewerKeys?.get(viewerId) !== viewerKey
+            || operation.membershipTokens?.get(viewerId) !== membershipToken) return;
         try {
-            const blob = await wrapEpochKey(operation.identity, viewerKey, `stream/${operation.sessionId}`, operation.epoch, operation.epochKey);
-            if (!this.current(operation) || operation.viewerKeys?.get(viewerId) !== viewerKey || operation.membershipTokens?.get(viewerId) !== membershipToken
-                || !this.status.approvedViewers.some(viewer => viewer.viewerId === viewerId)) return;
-            await operation.signaling.keyRelay(operation.sessionId, viewerId, blob);
-            if (!this.current(operation) || operation.viewerKeys?.get(viewerId) !== viewerKey || operation.membershipTokens?.get(viewerId) !== membershipToken) return;
             const pin = await operation.store?.readPeer(viewerId);
             if (!pin && this.current(operation) && operation.viewerKeys?.get(viewerId) === viewerKey
                 && operation.membershipTokens?.get(viewerId) === membershipToken) {
@@ -386,33 +376,45 @@ export class PublishController {
                     && operation.membershipTokens?.get(viewerId) === membershipToken)
                     await operation.store?.writePeer(viewerId, { key: viewerKey, fingerprint, verified: false });
             }
-        } catch (error) {
-            logDiagnostic("epoch key relay failed", { code: error instanceof SpikeSignalingError ? error.code : "unknown" }, true);
+        } catch {
+            logDiagnostic("viewer identity pin persistence failed", {}, true);
         }
     }
 
     /** Rekey after viewer removal so removed viewers keep only past epochs. */
     private async rotateEpoch(operation: NonNullable<PublishController["operation"]>) {
-        if (!operation.peer || !operation.signaling || !operation.identity || !operation.sessionId || operation.epoch === undefined) return;
-        operation.epoch += 1;
-        operation.epochKey = generateEpochKey();
-        operation.peer.setSendEpoch(operation.epoch, operation.epochKey);
-        try { operation.peer.retireEpochsBelow(operation.epoch); } catch {}
-        for (const viewerId of new Set(operation.viewerKeys?.keys() ?? [])) {
-            const stillApproved = this.status.approvedViewers.some(viewer => viewer.viewerId === viewerId);
-            if (!stillApproved) continue;
-            try {
-                const viewerKey = operation.viewerKeys!.get(viewerId)!;
-                const membershipToken = operation.membershipTokens?.get(viewerId);
-                if (!membershipToken) continue;
-                const blob = await wrapEpochKey(operation.identity, viewerKey, `stream/${operation.sessionId}`, operation.epoch, operation.epochKey);
-                if (!this.current(operation) || operation.viewerKeys?.get(viewerId) !== viewerKey
-                    || operation.membershipTokens?.get(viewerId) !== membershipToken || !this.status.approvedViewers.some(viewer => viewer.viewerId === viewerId)) continue;
-                await operation.signaling.keyRelay(operation.sessionId, viewerId, blob);
-                if (!this.current(operation) || operation.viewerKeys?.get(viewerId) !== viewerKey || operation.membershipTokens?.get(viewerId) !== membershipToken) continue;
-            } catch {
-                logDiagnostic("epoch rekey relay failed", {}, true);
+        if (!this.current(operation)) return;
+        if (!operation.peer || !operation.signaling || !operation.identity || !operation.sessionId) {
+            this.fail(operation, "A fresh approved-viewer epoch could not be prepared. Publishing stopped fail-closed.");
+            return;
+        }
+        const members = [...(operation.viewerKeys ?? [])].map(([viewerId, viewerKey]) => ({
+            viewerId, viewerKey, token: operation.membershipTokens?.get(viewerId),
+        })).filter(member => member.token && this.status.approvedViewers.some(viewer => viewer.viewerId === member.viewerId));
+        const epoch = (operation.epoch ?? 0) + 1;
+        const epochKey = generateEpochKey();
+        const current = () => this.current(operation) && members.every(member =>
+            operation.viewerKeys?.get(member.viewerId) === member.viewerKey && operation.membershipTokens?.get(member.viewerId) === member.token
+            && this.status.approvedViewers.some(viewer => viewer.viewerId === member.viewerId));
+        try {
+            // Prepare all wraps before committing send state. Membership must
+            // remain unchanged across asynchronous crypto and each relay.
+            const wrapped = await Promise.all(members.map(async member => ({ ...member,
+                blob: await (this.dependencies.wrapEpochKey ?? wrapEpochKey)(operation.identity!, member.viewerKey, `stream/${operation.sessionId}`, epoch, epochKey),
+            })));
+            if (!current()) return;
+            operation.peer.setSendEpoch(epoch, epochKey);
+            operation.epoch = epoch;
+            operation.epochKey = epochKey;
+            try { operation.peer.retireEpochsBelow(epoch); } catch {}
+            for (const member of wrapped) {
+                if (!current()) throw new Error("Membership changed during epoch relay.");
+                await operation.signaling.keyRelay(operation.sessionId, member.viewerId, member.blob);
+                if (!current()) throw new Error("Membership changed during epoch relay.");
             }
+        } catch (error) {
+            logDiagnostic("epoch rekey failed; publishing stopped", { code: error instanceof SpikeSignalingError ? error.code : "unknown" }, true);
+            this.fail(operation, "A fresh approved-viewer epoch could not be installed and distributed. Publishing stopped fail-closed.");
         }
     }
 
@@ -435,7 +437,10 @@ export class PublishController {
             approvedViewers: this.status.approvedViewers.filter(viewer => viewer.viewerId !== viewerId),
         });
         const prior = operation.membershipQueue ?? Promise.resolve();
-        const next = prior.then(() => operation.signaling!.removeViewer(operation.sessionId!, viewerId));
+        const next = prior.then(async () => {
+            await operation.signaling!.removeViewer(operation.sessionId!, viewerId);
+            if (this.current(operation)) await this.rotateEpoch(operation);
+        });
         operation.membershipQueue = next.then(() => {}, () => {});
         try {
             await next;
@@ -445,7 +450,6 @@ export class PublishController {
             return;
         }
         if (!this.current(operation)) return;
-        await this.rotateEpoch(operation);
     }
 
     /** Explicitly accept a viewer's changed E2EE identity after review. */
