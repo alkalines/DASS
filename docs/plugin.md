@@ -283,6 +283,15 @@ the comparison alone, and a changed key always pauses admission until the
 publisher explicitly re-confirms it. A changed publisher key pauses the
 subscription until the viewer accepts the new identity.
 
+**Approval prompt:** each pending view request opens an Approve/Deny/Block
+dialog on the publisher's client, closed automatically once the request is
+decided or expires. The backend closes a viewer's setup 15 seconds after it
+joins, so an unanswered prompt shows the viewer "The streamer did not approve
+your request in time." The `autoApproveViewers` setting (off by default)
+approves first-contact and pinned identities without a prompt. Changed
+identities and viewers refused by `requireVerifiedViewers` still prompt. Both
+publisher and viewer need this build; an older publisher client has no prompt.
+
 **Historical chooser-only behavior:** On Discord stable build **634304**, the center voice tray and left Voice Connected
 panel share buttons now declare an explicit Discord/DASS chooser before their
 native start callbacks. The center chooser/refusal is user-observed; the new left

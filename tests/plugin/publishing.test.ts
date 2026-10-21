@@ -14,7 +14,7 @@ function deferred<T>() {
     return { promise, resolve };
 }
 
-function fixture(options: { requireVerifiedViewers?: boolean; wrapEpochKey?: typeof wrapEpochKey; } = {}) {
+function fixture(options: { requireVerifiedViewers?: boolean; autoApproveViewers?: boolean; wrapEpochKey?: typeof wrapEpochKey; } = {}) {
     const session = new DassSession();
     session.configure("authorized_room", "separate_secret");
     let context: string | undefined = "discord_context";
@@ -66,6 +66,7 @@ function fixture(options: { requireVerifiedViewers?: boolean; wrapEpochKey?: typ
         prepare: async () => { events.push("prepare"); return peerClosed.signal.aborted ? { ...peer, closed: new AbortController().signal } : peer; },
         identityStore: async () => memoryIdentityStore(),
         requireVerifiedViewers: () => options.requireVerifiedViewers ?? false,
+        autoApproveViewers: () => options.autoApproveViewers ?? false,
         wrapEpochKey: options.wrapEpochKey,
     });
     controller.start();
@@ -407,6 +408,39 @@ test("a publisher that requires verified identities refuses an unverified viewer
         await f.controller.decideView("req_1", "approve");
         expect(f.decisions).toEqual([{ requestId: "req_1", decision: "approve" }]);
     } finally { f.controller.stop(); }
+});
+
+test("automatic approval admits new viewers but pauses on changed identities and the verified-only policy", async () => {
+    // Trust evaluation settles in microtasks; a no-op decision then waits for the
+    // serialized membership queue, including epoch delivery and pin persistence.
+    const settle = async (controller: PublishController) => {
+        await Promise.resolve();
+        await Promise.resolve();
+        await controller.decideView("barrier", "deny");
+    };
+    const auto = fixture({ autoApproveViewers: true });
+    const alice = await generateIdentity();
+    const impostor = await generateIdentity();
+    try {
+        await auto.controller.publish("https://dass.example", auto.bridge);
+        auto.request({ request_id: "first", viewer_id: "alice", viewer_display_name: "Alice", viewer_key: alice.publicKey });
+        await settle(auto.controller);
+        expect(auto.decisions).toEqual([{ requestId: "first", decision: "approve" }]);
+        expect(auto.controller.getSnapshot().approvedViewers).toEqual([{ viewerId: "alice" }]);
+        auto.request({ request_id: "changed", viewer_id: "alice", viewer_display_name: "Alice?", viewer_key: impostor.publicKey });
+        await settle(auto.controller);
+        expect(auto.decisions).toEqual([{ requestId: "first", decision: "approve" }]);
+        expect(auto.controller.getSnapshot().pendingViewers.map(viewer => viewer.trust.kind)).toEqual(["changed"]);
+    } finally { auto.controller.stop(); }
+
+    const verifiedOnly = fixture({ autoApproveViewers: true, requireVerifiedViewers: true });
+    try {
+        await verifiedOnly.controller.publish("https://dass.example", verifiedOnly.bridge);
+        verifiedOnly.request({ request_id: "unverified", viewer_id: "alice", viewer_display_name: "Alice", viewer_key: alice.publicKey });
+        await settle(verifiedOnly.controller);
+        expect(verifiedOnly.decisions).toEqual([]);
+        expect(verifiedOnly.controller.getSnapshot().pendingViewers).toHaveLength(1);
+    } finally { verifiedOnly.controller.stop(); }
 });
 
 test("overlapping same-account approvals serialize and relay only the exact approved device key", async () => {

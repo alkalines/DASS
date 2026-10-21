@@ -37,6 +37,7 @@ import { streamQualityLabel, streamTrackQuality } from "./streamPresentation";
 import { startStreamSounds } from "./streamSounds";
 import { StreamSidebarBody } from "./streamUi";
 import { startUpdateNotifications } from "./updateNotifications";
+import { startViewerApprovalPrompts } from "./viewerApproval";
 import { WatchController } from "./watching";
 
 const currentCall = () => SelectedChannelStore.getVoiceChannelId();
@@ -44,7 +45,8 @@ const discovery = new DiscoveryController();
 const session = new DassSession({ read: readRememberedAccount, write: writeRememberedAccount, forget: forgetRememberedAccount }, undefined, currentCall);
 const watching = new WatchController(currentCall, { connect: options => session.connect(options), prepare: SpikePeer.prepare, identityStore: defaultIdentityStore });
 const directory = new WatchController(currentCall, { connect: options => session.connect(options), prepare: SpikePeer.prepare, identityStore: defaultIdentityStore });
-const publisher = new PublishController(session, currentCall, { connect: options => session.connect(options), prepare: SpikePeer.prepare, identityStore: defaultIdentityStore, requireVerifiedViewers: () => settings.store.requireVerifiedViewers });
+const publisher = new PublishController(session, currentCall, { connect: options => session.connect(options), prepare: SpikePeer.prepare, identityStore: defaultIdentityStore,
+    requireVerifiedViewers: () => settings.store.requireVerifiedViewers, autoApproveViewers: () => settings.store.autoApproveViewers });
 const callDiscovery = createCallDiscovery(session, directory, () => settings.store.backendUrl,
     () => !["idle", "failed"].includes(publisher.getSnapshot().phase) || ["loading", "ready", "watching"].includes(watching.getSnapshot().phase));
 const localCapture = new LocalCaptureCheck();
@@ -56,6 +58,7 @@ let unsubscribeAccountStatus: (() => void) | undefined;
 let unsubscribeDirectoryStatus: (() => void) | undefined;
 let stopStreamSounds: (() => void) | undefined;
 let stopUpdateNotifications: (() => void) | undefined;
+let stopViewerPrompts: (() => void) | undefined;
 let gridWatchEpoch = 0;
 
 function stopGridWatching() {
@@ -157,6 +160,11 @@ const settings = definePluginSettings({
         type: OptionType.BOOLEAN,
         description: "Only admit viewers whose E2EE identity was independently verified with a safety-number comparison.",
         default: false
+    },
+    autoApproveViewers: {
+        type: OptionType.BOOLEAN,
+        description: "Approve DASS viewers automatically instead of showing a prompt. Changed E2EE identities and the verified-viewer requirement still need your review.",
+        default: false
     }
 });
 
@@ -176,6 +184,7 @@ function startRuntime() {
     watching.start();
     publisher.start();
     stopStreamSounds = startStreamSounds(publisher, watching, currentCall);
+    stopViewerPrompts = startViewerApprovalPrompts(publisher);
     callDiscovery.start();
     unsubscribeAccountStatus = session.subscribe(() => {
         if (!session.getSnapshot().configured) stopMedia();
@@ -209,6 +218,8 @@ function stopRuntime() {
     stopUpdateNotifications = undefined;
     stopStreamSounds?.();
     stopStreamSounds = undefined;
+    stopViewerPrompts?.();
+    stopViewerPrompts = undefined;
     unsubscribeWatchStatus?.();
     unsubscribePublishStatus?.();
     unsubscribeAccountStatus?.();

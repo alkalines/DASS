@@ -56,6 +56,8 @@ export interface PublishDependencies {
     identityStore: () => Promise<IdentityStore>;
     /** Publisher policy: admit only independently verified viewers. */
     requireVerifiedViewers?: () => boolean;
+    /** Publisher policy: approve eligible viewers without a prompt. */
+    autoApproveViewers?: () => boolean;
     /** Override for deterministic async key-wrap race tests. */
     wrapEpochKey?: typeof wrapEpochKey;
 }
@@ -238,6 +240,7 @@ export class PublishController {
                             const pending = [...this.status.pendingViewers.filter(existing => existing.requestId !== viewRequest.request_id),
                                 { requestId: viewRequest.request_id, viewerId: viewRequest.viewer_id, displayName: viewRequest.viewer_display_name, trust }];
                             this.update({ ...this.status, pendingViewers: pending });
+                            if (this.willAutoApprove(trust)) void this.decideView(viewRequest.request_id, "approve");
                             // The safety number needs a digest, so it fills in
                             // once it is computed.
                             const { identity } = operation;
@@ -280,6 +283,12 @@ export class PublishController {
         const next = prior.then(() => this.decideViewQueued(operation, requestId, decision));
         operation.membershipQueue = next.then(() => {}, () => {});
         await next;
+    }
+
+    /** Auto-approval never covers a changed identity or bypasses the verified-viewer policy. */
+    willAutoApprove(trust: IdentityTrust) {
+        if (!this.dependencies.autoApproveViewers?.() || trust.kind === "changed") return false;
+        return !this.dependencies.requireVerifiedViewers?.() || trust.kind === "verified";
     }
 
     private async decideViewQueued(operation: NonNullable<PublishController["operation"]>, requestId: string, decision: "approve" | "deny" | "block") {
