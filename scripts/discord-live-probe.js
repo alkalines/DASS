@@ -23,7 +23,8 @@
     const results = [];
     const sidebar = [];
     const streamLists = [];
-    const sidebarCallback = /[A-Za-z_$][\w$]*=[A-Za-z_$][\w$]*\.useCallback\(\(\)=>\{\(0,[A-Za-z_$][\w$]*\.A\)\([A-Za-z_$][\w$]*,[A-Za-z_$][\w$]*\.id,[A-Za-z_$][\w$]*\)\},\[[^\]]{1,150}\]\),[A-Za-z_$][\w$]*=[A-Za-z_$][\w$]*\.find\([A-Za-z_$][\w$]*=>[A-Za-z_$][\w$]*\.ownerId===/;
+    // Do not retry at every character inside a long identifier on a failed match.
+    const sidebarCallback = /(?<![\w$])[A-Za-z_$][\w$]*=[A-Za-z_$][\w$]*\.useCallback\(\(\)=>\{\(0,[A-Za-z_$][\w$]*\.A\)\([A-Za-z_$][\w$]*,[A-Za-z_$][\w$]*\.id,[A-Za-z_$][\w$]*\)\},\[[^\]]{1,150}\]\),[A-Za-z_$][\w$]*=[A-Za-z_$][\w$]*\.find\([A-Za-z_$][\w$]*=>[A-Za-z_$][\w$]*\.ownerId===/;
     for (const [moduleId, factory] of Object.entries(factories)) {
         if (typeof factory !== "function") continue;
         const source = Function.prototype.toString.call(factory);

@@ -118,3 +118,13 @@ test("live probe bounds static source excerpts and reports unavailable webpack",
     expect(result.streamLists.every((entry: { source: string; truncated: boolean; }) => entry.source.length <= 12_000 && entry.truncated)).toBe(true);
     expect(JSON.parse(runInNewContext(probe, {})).error).toContain("unavailable");
 });
+
+test("live probe scans long identifiers without losing dollar-prefixed sidebar callbacks", () => {
+    const sidebar = new Function(`throw new Error("Never execute"); /*${"x".repeat(200_000)}*/ $f=$em.useCallback(()=>{(0,$vT.A)($ctx,$channel.id,$options)},[$ctx,$channel.id,$options]),$stream=$streams.find($entry=>$entry.ownerId===user?.id); render({streamActive:null!=$stream});`);
+    const result = JSON.parse(runInNewContext(probe, { Vencord: { Webpack: { wreq: { m: { sidebar } } } } }));
+    expect(result.sidebar).toHaveLength(1);
+    expect(result.sidebar[0].source).toContain("$f=$em.useCallback");
+    expect(result.sidebar[0].source).toContain("streamActive:null!=$stream");
+    expect(result.sidebar[0].offset).toBeGreaterThan(0);
+    expect(result.sidebar[0].source.length).toBeLessThanOrEqual(8_000);
+});
