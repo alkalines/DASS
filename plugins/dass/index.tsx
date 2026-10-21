@@ -16,7 +16,8 @@ import type { ComponentType } from "react";
 import { forgetRememberedAccount, readRememberedAccount, writeRememberedAccount } from "./accountStorage";
 import { createCallDiscovery } from "./callDiscovery";
 import { isDassParticipant, isFocusedDassWatch, participantTitle, projectParticipants } from "./callPresentation";
-import { type EquibopCaptureBridge, LocalCaptureCheck } from "./capture";
+import { LocalCaptureCheck } from "./capture";
+import { getCaptureBridge, stopCaptureHost } from "./captureHost";
 import { DiscoveryController } from "./controller";
 import { logDiagnostic } from "../../clients/spike/diagnostics";
 import { DISCORD_PRESENTATION_PATCHES, DISCORD_SHARE_PATCHES, getDiscordBuildWarning, isLocalPublisherLive, type PublishIntent, routePublish, routeWatch, type WatchIntent } from "./discordAdapter";
@@ -170,6 +171,7 @@ function startRuntime() {
     }
     logDiagnostic("plugin started", { defaultDass: settings.store.defaultDass });
     configureIdentityBackend(DataStore);
+    getCaptureBridge();
     discovery.start();
     watching.start();
     publisher.start();
@@ -216,6 +218,7 @@ function stopRuntime() {
     unsubscribeDirectoryStatus = undefined;
     stopMedia();
     callDiscovery.stop();
+    stopCaptureHost();
     publisher.stop();
     watching.stop();
     session.stop();
@@ -235,8 +238,7 @@ export default definePlugin({
     },
     StreamMenu(props: StreamMenuProps) {
         return <NativeStreamMenu {...props} controller={publisher} currentChannelId={pluginActive ? currentCall() : undefined} changeSource={() => {
-            const host = globalThis as typeof globalThis & { Equibop?: { DassCapture?: EquibopCaptureBridge; }; };
-            void publisher.changeSource(settings.store.backendUrl, host.Equibop?.DassCapture);
+            void publisher.changeSource(settings.store.backendUrl, getCaptureBridge());
         }} />;
     },
     usePublishingState(channelId: string) {
@@ -323,15 +325,16 @@ export default definePlugin({
         const discordChannelId = currentCall();
         if (!discordChannelId) return showToast("Join a Discord call before sharing.");
         showShareTransportChooser(settings.store.defaultDass, () => pluginActive && currentCall() === discordChannelId,
-            () => { logDiagnostic("transport selected", { transport: "discord" }); nativeStart(); },
+            () => { logDiagnostic("transport selected", { transport: "discord" }); getCaptureBridge(); nativeStart(); },
             () => {
                 logDiagnostic("transport selected", { transport: "dass" });
                 if (!session.getSnapshot().configured) return showToast("Configure your DASS account in plugin settings before sharing.");
                 stopGridWatching();
                 stopSpikeTest();
                 localCapture.stop();
-                const host = globalThis as typeof globalThis & { Equibop?: { DassCapture?: EquibopCaptureBridge; }; };
-                void publisher.publish(settings.store.backendUrl, host.Equibop?.DassCapture);
+                const bridge = getCaptureBridge();
+                if (!bridge) return showToast("DASS capture is unavailable. This Equibop version does not expose the required picker APIs.");
+                void publisher.publish(settings.store.backendUrl, bridge);
             });
     },
     stopPublishing() {

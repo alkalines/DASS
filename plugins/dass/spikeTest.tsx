@@ -9,7 +9,8 @@ import { Paragraph } from "@components/Paragraph";
 import { copyToClipboard } from "@utils/clipboard";
 import { TextInput, useCallback, useEffect, useRef, useState } from "@webpack/common";
 
-import { createEquibopCapture, type EquibopCaptureBridge } from "./capture";
+import { createEquibopCapture } from "./capture";
+import { getCaptureBridge } from "./captureHost";
 import { deviceIdentity } from "./e2eeIdentity";
 import { PREPARATION_TIMEOUT_MS, preparationFailureMessage, SpikePeer } from "../../clients/spike/peer";
 
@@ -79,8 +80,7 @@ export function SpikeTestPanel({ backendUrl, isActive, beforePrepare }: { backen
         setBusy(true);
         setStatus(publisher ? "Opening the installed Equibop picker. Capture remains local until activation." : "Gathering viewer candidates. No capture is requested.");
         try {
-            const host = globalThis as typeof globalThis & { Equibop?: { DassCapture?: EquibopCaptureBridge; }; };
-            const capture = publisher ? await createEquibopCapture(host.Equibop?.DassCapture)(current.abort.signal) : undefined;
+            const capture = publisher ? await createEquibopCapture(getCaptureBridge())(current.abort.signal) : undefined;
             if (current.abort.signal.aborted) { capture?.release(); return; }
             current.peer = await SpikePeer.prepare({ experimental: true, signal: current.abort.signal, capture, e2ee: true });
             if (resource.current !== current) { current.peer.close(); return; }

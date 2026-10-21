@@ -12,12 +12,12 @@ export interface EquibopCaptureBridge {
     capture(signal: AbortSignal): Promise<CaptureLease>;
 }
 
-/** No fallback: stock Equibop does not expose the required lifecycle bridge. */
+/** Capture ownership is supplied by the plugin's Equibop adapter. */
 export function createEquibopCapture(bridge?: EquibopCaptureBridge) {
     return async (signal: AbortSignal): Promise<CaptureLease> => {
         if (signal.aborted || bridge?.version !== 1 || typeof bridge.capture !== "function") {
             logDiagnostic("capture unavailable", { code: signal.aborted ? "cancelled" : "bridge_missing_or_incompatible" }, true);
-            throw new Error("The Equibop DASS capture bridge is unavailable.");
+            throw new Error("DASS capture is unavailable. This Equibop version does not expose the required picker APIs.");
         }
         logDiagnostic("capture picker requested");
         try {

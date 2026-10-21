@@ -120,8 +120,8 @@ Voice Connected share button opens the same DASS menu with **Change Stream** and
 **Stop Streaming**, without Report Problem. Change Stream releases the old capture,
 waits for host audio cleanup, and opens the existing Equibop source/quality/audio
 picker through a fresh authenticated DASS session. Cancelling leaves sharing
-stopped; ordinary voice is unaffected. Rebuild the Equibop capture bridge as well
-as the plugin for awaitable capture cleanup. The menu/arrow hooks matched once
+stopped; ordinary voice is intended to remain unaffected. Capture cleanup now
+lives in the plugin; only the Equicord bundle needs rebuilding. The menu/arrow hooks matched once
 against build 638651 through read-only DevTools inspection; end-to-end acceptance
 of these changes remains pending. DASS grid and filmstrip tiles now precede native
 participant tiles (left first), preserving native participant keys.
@@ -227,8 +227,11 @@ track labels or captured media. Browser exception messages and stacks are omitte
 
 If `share action intercepted` is absent after clicking a supported Share button,
 check Equicord's patch warnings and plugin loading; the hooks are build-specific.
-`bridge_missing_or_incompatible` means the required Equibop capture bridge is not
-installed. `rejected:unauthorized` indicates backend authorization failure.
+`bridge_missing_or_incompatible` means the installed Equibop version does not
+expose the picker APIs required by the plugin adapter. Rebuild the plugin and
+restart; a custom Equibop host is no longer required. `rejected:unauthorized`
+indicates backend authorization failure. Authentication happens before capture,
+so a backend login/connection failure also prevents the picker from opening.
 An applied answer followed by a connection timeout points to the UDP path or
 peer lifecycle, not necessarily an authentication problem.
 
@@ -324,15 +327,16 @@ The intended interception sequence is:
    without downgrade. `preparePublish` must reject before capture if those
    prerequisites fail. These interface requirements are **not implemented or
    cryptographically tested** by the routing layer.
-4. The development-only [host capture bridge](capture-bridge.md) invokes the **currently installed** native
+4. The [plugin-owned capture adapter](capture-bridge.md) invokes the installed native
    capture function, retaining the existing picker, source selection, quality
    and consent. It returns a `CaptureLease` containing explicit `audioSelected`
    and an idempotent `release()` for host audio/capture cleanup. It must clean up
-   partial capture on rejection and handle cancellation while a picker is open.
+    returned capture on rejection and handle cancellation while a picker is open.
    Unselected audio is stopped/removed before publishing as a final safeguard;
-    this does not replace preventing unwanted audio capture in the host bridge.
-     The staged wrapper fix prevents unselected virtual-audio acquisition and
-     stops partial/replaced tracks. GUI acceptance remains outstanding.
+    the adapter also hides the venmic virtual input from the installed wrapper
+    when no audio was selected. Stock-host limitations, including manual pending
+    picker dismissal and internally retained partial tracks, are documented in
+    the capture guide. GUI acceptance remains outstanding.
 5. Watching returns a DASS-owned media stream for a future player adapter.
    Detection reads the authenticated DASS room directory, not Discord stream
    events or invented native stream records. Stock Discord shares remain a
@@ -346,15 +350,14 @@ provider can leave its awaiting promise pending. Directory results are bounded
 to 64 entries and checked against the current DASS room. This is an in-process
 contract, not a new wire protocol or a complete untrusted-response parser.
 
-The plugin also offers a local-only capture check in settings through the staged
-host bridge, without a backend transport. See [capture-bridge.md](capture-bridge.md).
+The plugin also offers a local-only capture check in settings through the same
+stock Equibop adapter, without a backend transport. See [capture-bridge.md](capture-bridge.md).
 The plugin exposes boundary methods and declares a build-scoped share-start
 chooser patch. The chooser does not call native capture or instantiate a peer connection,
 change voice, or install watch/detection hooks. A Discord build and private
 factory excerpts are recorded; runtime hook behavior is not validated. The
-required narrow Equibop capture lifecycle
-bridge and wrapper fix are staged and unit-tested; runtime acceptance remains
-outstanding. Pinned upstream capture code remains untouched. See
+plugin-owned Equibop capture lifecycle and stock-host adapter are unit-tested;
+runtime acceptance remains outstanding. Pinned upstream capture code remains untouched. See
 [capture bridge limitations](capture-bridge.md) and the
 [Rust transport gate](transport-gate.md).
 
@@ -541,8 +544,9 @@ Reuse Equibop's installed capture function and its existing picker/consent. The
 pinned Linux wrapper attaches venmic audio when its virtual device exists, and
 the picker currently ties audio unmute/cleanup to native `STREAM_UPDATE` and
 `STREAM_CLOSE`. DASS cannot rely on those events without native stream creation.
-The staged host fix now adds explicit consent, independent teardown and exclusive
-capture ownership; its local capture check still needs GUI acceptance before
+The plugin adapter now owns explicit consent, independent teardown and exclusive
+capture admission using standard Equibop's exported picker settings and existing
+venmic IPC. Its local capture check still needs GUI acceptance before
 production use. An Equicord webpack patch
 cannot rewrite Equibop's bundled renderer. The upstream submodule is unchanged.
 

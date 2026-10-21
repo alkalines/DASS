@@ -73,11 +73,11 @@ Extract the ZIP to a stable directory you control. Preserve the complete folder
 structure. Fully quit the client before replacing an installed bundle.
 
 - **Equibop:** select the extracted `dist` directory as the custom Equicord
-  location, not `dist/equibop`; restart and enable DASS. Current DASS publishing
-  still needs the modified host capture bridge described in
-  [capture-bridge.md](capture-bridge.md). This workflow does **not** package that
-  modified Equibop application. Installing the ZIP in stock Equibop is insufficient
-  for publishing.
+  location, not `dist/equibop`; restart and enable DASS. Current source includes
+  a plugin-owned stock Equibop capture adapter, described in
+  [capture-bridge.md](capture-bridge.md). No modified Equibop application is needed.
+  Older bundles may still require the former host bridge. Real-client acceptance
+  of the plugin-only adapter remains pending.
 - **Discord Desktop:** install/inject the custom desktop build through Equicord's
   installer mechanism. The pinned source wrapper passes `EQUICORD_DIRECTORY`
   pointing to `dist/desktop`, `EQUICORD_USER_DATA_DIR` pointing to the build root,

@@ -1,4 +1,69 @@
-# Native capture bridge (development only)
+# Plugin-owned Equibop capture
+
+Discord Alternative ScreenShare (DASS) now uses standard Equibop's installed
+capture pipeline from inside the plugin. A custom Equibop executable and
+`Equibop.DassCapture` are no longer required.
+
+## Install the plugin-only adapter
+
+From the repository root:
+
+```sh
+bun test ./tests/plugin
+bun scripts/build-plugin.mjs
+```
+
+In your standard Equibop installation, select the absolute path to
+`build/Equicord/dist` as the custom Equicord location. Fully quit Equibop,
+including its tray process, restart and enable DASS. Do not select
+`dist/equibop`, rebuild Equibop, or run the historical host-staging script.
+Already-published bundles do not acquire this change without a rebuild.
+
+`plugins/dass/captureHost.ts` reads the existing
+`Equibop.Components.ScreenShare.currentSettings` export. `stockCapture.ts` calls
+the installed `navigator.mediaDevices.getDisplayMedia` wrapper, so Equibop still
+owns its source/quality/audio picker, OS portal and venmic implementation.
+`captureLifecycle.ts` owns tracks, explicit selected audio and awaitable cleanup.
+No unpatched Chromium capture function or separate helper pipeline is used.
+
+The plugin guards the installed display-capture entry point while enabled. Native
+pending/active capture blocks DASS; DASS ownership blocks a new native request.
+An existing native stream is also checked through the media-engine store. Voice
+peer connections and microphone acquisition are not patched. On Linux, temporary
+device enumeration filtering prevents the upstream wrapper from acquiring its
+virtual audio input when the picker selected no audio. Selected share audio is
+unmuted/stopped through Equibop's existing IPC, without synthetic stream events.
+
+## Stock-host limitations and acceptance
+
+- Supported source baseline: Equibop `27219be3566589280c0c933b04753805381d3bc8`
+  and Equicord `e0e85c8d4f6dc73aac9368cf3f4b2200eac4d4b4`. The adapter requires
+  the exported picker settings; incompatible hosts refuse capture visibly.
+- The Share action authenticates with the backend **before** opening capture.
+  Test **Advanced options → Test local capture (no transport)** to isolate capture
+  from account/backend failures.
+- Stock Equibop does not export picker cancellation. On stop/disable/logout
+  during a pending picker/portal, dismiss it manually. Ownership stays held until
+  capture settles; returned late tracks are stopped and never published.
+- If the stock wrapper itself fails after acquiring video but before returning
+  its stream (for example during virtual audio acquisition), it does not expose
+  those partial tracks to the plugin. The plugin cannot guarantee their cleanup.
+  If a capture indicator remains, fully quit Equibop; retry without share audio.
+  The old custom-host overlay addressed this host-internal failure separately.
+- Native requests begun before plugin enable cannot be tracked by the wrapper
+  guard until they appear in the media-engine store. Enable/restart DASS before
+  opening any native picker, and do not enable it during a pending native share.
+- Tests cover adapter ownership, consent, abort/late streams, source end and hook
+  restoration using fake media devices. Lint/typecheck and bundle builds are not
+  GUI acceptance. Real Wayland/X11 picker/audio behavior, voice independence,
+  native-action interception and absence of Discord media leakage still require
+  runtime verification on the installed Equibop and Discord revisions.
+
+## Historical custom-host overlay (not required by current source)
+
+The following records the former development implementation and its checks.
+Its stronger host-internal cleanup/cancellation hooks are **not** stock-host
+features and should not be confused with the plugin-only adapter above.
 
 Discord Alternative ScreenShare (DASS) has a local-only capture check using the
 installed Equibop picker and capture function. It is **not enabled in the share
@@ -6,8 +71,9 @@ chooser** and establishes no transport readiness. No media or thumbnails are sen
 
 ## Host change versus plugin
 
-The pinned Equibop renderer exposes no picker audio-selection getter. The plugin
-cannot import its renderer internals or patch them with Discord webpack patches.
+The former implementation did not use the existing
+`Equibop.Components.ScreenShare.currentSettings` export. The plugin cannot import
+unexported renderer internals or patch them with Discord webpack patches.
 `tooling/equibop/dassCapture.ts` exports a version-1 host bridge using the current
 picker selection and the currently installed `getDisplayMedia` function. No
 source picker, venmic implementation or media IPC is replaced. The installed

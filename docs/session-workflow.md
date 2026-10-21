@@ -9,7 +9,8 @@ Discord cannot receive the stream.
 
 1. Configure the TLS backend and per-person hashed DASS accounts using
    [LAN accounts and automatic UDP admission](lan-accounts.md). Keep the trusted
-   certificate and custom Equibop capture build from [direct-lan-test.md](direct-lan-test.md).
+    certificate from [direct-lan-test.md](direct-lan-test.md). Use standard Equibop
+    with the rebuilt custom Equicord plugin bundle, not a custom Equibop host.
    Never use a Discord token/password. Publisher and viewer each use their own account.
 2. From the **repository root**, rebuild the plugin:
 

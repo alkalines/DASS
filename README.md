@@ -58,11 +58,11 @@ the instructions below do not establish production readiness or capture compatib
 4. Fully quit Equibop, including its tray process, restart it, and enable **DASS**
    under **Equicord → Plugins**.
 
-**Publishing limitation:** the ZIP contains custom Equicord, not a modified Equibop
-application. Current publishing also requires the matching
-[Equibop host capture bridge](docs/capture-bridge.md); selecting the bundle in
-stock Equibop alone is insufficient. Do not inject Equicord into Equibop as if it
-were official Discord.
+**Capture:** current source uses a [plugin-owned capture adapter](docs/capture-bridge.md)
+with standard Equibop's existing picker. No modified Equibop application is required.
+Older release bundles may still require the former host bridge; rebuild from source
+for this change. Real-client acceptance of the new adapter remains pending.
+Do not inject Equicord into Equibop as if it were official Discord.
 
 **Discord Desktop:** a custom desktop bundle must be installed/injected using
 Equicord's installer mechanism; loose plugin files cannot be installed directly.
@@ -86,8 +86,8 @@ locked dependencies, runs lint/typecheck, and builds both client targets. For an
 existing clone, run `git submodule update --init --recursive` from its root first.
 
 - **Equibop:** follow the selection/restart steps above, using the absolute
-  `build/Equicord/dist` directory printed by the build. Publishing still requires
-  the separate [host capture bridge build](docs/capture-bridge.md).
+  `build/Equicord/dist` directory printed by the build. Keep your standard Equibop
+  application; no separate host capture build is required.
 - **Discord Desktop:** fully quit Discord, including its tray process. Review the
   upstream Equilotl installer before proceeding: the following explicit installation
   command downloads and runs it and modifies your selected Discord installation.

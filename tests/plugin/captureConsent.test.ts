@@ -99,15 +99,13 @@ function pluginSources() {
 }
 
 describe("capture consent stays on the host boundary", () => {
-    test("the plugin never captures directly and never touches Discord media or previews", () => {
-        // Capture comes from the installed Equibop picker only. The plugin must
-        // not call a capture API, Discord's native media engine or a preview
-        // upload: a DASS share may never create a Discord media stream.
-        const forbidden = ["getUserMedia", "getDisplayMedia", "captureStream(", "DiscordNative", "thumbnail"];
+    test("only the stock host adapter can call installed display capture, with no microphone or Discord previews", () => {
+        const forbidden = ["getUserMedia", "captureStream(", "DiscordNative", "thumbnail"];
         for (const { name, source } of pluginSources()) {
             for (const token of forbidden) {
                 expect(source.includes(token)).toBe(false);
             }
+            if (name !== "captureHost.ts" && name !== "stockCapture.ts") expect(source.includes("getDisplayMedia")).toBe(false);
         }
     });
 

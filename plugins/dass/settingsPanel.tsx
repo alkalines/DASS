@@ -11,7 +11,8 @@ import { Paragraph } from "@components/Paragraph";
 import { TextInput, useEffect, useRef, useState } from "@webpack/common";
 
 import { readRememberedAccount } from "./accountStorage";
-import { type EquibopCaptureBridge, type LocalCaptureCheck } from "./capture";
+import { type LocalCaptureCheck } from "./capture";
+import { getCaptureBridge } from "./captureHost";
 import { type DiscoveryController } from "./controller";
 import { trustPrompt } from "../../clients/spike/e2ee";
 import { type PublishController } from "./publishing";
@@ -133,8 +134,7 @@ export function SettingsPanel({ session, publisher, watching, discovery, localCa
             <div className="vc-dass-actions">
                 <Button onClick={() => {
                     beforeAction();
-                    const host = globalThis as typeof globalThis & { Equibop?: { DassCapture?: EquibopCaptureBridge; }; };
-                    void localCapture.capture(host.Equibop?.DassCapture).then(setMessage);
+                    void localCapture.capture(getCaptureBridge()).then(setMessage);
                 }}>Test local capture</Button>
                 <Button onClick={() => { localCapture.stop(); setMessage("Local capture stopped."); }}>Stop local capture</Button>
             </div>

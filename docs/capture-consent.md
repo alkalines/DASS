@@ -7,19 +7,23 @@ what is **not** verified yet.
 
 ## 1. The host capture boundary
 
-- The plugin never calls `getUserMedia`, `getDisplayMedia`, `captureStream()`,
-  Discord's native media engine or any preview upload. A source scan of
-  `plugins/dass/` is part of `tests/plugin/captureConsent.test.ts` and fails
-  the build if one of those APIs appears.
-- Capture comes from the installed Equibop picker through the
-  `Equibop.DassCapture` bridge (`tooling/equibop/dassCaptureLifecycle.ts`).
-  The bridge resolves the *installed* capture function at call time; it never
-  saves or duplicates the Chromium function, and the plugin starts no helper
-  process, daemon, proxy, encoder or decoder.
+- Only the stock capture adapter calls Equibop's installed `getDisplayMedia`
+  wrapper. The plugin never calls `getUserMedia`, `captureStream()`, Discord's
+  native media engine capture APIs or any preview upload. A source scan in
+  `tests/plugin/captureConsent.test.ts` enforces this boundary.
+- Capture comes from the installed Equibop picker through plugin-owned
+  `captureHost.ts`, `stockCapture.ts` and `captureLifecycle.ts`. The adapter
+  retains the installed host wrapper, never an unpatched Chromium function.
+  No custom host build, helper process, daemon, proxy, encoder or decoder is used.
 - Share audio is explicit. The bridge reports `audioSelected` from the
   picker's own choice; when the user selects no audio, the captured audio
   tracks are stopped and removed before the lease is handed to DASS. The
   microphone is never captured implicitly.
+- On Linux, the adapter temporarily hides only the host's virtual share-audio
+  input during device enumeration when no audio was selected. It leaves the
+  microphone and unrelated devices alone and restores enumeration on release.
+  See [stock-host limitations](capture-bridge.md), especially pending picker
+  dismissal and host-internal capture failures.
 - The bridge owns a singleton capture: a second capture attempt while one is
   live is refused instead of replacing it.
 - The DASS share path never creates a Discord media stream and never uploads a

@@ -87,7 +87,7 @@ the standalone transport can be checked without installing a new package:
 bun build/Equicord/node_modules/typescript/bin/tsc --noEmit --strict --skipLibCheck --lib ES2022,DOM --target ES2022 --module ESNext --moduleResolution Bundler clients/spike/signaling.ts
 ```
 
-Next: verify the custom host capture bridge, arrange client-trusted TLS and scoped
+Next: verify the plugin-owned stock Equibop capture adapter, arrange client-trusted TLS and scoped
 LAN networking, install the custom bundles, and test real consent,
 explicit audio, cleanup, independent voice and no Discord media/preview leakage.
 Step 4.6 and full SFU acceptance remain incomplete.

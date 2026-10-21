@@ -115,7 +115,7 @@ files.set(pickerPath, picker);
 const indexPath = "src/renderer/index.ts";
 files.set(indexPath, git(["show", `${revision}:${indexPath}`]) + '\n\nexport { DassCapture } from "./dassCapture";\n');
 for (const name of ["dassCapture.ts", "dassCaptureLifecycle.ts", "captureOwnership.ts", "installedCapture.ts"]) {
-    files.set(`src/renderer/${name}`, readFileSync(join(root, "tooling/equibop", name), "utf8"));
+    files.set(`src/renderer/${name}`, readFileSync(join(root, name === "dassCaptureLifecycle.ts" ? "plugins/dass/captureLifecycle.ts" : `tooling/equibop/${name}`), "utf8"));
 }
 files.set("src/renderer/patches/screenShareFixes.ts", readFileSync(join(root, "tooling/equibop/screenShareFixes.ts"), "utf8"));
 await formatHostSources(files);
