@@ -26,4 +26,18 @@ describe("Equicord adapter manifest", () => {
         expect(() => adaptEquicordManifest(pinnedManifest.replace('"zip-local": "^0.3.5"', '"zip-local": "^1.0.0"')))
             .toThrow("Pinned web-only zip-local dependency did not match.");
     });
+
+    it("excludes only the unsupported web packager from the adapter typecheck", () => {
+        const config = JSON.parse(readFileSync(new URL("../../tooling/equicord/tsconfig.json", import.meta.url), "utf8"));
+        expect(config).toEqual({
+            extends: "../../build/Equicord/tsconfig.json",
+            compilerOptions: {
+                rootDir: "../../build/Equicord",
+                typeRoots: ["../../build/Equicord/node_modules/@types"]
+            },
+            exclude: ["../../build/Equicord/scripts/build/buildWeb.mjs"]
+        });
+        const buildAdapter = readFileSync(new URL("../../scripts/build-plugin.mjs", import.meta.url), "utf8");
+        expect(buildAdapter).toContain('["run", "testTsc", "--project", join(rootDirectory, "tooling/equicord/tsconfig.json")]');
+    });
 });

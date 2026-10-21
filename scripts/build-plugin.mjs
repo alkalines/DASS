@@ -135,7 +135,7 @@ try {
 
     run("bun", ["install", "--frozen-lockfile", "--ignore-scripts"]);
     run("bun", ["run", "lint", "src/userplugins/dass"]);
-    run("bun", ["run", "testTsc"]);
+    run("bun", ["run", "testTsc", "--project", join(rootDirectory, "tooling/equicord/tsconfig.json")]);
     run("bun", ["run", "build", "--disable-updater"]);
 
     const distDirectory = join(checkoutDirectory, "dist");

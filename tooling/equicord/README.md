@@ -15,7 +15,11 @@ alias remains `@vencord/discord-types`. No React, Electron or media dependency i
 added by DASS. Bun then resolved the upstream ranges intentionally to generate
 this lock. It is not an exact reproduction of the upstream pnpm lock graph.
 The adapter removes `zip-local`, imported only from Equicord's separate web
-build script. This adapter runs only the desktop and Equibop build script. Bun
+build script. This adapter runs only the desktop and Equibop build script.
+The adapter typecheck uses this directory's `tsconfig.json`, inheriting upstream
+settings and source includes but excluding only `scripts/build/buildWeb.mjs`.
+The unsupported web packager therefore does not require the removed dependency
+during typechecking; all other upstream scripts and client sources remain checked. Bun
 overrides DOMPurify to 3.4.17 and Moment to 2.31.0, including the Moment
 dependency declared by the local type package. These are adapter-only manifest
 changes; upstream sources and manifests remain unchanged. Peer warnings may be
