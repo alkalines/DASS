@@ -230,7 +230,7 @@ export class WatchController implements ScreenshareTransport {
         }
         clearTimeout(this.poll);
         this.busy = true;
-        this.update({ ...this.status, phase: "loading", message: "Subscribing through DASS; waiting for a received video track…",
+        this.update({ ...this.status, phase: "loading", message: "Waiting for the streamer to approve your request, then connecting…",
             watchingShare: this.status.shares.find(listed => listed.roomId === share.roomId && listed.shareId === share.shareId) });
         const intercepted = routeWatch(this.routing, { transport: "dass", share });
         if (!intercepted.handled) throw new Error("DASS watch was not consumed.");

@@ -10,6 +10,7 @@ import type { CaptureLease } from "../../plugins/dass/routing";
 import { type DassAuthentication, SpikeSignaling, SpikeSignalingError, type ViewDecision } from "./signaling";
 
 export const PREPARATION_TIMEOUT_MS = 180_000;
+const APPROVAL_TIMEOUT_MESSAGE = "The streamer did not approve your request in time. Ask them to approve it, or to enable automatic approval.";
 
 /** E2EE hooks for `SpikePeer.activate`. Identity keys are mandatory: the
  * backend refuses media setup without them (no transport-only mode). */
@@ -239,7 +240,8 @@ export class SpikePeer {
         }
         this.activated = true;
         clearTimeout(this.timer);
-        this.timer = setTimeout(() => this.closeWithDiagnostic(`Activation failed [${this.activationStage}:timeout]. Check UDP reachability if the answer was applied.`), 15_000);
+        this.timer = setTimeout(() => this.closeWithDiagnostic(this.activationStage === "request_view" ? APPROVAL_TIMEOUT_MESSAGE
+            : `Activation failed [${this.activationStage}:timeout]. Check UDP reachability if the answer was applied.`), 15_000);
         try {
             this.signaling = options.signaling ?? await SpikeSignaling.connect({ experimental: true, backendUrl: options.backendUrl,
                 credential: options.credential, username: options.username, password: options.password, signal: this.closed });
@@ -307,11 +309,18 @@ export class SpikePeer {
 
     private checkActive() { if (!this.active || this.signal.aborted) throw new Error("DASS peer is closed."); }
 
-    get closeMessage(): string { return this.closeDiagnostic ?? "Test stopped. Capture and connection resources were released."; }
+    get closeMessage(): string {
+        if (this.closeDiagnostic) return this.closeDiagnostic;
+        return this.activationStage === "request_view" ? APPROVAL_TIMEOUT_MESSAGE : "Test stopped. Capture and connection resources were released.";
+    }
 
     private activationFailure(error: unknown): string {
-        const code = error instanceof SpikeSignalingError ? `:${error.code}` : "";
-        return `Activation failed [${this.activationStage}${code}]. No Discord fallback.`;
+        const code = error instanceof SpikeSignalingError ? error.code : "";
+        if (this.activationStage === "request_view") {
+            if (code === "rejected:denied") return "The streamer denied your request to watch.";
+            if (["", "cancelled", "closed", "timeout", "server:setup_timeout"].includes(code)) return APPROVAL_TIMEOUT_MESSAGE;
+        }
+        return `Activation failed [${this.activationStage}${code && `:${code}`}]. No Discord fallback.`;
     }
 
     private closeWithDiagnostic(message: string) {
