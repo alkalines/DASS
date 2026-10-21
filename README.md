@@ -1,79 +1,78 @@
 # DASS — Discord Alternative ScreenShare
 
-Early-stage project for an Equicord plugin and self-hosted Rust screensharing backend.
+Self-hosted screensharing for Discord, built as an Equicord plugin with a Rust backend.
+Discord still handles your voice call; DASS handles the screen and optional share audio.
 
-- [Research and implementation plan](docs/research/PLAN.md)
-- [Security roadmap and acceptance gates](docs/research/SECURITY-ROADMAP.md)
-- [Pilot/public release gates, provenance and incident response](docs/security-release.md)
-- [Private vulnerability reporting and security policy](SECURITY.md)
-- [Contributor and agent instructions](AGENTS.md)
-- [Docker-only backend development](docs/backend.md)
-- [Public Internet transport, admission model and resource budget](docs/public-transport.md)
-- [Build and install the plugin in Equicord or Equibop](docs/plugin.md)
-- [GitHub Releases, GHCR images and update notices](docs/releasing.md)
-- [Session setup and Share-button DASS workflow](docs/session-workflow.md)
-- [LAN accounts and automatic client UDP admission](docs/lan-accounts.md)
-- [Optional Users / Rooms / Streams control panel](docs/control-panel.md)
-- [Capture consent, teardown and client privacy](docs/capture-consent.md)
-- [Experimental authenticated directory and DASS viewer](docs/watching.md)
+[![Release](https://img.shields.io/github/v/release/alkalines/DASS)](https://github.com/alkalines/DASS/releases)
+[![Downloads](https://img.shields.io/github/downloads/alkalines/DASS/total)](https://github.com/alkalines/DASS/releases)
+[![Status: experimental](https://img.shields.io/badge/status-experimental-orange)](#current-status)
+[![Pterodactyl Egg: coming soon](https://img.shields.io/badge/Pterodactyl_Egg-coming_soon-5865F2)](#host-a-backend)
 
-The proposed architecture uses Equibop's existing capture pipeline and a Rust
-WebRTC selective forwarding backend, without additional client helper executables.
-Both broadcasters and viewers need DASS. An opt-in, invite/account-authenticated
-one-publisher/one-viewer Rust transport has user-reported LAN video evidence.
-The authenticated directory and DASS-owned viewer now have user-reported discovery
-and audio playback evidence. Audio consent and backend checks are also
-user-confirmed; broader runtime acceptance remains pending. This is not a production SFU;
-The new E2EE client code uses an unreviewed project-specific format: Internet
-pilot/public hosting and server-untrusted confidentiality claims remain blocked.
-Readiness remains 503. Native Discord watching is separate.
-Supported build-634304 Share buttons now connect to the DASS publisher by default,
-with reusable in-memory session access. This new wiring still needs live-client
-acceptance; it does not intercept every Discord share entry point.
-Separate DASS accounts are configured in plugin settings with OS-backed encryption
-and authenticate on plugin load. LAN media endpoints are then admitted per RTC
-session using the observed WSS peer IP, without manual client-port updates.
-These new account/admission paths still require live-client/backend acceptance.
-There is no separate DASS call button or sharing modal. Call context is derived
-from the current channel; rooms are informational and publisher approval controls
-stream admission. Diagnostics and the
-temporary viewer are hidden behind Advanced options. Native stream tiles and
-watch/player integration remain incomplete; this is not yet a drop-in replacement.
+[Download](https://github.com/alkalines/DASS/releases) · [Setup guide](docs/session-workflow.md) · [Report a bug](https://github.com/alkalines/DASS/issues) · [Security](SECURITY.md)
 
-## Installation
+## What you need
 
-Both broadcasters and viewers need a DASS-enabled client and access to a compatible
-DASS backend. Stock Discord cannot receive DASS media. This is experimental software;
-the instructions below do not establish production readiness or capture compatibility.
+- A DASS-enabled client **on both ends**. Stock Discord cannot receive DASS streams.
+- A compatible self-hosted backend and a separate DASS account.
+- **Equibop for publishing** through its existing screen picker. No extra capture executable or modified Equibop build is needed.
 
-### Install a prebuilt client bundle
+## Current status
 
-1. Open [GitHub Releases](https://github.com/alkalines/DASS/releases) and choose a
-   full release containing `dass-equicord-VERSION.zip`. Backend-only releases do not
-   contain a client bundle. If no bundle has been published, use the source steps below.
-2. Download the ZIP and `SHA256SUMS`, verify the ZIP's checksum, and extract it to a
-   permanent directory you control. Keep the complete extracted `dist` folder.
-3. **Equibop:** open **Settings → Developer Options**, change the custom Equicord
-   location, and select the extracted **`dist` directory**, not `dist/equibop`.
-4. Fully quit Equibop, including its tray process, restart it, and enable **DASS**
-   under **Equicord → Plugins**.
+E2EE and Public Hosting is still untested, use it at your own risk.
 
-**Capture:** current source uses a [plugin-owned capture adapter](docs/capture-bridge.md)
-with standard Equibop's existing picker. No modified Equibop application is required.
-Older release bundles may still require the former host bridge; rebuild from source
-for this change. Real-client acceptance of the new adapter remains pending.
-Do not inject Equicord into Equibop as if it were official Discord.
+## Install the client
 
-**Discord Desktop:** a custom desktop bundle must be installed/injected using
-Equicord's installer mechanism; loose plugin files cannot be installed directly.
-The release ZIP does not include a turnkey desktop installer. Use the source
-installation below for the documented installer entry point. The desktop bundle
-does not currently provide an equivalent supported publishing capture adapter.
+Get `dass-equicord-VERSION.zip` and `SHA256SUMS` from a
+[full release](https://github.com/alkalines/DASS/releases), verify the ZIP's checksum,
+and extract it somewhere permanent. Keep the entire `dist` folder. Backend-only
+releases do not include the client; if no client bundle is available, build below.
 
-### Build and install the client from source
+<details>
+<summary><strong>Equibop</strong> — recommended for publishing</summary>
 
-Prerequisites: Git, **Bun 1.4.3**, and **Node.js >=22**. Client tooling runs locally;
-no host Rust toolchain or additional DASS capture executable is required.
+1. Open **Settings → Developer Options** in Equibop.
+2. Set the custom Equicord location to the extracted **`dist` directory**, not `dist/equibop`.
+3. Fully quit Equibop, including its tray process, then restart.
+4. Enable **DASS** under **Equicord → Plugins**.
+
+Keep your standard Equibop installation. Do **not** inject Equicord into it as
+though it were Discord Desktop. Older DASS bundles may require the former host
+bridge; build from current source for the plugin-owned capture adapter. Real-client
+acceptance of that adapter is still pending.
+
+[Client guide](docs/plugin.md) · [Capture details](docs/capture-bridge.md)
+
+</details>
+
+<details>
+<summary><strong>Discord Desktop</strong> — custom Equicord installation</summary>
+
+DASS must be built into Equicord and installed into Discord; copying loose plugin
+files will not work. The release ZIP does not include a turnkey desktop installer.
+Build from source using the section below, then fully quit Discord, including its
+tray process.
+
+Review the upstream Equilotl installer first: this command downloads and runs it,
+and modifies the Discord installation you select. From the **DASS repository root**:
+
+```sh
+cd build/Equicord
+bun run inject
+```
+
+Restart Discord and enable **DASS** under **Equicord → Plugins**. Keep
+`build/Equicord` on disk. This installer path is source-inspected, not runtime-verified.
+The desktop bundle does **not** currently have an equivalent supported publishing
+capture adapter.
+
+[Installation details and compatibility limits](docs/plugin.md)
+
+</details>
+
+<details>
+<summary><strong>Build from source</strong></summary>
+
+Requires Git, **Bun 1.4.3** and **Node.js ≥22**. No host Rust toolchain is needed.
 
 ```sh
 git clone --recurse-submodules https://github.com/alkalines/DASS.git
@@ -81,109 +80,88 @@ cd DASS
 bun scripts/build-plugin.mjs
 ```
 
-The build adapter stages DASS in a separate pinned Equicord checkout, installs
-locked dependencies, runs lint/typecheck, and builds both client targets. For an
-existing clone, run `git submodule update --init --recursive` from its root first.
+For an existing clone, run `git submodule update --init --recursive` from the
+repository root first. The build uses a separate pinned Equicord checkout and
+runs lint, typechecking and both client builds without modifying the upstream
+submodules.
 
-- **Equibop:** follow the selection/restart steps above, using the absolute
-  `build/Equicord/dist` directory printed by the build. Keep your standard Equibop
-  application; no separate host capture build is required.
-- **Discord Desktop:** fully quit Discord, including its tray process. Review the
-  upstream Equilotl installer before proceeding: the following explicit installation
-  command downloads and runs it and modifies your selected Discord installation.
-  From the **DASS repository root**:
+For Equibop, select the absolute **`build/Equicord/dist`** path printed by the
+build. For Discord Desktop, use the installation section above. Rebuild after
+source changes and fully restart your client.
 
-  ```sh
-  cd build/Equicord
-  bun run inject
-  ```
+[Build prerequisites and pinned revisions](docs/plugin.md)
 
-  Select the intended Discord installation when prompted, restart Discord, and
-  enable **DASS** in **Equicord → Plugins**. This installer path is source-inspected,
-  not runtime-verified here. Keep `build/Equicord` on disk.
+</details>
 
-See [the plugin guide](docs/plugin.md) for pinned revisions, host prerequisites and
-compatibility limits. Rebuild from the repository root after source changes and
-fully restart the client.
+## Host a backend
 
-### Install the backend
+The backend is a single Rust executable in Docker. Start with the
+[LAN account setup guide](docs/lan-accounts.md) for TLS, accounts and media
+configuration. Compose defaults are loopback-only setup/discovery, **not a working
+media server**.
 
-Prerequisites: **Docker Engine with Compose >=2.30** and permission to use its
-daemon. No host Rust, Cargo or Bun is required to run the backend.
+<details>
+<summary><strong>Docker Compose</strong></summary>
 
-1. Clone this repository and enter its root, or use the clone created above:
+Requires **Docker Engine with Compose ≥2.30** and access to its daemon. No host
+Rust, Cargo or Bun is needed for the backend.
 
-   ```sh
-   git clone https://github.com/alkalines/DASS.git
-   cd DASS
-   cp .env.example .env
-   ```
+```sh
+git clone https://github.com/alkalines/DASS.git
+cd DASS
+cp .env.example .env
+```
 
-2. Review `.env` and follow [LAN account setup](docs/lan-accounts.md) for your server
-   IP, TLS, accounts and media configuration. Defaults provide loopback-only
-   setup/discovery, **not a working media server**. Never expose insecure setup or
-   default administrator credentials publicly.
-3. To use a published **linux/amd64** image, create `compose.image.yaml` beside
-   `compose.yaml`. Replace `0.1.0` with an actually published version:
+If you already cloned the repository, use that checkout instead. Review `.env`
+and complete the [server configuration](docs/lan-accounts.md), then run from the
+repository root:
 
-   ```yaml
-   services:
-     backend:
-       image: ghcr.io/alkalines/dass:0.1.0
-   ```
+```sh
+docker compose up -d --build backend
+```
 
-   From the **DASS repository root**:
+This builds, checks and tests Rust inside Docker. To use a published image instead,
+follow the [GHCR image instructions](docs/releasing.md).
 
-   ```sh
-   docker compose -f compose.yaml -f compose.image.yaml pull backend
-   docker compose -f compose.yaml -f compose.image.yaml up -d --no-build backend
-   ```
+Complete initial setup through the [control panel](docs/control-panel.md) on a
+private connection. New account-mode databases without imported administrators
+start with **`admin` / `admin`**; change that password immediately. Never expose
+insecure setup or default credentials publicly.
 
-   Alternatively, build and start from source, with all Rust checks inside Docker:
+Accounts and settings persist in the SQLite volume. Saved backend configuration
+changes require a restart; keep the volume when updating.
 
-   ```sh
-   docker compose up -d --build backend
-   ```
+[Backend guide](docs/backend.md) · [Storage and migration](docs/sqlite.md) · [Transport limits](docs/public-transport.md)
 
-4. Complete private account-mode setup through the
-   [control panel](docs/control-panel.md). New account-mode databases without
-   imported administrators start with `admin` / `admin`; change that password
-   immediately. Accounts and settings persist in the SQLite Docker volume. Saved
-   backend configuration changes require a restart; do not delete the volume when
-   updating. See [migration and provisioning](docs/sqlite.md).
+</details>
 
-The Compose configuration retains loopback binding, a read-only root filesystem,
-dropped capabilities and resource limits. Publishing an image does not configure
-safe public hosting. See [backend development](docs/backend.md),
-[public transport limitations](docs/public-transport.md) and
-[manual updates/image digest pinning](docs/releasing.md).
+<details>
+<summary><strong>Pterodactyl Egg</strong> — coming soon</summary>
 
-### Connect the client
+A Pterodactyl Egg for hosting the DASS backend is planned. It is not available yet;
+use Docker Compose for now. This will be another installation option, not a change
+to DASS's experimental status or public-hosting limitations.
 
-Open **Equicord → Plugins → DASS settings**, enter the trusted backend's HTTPS
-origin, and sign in with your separate **DASS account**, not your Discord password
-or token. Remembering a password requires explicit consent and OS-backed secure
-storage. Join a Discord call, then follow the
-[Share-button and account workflow](docs/session-workflow.md). Required host support
-or authentication failures do not silently fall back to Discord sharing.
+</details>
 
-### Updates
+## Connect and share
 
-Versioned builds can show **DASS update available** with a manual download link;
-the authenticated backend admin panel also reports newer backend releases. Nothing
-is installed or deployed automatically. Fully quit the client before replacing
-its bundle. Custom Equicord's upstream updater is disabled to preserve DASS; review
-[release and update instructions](docs/releasing.md) before upgrading the backend
-or modified Equibop host.
+Open **Equicord → Plugins → DASS settings**, enter your trusted backend's HTTPS
+origin, and sign in with your **DASS account — never your Discord password or
+token**. Remembering a password is opt-in and requires OS-backed secure storage.
 
-## Upstream checkouts
+Join a Discord call and use the supported Share button. DASS reuses Equibop's
+source picker and keeps share audio optional. Authentication or capture failures
+do not silently fall back to Discord sharing.
 
-`vendor/Equibop` is an upstream Git submodule pinned to the commit used for the
-research. It provides the host application source, not the Equicord plugin build.
-`vendor/Equicord` is pinned to `e0e85c8d4f6dc73aac9368cf3f4b2200eac4d4b4`
-and provides the shared plugin runtime for standard Discord desktop and Equibop.
-The build adapter uses a separate `build/Equicord` checkout so dependency
-adaptations and staged DASS source do not modify the upstream submodule.
+[Share and watch walkthrough](docs/session-workflow.md)
 
-Clone with `git clone --recurse-submodules https://github.com/alkalines/DASS.git`,
-or initialize an existing clone with `git submodule update --init --recursive`.
+## Documentation
+
+| | Guides |
+| --- | --- |
+| Client | [Build & install](docs/plugin.md) · [Sharing](docs/session-workflow.md) · [Watching](docs/watching.md) |
+| Server | [LAN accounts](docs/lan-accounts.md) · [Control panel](docs/control-panel.md) · [Docker development](docs/backend.md) |
+| Updates | [Releases, images & manual updates](docs/releasing.md) — no automatic installation or deployment |
+| Security | [Capture & privacy](docs/capture-consent.md) · [Public transport](docs/public-transport.md) · [Report a vulnerability](SECURITY.md) |
+| Development | [Plan](docs/research/PLAN.md) · [Security roadmap](docs/research/SECURITY-ROADMAP.md) · [Contributor instructions](AGENTS.md) |
