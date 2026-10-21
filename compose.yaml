@@ -1,5 +1,6 @@
 services:
   backend:
+    # if you don't want to clone the repo just use image: ghcr.io/alkalines/dass:latest
     build:
       context: .
       target: runtime

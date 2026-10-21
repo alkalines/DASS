@@ -88,6 +88,34 @@ test("workflow has no schedule, pins actions and keeps image publication behind 
     expect(image.with["build-args"]).toContain("DASS_RELEASE_VERSION=");
 });
 
+test("every release publishes a version-suffixed Wings image before release creation", () => {
+    const workflow = Bun.YAML.parse(readFileSync(new URL("../../.github/workflows/release.yml", import.meta.url), "utf8")) as any;
+    const steps = workflow.jobs.publish.steps;
+    const image = steps.find((step: any) => step.id === "image");
+    const pterodactyl = steps.find((step: any) => step.id === "pterodactyl");
+    expect(pterodactyl.if).toBeUndefined();
+    expect(pterodactyl.with.target).toBe("pterodactyl");
+    expect(pterodactyl.with.tags).toBe("${{ needs.plan.outputs.image }}:${{ needs.plan.outputs.version }}-pterodactyl");
+    expect(pterodactyl.with.platforms).toBe("linux/amd64");
+    expect(pterodactyl.with.push).toBe(true);
+    expect(pterodactyl.with["build-args"]).toBe(image.with["build-args"]);
+    expect(pterodactyl.with.provenance).toBe("mode=max");
+    expect(pterodactyl.with.sbom).toBe(true);
+    expect(pterodactyl.with["cache-to"]).not.toBe(image.with["cache-to"]);
+    const publication = steps.find((step: any) => step.run?.includes("gh release create"));
+    expect(steps.indexOf(pterodactyl)).toBeLessThan(steps.indexOf(publication));
+    expect(publication.env.PTERODACTYL_DIGEST).toBe("${{ steps.pterodactyl.outputs.digest }}");
+    expect(publication.run).toContain("artifacts/pterodactyl-image.json");
+    const aliases = steps.find((step: any) => step.run?.includes("imagetools create"));
+    expect(aliases.env.DIGEST).toBe("${{ steps.image.outputs.digest }}");
+    const pterodactylAlias = steps.find((step: any) => step.run?.includes('--tag "$IMAGE:pterodactyl"'));
+    expect(pterodactylAlias.env.DIGEST).toBe("${{ steps.pterodactyl.outputs.digest }}");
+    expect(pterodactylAlias.run).toContain('--prefer-index=false');
+    expect(pterodactylAlias.run).toContain('"$IMAGE@$DIGEST"');
+    expect(steps.indexOf(pterodactylAlias)).toBeGreaterThan(steps.indexOf(publication));
+    expect(workflow.jobs.plan.steps.some((step: any) => step.run?.includes("./tests/pterodactyl"))).toBe(true);
+});
+
 test("notification teardown suppresses late results and repeated versions", async () => {
     const notifications: { title: string; onClick: () => void; }[] = [];
     let resolveUpdate: (version: string) => void = () => {};

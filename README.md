@@ -100,6 +100,9 @@ The backend is a single Rust executable in Docker. Start with the
 configuration. Compose defaults are loopback-only setup/discovery, **not a working
 media server**.
 
+For Pterodactyl, see the [custom image build and configuration guide](docs/pterodactyl.md).
+An importable egg and real Wings runtime validation are still pending.
+
 <details>
 <summary><strong>Docker Compose</strong></summary>
 
@@ -120,8 +123,26 @@ repository root:
 docker compose up -d --build backend
 ```
 
-This builds, checks and tests Rust inside Docker. To use a published image instead,
-follow the [GHCR image instructions](docs/releasing.md).
+This builds, checks and tests Rust inside Docker. **No local build is needed** if
+you use `ghcr.io/alkalines/dass:latest`: replace the backend's `build:` block in
+`compose.yaml` with `image:` (keep the other settings, ports and volumes):
+
+```yaml
+services:
+  backend:
+    image: ghcr.io/alkalines/dass:latest
+    # Keep the remaining backend configuration from compose.yaml.
+```
+
+Then start or update it with:
+
+```sh
+docker compose pull backend
+docker compose up -d --no-build backend
+```
+
+`latest` tracks published backend releases; updates are manual. Back up the SQLite
+volume first. For exact version/digest pins, see the [GHCR image instructions](docs/releasing.md).
 
 Complete initial setup through the [control panel](docs/control-panel.md) on a
 private connection. New account-mode databases without imported administrators

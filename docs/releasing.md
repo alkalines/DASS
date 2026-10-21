@@ -34,10 +34,13 @@ The workflow:
    Equicord build, plugin lint and full host typecheck.
 3. Builds the existing Dockerfile, including Docker-only Rust formatting,
    warnings-denied Clippy, locked workspace tests and locked release compilation.
-4. Pushes `ghcr.io/alkalines/dass:VERSION` with OCI source/revision/version labels,
-   BuildKit provenance and an SBOM. Initial image support is **linux/amd64 only**.
+4. Pushes `ghcr.io/alkalines/dass:VERSION` and
+   `ghcr.io/alkalines/dass:VERSION-pterodactyl` with OCI source/revision/version
+   labels, BuildKit provenance and an SBOM. Initial image support is
+   **linux/amd64 only**. Both full and backend-only releases include both images.
 5. Creates the Git tag at the exact workflow commit and publishes release assets.
-6. Advances image aliases `stable` and `latest` after GitHub publication succeeds.
+6. Advances standard image aliases `stable` and `latest`, and the Wings image alias
+   `pterodactyl`, after GitHub publication succeeds.
 
 All steps run in one workflow: a tag created using `GITHUB_TOKEN` does not need to
 trigger another workflow. A failed build does not publish a GitHub Release. An
@@ -58,6 +61,13 @@ Release assets include:
 - Full releases: `dass-equicord-VERSION.zip` and `SHA256SUMS`.
 - Every release: `backend-image.json`, containing the image name, immutable digest,
   source commit, version and platform.
+- Every release: `pterodactyl-image.json`, containing the Pterodactyl image's name,
+  versioned tag, immutable digest, source commit, version, platform and build target.
+
+The `stable` and `latest` aliases refer only to the standard runtime image.
+The `pterodactyl` alias tracks the same digest as the newest published
+`VERSION-pterodactyl` tag; use the versioned tag or digest for exact pins. See
+[Pterodactyl setup](pterodactyl.md).
 
 The ZIP includes the Equicord GPL license and a corresponding-source pointer to
 the exact release commit; initialize its pinned submodules to reproduce the build.

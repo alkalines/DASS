@@ -44,7 +44,7 @@ jobs:
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: 1.4.3
-      - run: bun test ./tests/release ./tests/admin
+      - run: bun test ./tests/release ./tests/admin ./tests/pterodactyl
       - id: plan
         run: node scripts/release-plan.mjs
         env:
@@ -149,8 +149,28 @@ jobs:
             org.opencontainers.image.version=${{ needs.plan.outputs.version }}
           provenance: mode=max
           sbom: true
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=runtime
+          cache-to: type=gha,scope=runtime,mode=max
+      - name: Validate, build and publish Pterodactyl backend
+        id: pterodactyl
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          target: pterodactyl
+          platforms: linux/amd64
+          push: true
+          tags: ${{ needs.plan.outputs.image }}:${{ needs.plan.outputs.version }}-pterodactyl
+          build-args: DASS_RELEASE_VERSION=${{ needs.plan.outputs.version }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ needs.plan.outputs.version }}-pterodactyl
+          provenance: mode=max
+          sbom: true
+          cache-from: |
+            type=gha,scope=pterodactyl
+            type=gha,scope=runtime
+          cache-to: type=gha,scope=pterodactyl,mode=max
       - name: Create immutable tag and stable GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -159,9 +179,11 @@ jobs:
           COMPONENT: ${{ needs.plan.outputs.component }}
           IMAGE: ${{ needs.plan.outputs.image }}
           DIGEST: ${{ steps.image.outputs.digest }}
+          PTERODACTYL_DIGEST: ${{ steps.pterodactyl.outputs.digest }}
         run: |
           mkdir -p artifacts
           jq -n --arg version "$VERSION" --arg image "$IMAGE" --arg digest "$DIGEST" --arg revision "$GITHUB_SHA" '{version: $version, image: $image, digest: $digest, revision: $revision, platform: "linux/amd64"}' > artifacts/backend-image.json
+          jq -n --arg version "$VERSION" --arg image "$IMAGE" --arg tag "$VERSION-pterodactyl" --arg digest "$PTERODACTYL_DIGEST" --arg revision "$GITHUB_SHA" '{version: $version, image: $image, tag: $tag, digest: $digest, revision: $revision, platform: "linux/amd64", target: "pterodactyl"}' > artifacts/pterodactyl-image.json
           cat > release-notes.md <<EOF
           Discord Alternative ScreenShare (DASS) $VERSION ($COMPONENT).
 
@@ -169,6 +191,8 @@ jobs:
 
           Backend: \`$IMAGE:$VERSION\`
           Immutable image: \`$IMAGE@$DIGEST\`
+          Pterodactyl: \`$IMAGE:$VERSION-pterodactyl\`
+          Immutable Pterodactyl image: \`$IMAGE@$PTERODACTYL_DIGEST\`
           Image platform: linux/amd64. Backend updates are manual; preserve your configuration and database volume.
 
           The Equicord ZIP, when present, contains the complete custom build, not a loose plugin.
@@ -182,3 +206,8 @@ jobs:
           IMAGE: ${{ needs.plan.outputs.image }}
           DIGEST: ${{ steps.image.outputs.digest }}
         run: docker buildx imagetools create --tag "$IMAGE:stable" --tag "$IMAGE:latest" "$IMAGE@$DIGEST"
+      - name: Advance Pterodactyl alias after publication
+        env:
+          IMAGE: ${{ needs.plan.outputs.image }}
+          DIGEST: ${{ steps.pterodactyl.outputs.digest }}
+        run: docker buildx imagetools create --prefer-index=false --tag "$IMAGE:pterodactyl" "$IMAGE@$DIGEST"
