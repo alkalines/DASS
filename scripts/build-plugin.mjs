@@ -103,7 +103,8 @@ try {
             contents = contents.replaceAll(from, to);
         }
         if (name.startsWith("protocol")) {
-            contents = "/*\n * Vencord, a Discord client mod\n * Copyright (c) 2026 Vendicated and contributors\n * SPDX-License-Identifier: GPL-3.0-or-later\n */\n\n" + contents;
+            const eol = contents.includes("\r\n") ? "\r\n" : "\n";
+            contents = ["/*", " * Vencord, a Discord client mod", " * Copyright (c) 2026 Vendicated and contributors", " * SPDX-License-Identifier: GPL-3.0-or-later", " */", "", ""].join(eol) + contents;
             contents = contents.replace("MAX_MESSAGE_BYTES, PROTOCOL_VERSION, type ClientMessage, type ServerMessage", "type ClientMessage, MAX_MESSAGE_BYTES, PROTOCOL_VERSION, type ServerMessage");
         }
         sources.set(name, contents);
