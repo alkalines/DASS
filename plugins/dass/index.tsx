@@ -333,7 +333,7 @@ export default definePlugin({
                 stopSpikeTest();
                 localCapture.stop();
                 const bridge = getCaptureBridge();
-                if (!bridge) return showToast("DASS capture is unavailable. This Equibop version does not expose the required picker APIs.");
+                if (!bridge) return showToast("DASS screen capture is unavailable in this client.");
                 void publisher.publish(settings.store.backendUrl, bridge);
             });
     },

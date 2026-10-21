@@ -17,7 +17,7 @@ export function createEquibopCapture(bridge?: EquibopCaptureBridge) {
     return async (signal: AbortSignal): Promise<CaptureLease> => {
         if (signal.aborted || bridge?.version !== 1 || typeof bridge.capture !== "function") {
             logDiagnostic("capture unavailable", { code: signal.aborted ? "cancelled" : "bridge_missing_or_incompatible" }, true);
-            throw new Error("DASS capture is unavailable. This Equibop version does not expose the required picker APIs.");
+            throw new Error("DASS screen capture is unavailable in this client.");
         }
         logDiagnostic("capture picker requested");
         try {

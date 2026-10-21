@@ -166,7 +166,7 @@ export class PublishController {
                 }, { once: true });
                 if (operation.signaling.closed.aborted) throw operation.signaling.closed.reason;
             }
-            this.update({ phase: "capturing", message: "Choose a source in the Equibop picker. Share audio is optional and explicit.", candidates: [], pendingViewers: [], approvedViewers: [] });
+            this.update({ phase: "capturing", message: "Choose a source in the screen picker. Share audio is optional and explicit.", candidates: [], pendingViewers: [], approvedViewers: [] });
             const capture = await createEquibopCapture(bridge)(operation.abort.signal);
             if (!this.current(operation)) { capture.release(); return; }
             operation.capture = capture;

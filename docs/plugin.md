@@ -474,11 +474,20 @@ when prompted, restart Discord, then enable **DASS** in **Equicord → Plugins**
 Keep `build/Equicord` on disk. Rebuild from the DASS root after plugin changes and
 fully restart Discord.
 
-This installation command is source-inspected, not executed or runtime-verified
-by the agent. Desktop bundle checks do not prove plugin loading or capture
-compatibility. Equibop's picker and venmic APIs are not available in standard
-Discord; future capture integration needs separate host validation. The current
-settings/discovery scaffold has no Equibop-only capture dependency.
+An existing injection that already points at this checkout's `dist/desktop`
+only needs a rebuild and a full Discord restart; `bun run inject` is not rerun.
+Desktop bundle checks do not prove plugin loading.
+
+Standard Discord has no Equibop picker or venmic. There, DASS opens its own
+screen/window picker listing Discord's desktop capture sources; source previews
+stay in that dialog. The selected source is captured in the renderer through
+Chromium's desktop capture constraints, at most 1920×1080 and 30 FPS. Share
+audio is an unticked checkbox that captures Windows system loopback, which
+includes the call's voices; no microphone device is requested. On Windows
+Discord 1.0.9264 (Electron 42), the picker, a 1080p30 video-only capture and a
+connected publisher peer were observed through DevTools. Selected system audio,
+viewer playback of a desktop-published stream and macOS/Linux desktop builds are
+not verified.
 
 ## Install in Equibop
 

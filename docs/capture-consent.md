@@ -7,14 +7,19 @@ what is **not** verified yet.
 
 ## 1. The host capture boundary
 
-- Only the stock capture adapter calls Equibop's installed `getDisplayMedia`
-  wrapper. The plugin never calls `getUserMedia`, `captureStream()`, Discord's
-  native media engine capture APIs or any preview upload. A source scan in
-  `tests/plugin/captureConsent.test.ts` enforces this boundary.
-- Capture comes from the installed Equibop picker through plugin-owned
-  `captureHost.ts`, `stockCapture.ts` and `captureLifecycle.ts`. The adapter
-  retains the installed host wrapper, never an unpatched Chromium function.
-  No custom host build, helper process, daemon, proxy, encoder or decoder is used.
+- On Equibop, only the stock capture adapter calls Equibop's installed
+  `getDisplayMedia` wrapper. On standard Discord desktop, only
+  `desktopCapture.tsx` reads Discord's desktop source list and calls
+  `getUserMedia` with Chromium desktop-source constraints; its audio constraint
+  is system loopback, never an input device. No other plugin file calls
+  `getUserMedia`, `captureStream()`, Discord's native media engine capture APIs
+  or any preview upload. A source scan in `tests/plugin/captureConsent.test.ts`
+  enforces this for every other file.
+- Equibop capture comes from the installed picker through plugin-owned
+  `captureHost.ts`, `stockCapture.ts` and `captureLifecycle.ts`, retaining the
+  installed host wrapper. Standard Discord uses the DASS picker dialog in
+  `desktopCapture.tsx` with the same `captureLifecycle.ts` ownership. No custom
+  host build, helper process, daemon, proxy, encoder or decoder is used.
 - Share audio is explicit. The bridge reports `audioSelected` from the
   picker's own choice; when the user selects no audio, the captured audio
   tracks are stopped and removed before the lease is handed to DASS. The

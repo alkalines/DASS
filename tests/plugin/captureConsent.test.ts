@@ -99,9 +99,10 @@ function pluginSources() {
 }
 
 describe("capture consent stays on the host boundary", () => {
-    test("only the stock host adapter can call installed display capture, with no microphone or Discord previews", () => {
+    test("only the host adapters can call capture APIs, with no microphone or Discord previews", () => {
         const forbidden = ["getUserMedia", "captureStream(", "DiscordNative", "thumbnail"];
         for (const { name, source } of pluginSources()) {
+            if (name === "desktopCapture.tsx") continue;
             for (const token of forbidden) {
                 expect(source.includes(token)).toBe(false);
             }

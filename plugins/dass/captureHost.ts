@@ -7,6 +7,7 @@
 import { MediaEngineStore, UserStore } from "@webpack/common";
 
 import type { EquibopCaptureBridge } from "./capture";
+import { createDesktopCaptureBridge } from "./desktopCapture";
 import { createStockCaptureBridge, type PickerSettings } from "./stockCapture";
 
 interface CaptureGlobals {
@@ -18,7 +19,15 @@ interface CaptureGlobals {
 }
 
 let stockBridge: ReturnType<typeof createStockCaptureBridge> | undefined;
+let desktopBridge: EquibopCaptureBridge | undefined;
 
+function nativeSharing() {
+    const userId = UserStore.getCurrentUser()?.id;
+    if (!userId) return true;
+    return [...MediaEngineStore.getMediaEngine().connections].some(connection => connection.streamUserId === userId);
+}
+
+/** Equibop's installed picker when present; otherwise official Discord desktop's capture sources. */
 export function getCaptureBridge(): EquibopCaptureBridge | undefined {
     if (stockBridge) {
         stockBridge.start();
@@ -27,18 +36,17 @@ export function getCaptureBridge(): EquibopCaptureBridge | undefined {
     const host = globalThis as typeof globalThis & CaptureGlobals;
     const picker = host.Equibop?.Components?.ScreenShare;
     const native = host.VesktopNative;
-    if (!picker || !("currentSettings" in picker) || !native || typeof native.app?.getPlatformSpoofInfo !== "function" || !navigator.mediaDevices?.getDisplayMedia) return;
+    if (!picker || !("currentSettings" in picker) || !native || typeof native.app?.getPlatformSpoofInfo !== "function" || !navigator.mediaDevices?.getDisplayMedia) {
+        desktopBridge ??= createDesktopCaptureBridge(nativeSharing);
+        return desktopBridge;
+    }
     const platform = native.app.getPlatformSpoofInfo().originalPlatform;
     if (!["linux", "win32", "darwin"].includes(platform)) return;
     if (platform === "linux" && (typeof native.virtmic?.unmute !== "function" || typeof native.virtmic.stop !== "function")) return;
     stockBridge = createStockCaptureBridge({
         devices: navigator.mediaDevices,
         settings: () => picker.currentSettings,
-        nativeSharing: () => {
-            const userId = UserStore.getCurrentUser()?.id;
-            if (!userId) return true;
-            return [...MediaEngineStore.getMediaEngine().connections].some(connection => connection.streamUserId === userId);
-        },
+        nativeSharing,
         linux: platform === "linux",
         unmute: () => native.virtmic.unmute(),
         stopAudio: () => native.virtmic.stop()
