@@ -51,13 +51,14 @@ export class SpikeSignalingError extends Error {
     constructor(readonly code: SignalingFailureCode) { super(`DASS signaling failed [${code}].`); }
 }
 
-/** Only an explicit backend denial/revocation invalidates reusable credentials. */
+/** A revoked live session does not imply that its reusable password is invalid. */
 export function isAuthenticationRejected(error: unknown): boolean {
-    return error instanceof SpikeSignalingError && (error.code === "rejected:unauthorized" || error.code === "server:revoked");
+    return error instanceof SpikeSignalingError && error.code === "rejected:unauthorized";
 }
 
 export function signalingFailureMessage(error: unknown): string {
-    if (isAuthenticationRejected(error)) return "The DASS backend rejected or revoked your access. Check your DASS credentials and permissions. No Discord fallback.";
+    if (isAuthenticationRejected(error)) return "The DASS backend rejected your access. Check your DASS credentials and permissions. No Discord fallback.";
+    if (error instanceof SpikeSignalingError && error.code === "server:revoked") return "The backend closed this DASS session. Your credentials were kept. Retry manually if access is still permitted.";
     if (error instanceof SpikeSignalingError && error.code === "rejected:replay") {
         return "The DASS backend rejected a duplicate login or request [rejected:replay]. This account may already have an active connection. Your credentials were kept; no Discord fallback.";
     }

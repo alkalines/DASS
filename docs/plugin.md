@@ -15,6 +15,18 @@ The capability checker described below is still a separate scaffold-only check.
 
 Automatic authenticated call discovery is retained, but the separate DASS Streams
 button and call watch panel were removed after user feedback.
+Discovery polls the current call every five seconds using its existing signaling
+connection. Dropped or expired directory connections now reconnect with backoff
+from one to thirty seconds, only while an account and call remain configured.
+Transient startup failures retain credentials and can recover through discovery;
+an explicit authentication rejection still clears in-memory access. Revoking a
+live session stops that session without erasing the reusable account password,
+and directory revocation requires a manual retry rather than an automatic loop.
+Use `/dass_refresh` to refresh the current call's directory, or reconnect a failed
+directory, without stopping publishing or watching. Repeated commands are limited
+to one attempt every two seconds. Backend restart still ends active media; start
+sharing or watching again after reconnection. These recovery changes have unit
+coverage but still need real-client backend-restart and command acceptance tests.
 The user reports local preview and LIVE presentation in the intended grid space.
 DASS-owned preview/watch tiles use the existing call grid, without a separate
 panel. The latest revision projects DASS-owned selection into the connected call

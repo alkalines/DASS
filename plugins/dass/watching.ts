@@ -134,7 +134,7 @@ export class WatchController implements ScreenshareTransport {
     private failure(error: unknown) {
         logDiagnostic("viewer setup failed", { code: error instanceof SpikeSignalingError ? error.code : browserFailureCode(error) }, true);
         const code = error instanceof SpikeSignalingError ? error.code : "";
-        const unauthorized = isAuthenticationRejected(error);
+        const unauthorized = isAuthenticationRejected(error) || code === "server:revoked";
         const disconnected = ["socket", "closed", "timeout", "expired", "server:left", "server:expired", "server:transport_failed"].includes(code);
         const message = error instanceof SpikeSignalingError
             ? signalingFailureMessage(error)

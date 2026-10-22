@@ -147,9 +147,18 @@ export class DassSession {
             || options.username !== this.access?.username || options.password !== this.access?.password
             || options.credential !== this.access?.credential) {
             connection?.close();
-            connection = await this.authenticateAfterRelease(options);
+            try { connection = await this.authenticateAfterRelease(options); }
+            catch (error) {
+                if (this.epoch === epoch && isAuthenticationRejected(error)) this.clear();
+                throw error;
+            }
         }
         if (options.signal.aborted || this.epoch !== epoch) { connection.close(); throw new SpikeSignalingError("cancelled"); }
+        if (this.phase === "failed" && this.access) {
+            this.phase = "ready";
+            this.message = "DASS account reconnected.";
+            this.notify();
+        }
         this.leasedConnections.add(connection);
         const leased = connection;
         const abort = () => leased.close();

@@ -327,7 +327,7 @@ test("signaling loss during capture cancels late tracks without activating", asy
         await publishing;
         expect(f.releases()).toBe(1);
         expect(f.events).toEqual(["authenticate"]);
-        expect(f.session.getSnapshot().configured).toBe(false);
+        expect(f.session.getSnapshot().configured).toBe(true);
         expect(f.controller.getSnapshot().phase).toBe("failed");
     } finally { f.controller.stop(); }
 });

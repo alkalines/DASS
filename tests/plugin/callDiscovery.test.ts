@@ -74,6 +74,51 @@ for (const first of ["publish", "watch"] as const) {
     });
 }
 
+test("a backend restart recovers directory discovery with retained credentials and no media preparation", async () => {
+    const sockets: AbortController[] = [];
+    let online = true;
+    let publisherVisible = false;
+    let attempts = 0;
+    const session = new DassSession(undefined, async () => {
+        attempts++;
+        if (!online) throw new SpikeSignalingError("socket");
+        const closed = new AbortController();
+        sockets.push(closed);
+        return { closed: closed.signal, close: () => closed.abort(new SpikeSignalingError("closed")),
+            request: async () => ({ type: "directory", room_id: "call_a", publishers: publisherVisible ? [{ publisher_id: "remote" }] : [] })
+        } as unknown as SpikeSignaling;
+    }, () => "call_a");
+    const directory = new WatchController(() => "call_a", {
+        connect: options => session.connect(options),
+        prepare: async () => { throw new Error("Directory must not prepare media."); },
+        identityStore: async () => memoryIdentityStore()
+    });
+    const discovery = createCallDiscovery(session, directory, () => "https://dass.example");
+    discovery.start();
+    try {
+        await session.start("https://dass.example");
+        await session.login({ backendUrl: "https://dass.example", username: "alice", password: "separate_password" }, false);
+        for (let i = 0; i < 20; i++) await Promise.resolve();
+        expect(directory.getSnapshot().phase).toBe("ready");
+        online = false;
+        sockets[0].abort(new SpikeSignalingError("socket"));
+        await Bun.sleep(1_100);
+        expect(attempts).toBe(2);
+        expect(session.getSnapshot().configured).toBe(true);
+        online = true;
+        publisherVisible = true;
+        await Bun.sleep(2_100);
+        expect(attempts).toBe(3);
+        expect(directory.getSnapshot()).toMatchObject({ phase: "ready", shares: [{ roomId: "call_a", shareId: "remote" }] });
+        expect(session.getSnapshot()).toMatchObject({ phase: "ready", configured: true });
+        publisherVisible = false;
+        discovery.retry();
+        for (let i = 0; i < 20; i++) await Promise.resolve();
+        expect(directory.getSnapshot().shares).toEqual([]);
+        expect(attempts).toBe(3);
+    } finally { discovery.stop(); session.stop(); }
+});
+
 function fixture() {
     let roomId = "call_a";
     let backendUrl = "https://dass.example";
@@ -85,12 +130,18 @@ function fixture() {
     let resets = 0;
     let starts = 0;
     let stops = 0;
+    let refreshes = 0;
+    let directoryPhase: ReturnType<WatchController["getSnapshot"]>["phase"] = "idle";
+    const directoryListeners = new Set<() => void>();
     const session = {
         getSnapshot: () => ({ roomId, username: "separate_account", configured, phase, message: "" }),
         getAccess: () => ({ roomId, username: "separate_account", password: "separate_password" }),
         subscribe: (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener); }; }
     };
     const directory = {
+        getSnapshot: () => ({ phase: directoryPhase, message: "", shares: [], candidates: [] }),
+        subscribeStatus: (listener: () => void) => { directoryListeners.add(listener); return () => { directoryListeners.delete(listener); }; },
+        refresh: async () => { refreshes++; },
         start: () => { starts++; }, stop: () => { stops++; }, reset: () => { resets++; },
         bind: async (backendUrl: string, roomId: string, authentication: unknown) => {
             expect(authentication).toEqual({ roomId, username: "separate_account", password: "separate_password" });
@@ -99,7 +150,8 @@ function fixture() {
     };
     const discovery = createCallDiscovery(session, directory, () => backendUrl, () => mediaActive);
     return {
-        discovery, bindings, resets: () => resets, starts: () => starts, stops: () => stops, listeners,
+        discovery, bindings, resets: () => resets, starts: () => starts, stops: () => stops, refreshes: () => refreshes, listeners,
+        directoryPhase(phase: typeof directoryPhase) { directoryPhase = phase; for (const listener of directoryListeners) listener(); },
         login() { configured = true; phase = "ready"; for (const listener of listeners) listener(); },
         logout() { configured = false; phase = "idle"; for (const listener of listeners) listener(); },
         fail() { configured = true; phase = "failed"; for (const listener of listeners) listener(); },
@@ -123,6 +175,49 @@ test("call discovery authenticates only after login and never prepares capture o
     f.discovery.stop();
 });
 
+test("manual refresh reuses a healthy directory and repeated commands are throttled", () => {
+    const f = fixture();
+    f.discovery.start();
+    f.login();
+    f.directoryPhase("ready");
+    for (let i = 0; i < 20; i++) f.discovery.retry();
+    expect(f.refreshes()).toBe(1);
+    expect(f.bindings).toHaveLength(1);
+    f.discovery.stop();
+});
+
+test("directory reconnects after a dropped connection and stop cancels retries", async () => {
+    const f = fixture();
+    f.discovery.start();
+    try {
+        f.login();
+        f.directoryPhase("disconnected");
+        for (let i = 0; i < 20; i++) f.discovery.sync();
+        expect(f.bindings).toHaveLength(1);
+        await Bun.sleep(1_100);
+        expect(f.bindings).toHaveLength(2);
+        f.directoryPhase("ready");
+        f.directoryPhase("failed");
+        f.discovery.stop();
+        await Bun.sleep(1_100);
+        expect(f.bindings).toHaveLength(2);
+    } finally { f.discovery.stop(); }
+});
+
+test("directory denial or session revocation is not automatically retried", async () => {
+    const f = fixture();
+    f.discovery.start();
+    try {
+        f.login();
+        f.directoryPhase("disconnected");
+        f.directoryPhase("unauthorized");
+        await Bun.sleep(1_100);
+        expect(f.bindings).toHaveLength(1);
+        f.discovery.retry();
+        expect(f.bindings).toHaveLength(2);
+    } finally { f.discovery.stop(); }
+});
+
 test("call changes, exit, logout and backend changes clear the old directory", () => {
     const f = fixture();
     f.discovery.start();
@@ -142,11 +237,11 @@ test("call changes, exit, logout and backend changes clear the old directory", (
     expect(f.bindings).toHaveLength(4);
 });
 
-test("failed login is not authentication and retries are explicit, not an automatic loop", () => {
+test("retained credentials can retry discovery after a transient startup failure", () => {
     const f = fixture();
     f.discovery.start();
     f.fail();
-    expect(f.bindings).toEqual([]);
+    expect(f.bindings).toHaveLength(1);
     f.login();
     for (let i = 0; i < 10; i++) f.discovery.sync();
     expect(f.bindings).toHaveLength(1);

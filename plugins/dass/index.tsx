@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
+import { ApplicationCommandInputType } from "@api/Commands";
 import * as DataStore from "@api/DataStore";
 import { showNotification } from "@api/Notifications";
 import { definePluginSettings } from "@api/Settings";
@@ -193,7 +194,6 @@ function startRuntime() {
         releaseUnavailableFullscreen();
         if (watching.getSnapshot().phase === "unauthorized") {
             showToast(watching.getSnapshot().message);
-            session.clear();
         }
         if (["loading", "ready", "watching"].includes(watching.getSnapshot().phase)) callDiscovery.sync();
         else queueMicrotask(() => callDiscovery.sync());
@@ -241,6 +241,19 @@ export default definePlugin({
     // Add the maintainer's confirmed Discord ID before distribution; never invent one.
     authors: [],
     settings,
+    commands: [{
+        name: "dass_refresh",
+        description: "Refresh DASS streams in your current call without stopping media.",
+        inputType: ApplicationCommandInputType.BUILT_IN,
+        execute() {
+            if (!session.getSnapshot().configured) showToast("Sign in to DASS in plugin settings first.");
+            else if (!currentCall()) showToast("Join a Discord call before refreshing DASS streams.");
+            else {
+                callDiscovery.retry();
+                showToast("Refreshing DASS streams.");
+            }
+        }
+    }],
     patches: [...DISCORD_SHARE_PATCHES, ...DISCORD_PRESENTATION_PATCHES],
     settingsAboutComponent: () => <Paragraph>Configure your account once, then use the call's Share button. Supported builds route DASS tiles through the call grid, focused layout and filmstrip, with independent share audio controls and a local sidebar card. Runtime verification, zoom, individual tile popouts and remote voice-row badges remain incomplete. The temporary test viewer remains in Advanced options.</Paragraph>,
     ShareButton(props: ShareButtonProps) {

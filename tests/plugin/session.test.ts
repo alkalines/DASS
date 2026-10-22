@@ -222,6 +222,40 @@ test("idle connection expiry is reauthenticated automatically at the next media 
     } finally { session.stop(); next.connection.close(); }
 });
 
+test("revoking an idle session retains credentials without reconnecting automatically", async () => {
+    let attempts = 0;
+    const first = fakeConnection();
+    const session = new DassSession(undefined, async () => { attempts++; return first.connection; });
+    try {
+        await session.start(account.backendUrl);
+        await session.login(account, false);
+        first.closed.abort(new SpikeSignalingError("server:revoked"));
+        expect(session.getSnapshot().configured).toBe(true);
+        expect(session.getAccess().password).toBe(account.password);
+        expect(attempts).toBe(1);
+    } finally { session.stop(); }
+});
+
+test("a retry after transient startup failure restores ready state, but a real login denial clears access", async () => {
+    let attempts = 0;
+    const session = new DassSession(undefined, async () => {
+        attempts++;
+        if (attempts === 1) throw new SpikeSignalingError("socket");
+        if (attempts === 3) throw new SpikeSignalingError("rejected:unauthorized");
+        return fakeConnection().connection;
+    });
+    try {
+        await session.start(account.backendUrl);
+        await session.login(account, false);
+        expect(session.getSnapshot()).toMatchObject({ configured: true, phase: "failed" });
+        const options = { experimental: true as const, backendUrl: account.backendUrl, ...session.getAccess(), signal: new AbortController().signal };
+        await session.connect(options);
+        expect(session.getSnapshot()).toMatchObject({ configured: true, phase: "ready" });
+        await expect(session.connect(options)).rejects.toThrow("rejected:unauthorized");
+        expect(session.getSnapshot().configured).toBe(false);
+    } finally { session.stop(); }
+});
+
 test("directory-to-media handoff retries only replay during local lease release", async () => {
     const first = fakeConnection();
     const next = fakeConnection();
