@@ -5,6 +5,10 @@ selected source revisions. There are no AI jobs, scheduled merges, scheduled
 builds, automatic dependency updates, deployments or client auto-installation.
 The workflow is `.github/workflows/release.yml` in this same repository.
 
+For image-only builds without a release, use the separate manual
+[Build Docker images workflow](images.md). It can build either target or both,
+download loadable image artifacts, or publish isolated manual tags to GHCR.
+
 ## Publishing
 
 > [!WARNING]

@@ -9,6 +9,9 @@ Public hosting and media interoperability remain experimental; see
 
 ## Build
 
+For manual GitHub Actions builds of either image or both, with optional GHCR
+publication and no release creation, see [on-demand Docker images](images.md).
+
 From the repository root, with Docker daemon access:
 
 ```sh
