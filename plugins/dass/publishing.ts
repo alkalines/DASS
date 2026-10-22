@@ -210,9 +210,8 @@ export class PublishController {
                 onViewerPresence: presence => {
                 if (this.current(operation)) this.update({ ...this.status, viewerCount: presence.viewer_count });
             } });
-            // Publisher-controlled admission: every pushed view request is a
-            // manual decision. Approvals grant one subscribe for this stream
-            // session only; deny and block refuse the prompt.
+            // Publisher-controlled admission: policy may approve unchanged keys
+            // automatically. Each approval grants one subscription for this stream.
             if (operation.sessionId && this.current(operation) && typeof operation.signaling.onViewRequests === "function") {
                 operation.signaling.onViewRequests(operation.sessionId, viewRequest => {
                     if (!this.current(operation)) return;
@@ -304,7 +303,8 @@ export class PublishController {
             this.update({ ...this.status, message: "This viewer's identity is not independently verified. Compare the safety number before approving." });
             return;
         }
-        if (decision === "approve" && operation.viewerKeys?.has(requestKey.viewerId)) {
+        const admittedKey = operation.viewerKeys?.get(requestKey.viewerId);
+        if (decision === "approve" && admittedKey && admittedKey !== requestKey.key) {
             this.update({ ...this.status, message: "This account already has an approved device. Remove it before approving another device key." });
             return;
         }
@@ -346,8 +346,8 @@ export class PublishController {
             : this.status.approvedViewers;
         this.update({ ...this.status, pendingViewers, approvedViewers });
         if (decision === "approve" && request) {
-            // Never permit a second device request for the same account to
-            // replace an admitted key. It must be removed before re-approval.
+            // Same-key reconnects are allowed, but a different device must
+            // never silently replace an admitted key. Rotate on every admission.
             operation.viewerKeys ??= new Map();
             operation.viewerKeys.set(requestKey.viewerId, requestKey.key);
             const token = {};
@@ -478,6 +478,7 @@ export class PublishController {
             pendingViewers: this.status.pendingViewers.map(pending =>
                 pending.requestId === requestId ? { ...pending, trust: { kind: "tofu" } } : pending),
         });
+        if (this.willAutoApprove(requestKey.trust)) await this.decideView(requestId, "approve");
     }
 
     /** Mark a viewer's identity as independently verified after the
@@ -498,6 +499,7 @@ export class PublishController {
             pendingViewers: this.status.pendingViewers.map(pending =>
                 pending.requestId === requestId ? { ...pending, trust: { kind: "verified" } } : pending),
         });
+        if (this.willAutoApprove(requestKey.trust)) await this.decideView(requestId, "approve");
     }
 
     private fail(operation: NonNullable<PublishController["operation"]>, message: string) {

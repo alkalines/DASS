@@ -410,6 +410,66 @@ test("a publisher that requires verified identities refuses an unverified viewer
     } finally { f.controller.stop(); }
 });
 
+for (const autoApproveViewers of [false, true]) {
+    test(`same-device rejoining works repeatedly with automatic approval ${autoApproveViewers}`, async () => {
+        const f = fixture({ autoApproveViewers });
+        const alice = await generateIdentity();
+        try {
+            await f.controller.publish("https://dass.example", f.bridge);
+            for (let attempt = 0; attempt < 3; attempt++) {
+                const requestId = `rejoin_${attempt}`;
+                f.request({ request_id: requestId, viewer_id: "alice", viewer_display_name: "Alice", viewer_key: alice.publicKey });
+                await Promise.resolve(); await Promise.resolve();
+                await f.controller.decideView(requestId, "approve");
+                expect(f.decisions).toHaveLength(attempt + 1);
+                expect(f.controller.getSnapshot().pendingViewers).toEqual([]);
+                expect(f.controller.getSnapshot().approvedViewers).toEqual([{ viewerId: "alice" }]);
+                expect(f.sendEpochs).toEqual(Array.from({ length: attempt + 1 }, (_, index) => index + 1));
+                expect(f.keyRelays).toHaveLength(attempt + 1);
+            }
+        } finally { f.controller.stop(); }
+    });
+}
+
+test("repeated denials do not prevent a later same-device approval", async () => {
+    const f = fixture();
+    const alice = await generateIdentity();
+    try {
+        await f.controller.publish("https://dass.example", f.bridge);
+        for (let attempt = 0; attempt < 3; attempt++) {
+            const requestId = `retry_${attempt}`;
+            f.request({ request_id: requestId, viewer_id: "alice", viewer_display_name: "Alice", viewer_key: alice.publicKey });
+            await Promise.resolve(); await Promise.resolve();
+            await f.controller.decideView(requestId, attempt < 2 ? "deny" : "approve");
+            expect(f.controller.getSnapshot().pendingViewers).toEqual([]);
+        }
+        expect(f.decisions.map(item => item.decision)).toEqual(["deny", "deny", "approve"]);
+        expect(f.keyRelays).toHaveLength(1);
+    } finally { f.controller.stop(); }
+});
+
+test("automatic approval retains pins after removal and requires explicit changed-key review", async () => {
+    const f = fixture({ autoApproveViewers: true });
+    const alice = await generateIdentity();
+    const replacement = await generateIdentity();
+    try {
+        await f.controller.publish("https://dass.example", f.bridge);
+        f.request({ request_id: "original", viewer_id: "alice", viewer_display_name: "Alice", viewer_key: alice.publicKey });
+        await Promise.resolve(); await Promise.resolve();
+        await f.controller.decideView("barrier", "deny");
+        await f.controller.removeViewer("alice");
+        f.request({ request_id: "replacement", viewer_id: "alice", viewer_display_name: "Alice", viewer_key: replacement.publicKey });
+        await Promise.resolve(); await Promise.resolve();
+        await f.controller.decideView("replacement", "approve");
+        expect(f.decisions).toHaveLength(1);
+        expect(f.controller.getSnapshot().pendingViewers[0].trust.kind).toBe("changed");
+        await f.controller.acceptViewerIdentity("replacement");
+        expect(f.decisions).toHaveLength(2);
+        expect(f.controller.getSnapshot().pendingViewers).toEqual([]);
+        expect(f.controller.getSnapshot().approvedViewers).toEqual([{ viewerId: "alice" }]);
+    } finally { f.controller.stop(); }
+});
+
 test("automatic approval admits new viewers but pauses on changed identities and the verified-only policy", async () => {
     // Trust evaluation settles in microtasks; a no-op decision then waits for the
     // serialized membership queue, including epoch delivery and pin persistence.

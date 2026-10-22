@@ -162,8 +162,8 @@ const settings = definePluginSettings({
     },
     autoApproveViewers: {
         type: OptionType.BOOLEAN,
-        description: "Approve DASS viewers automatically instead of showing a prompt. Changed E2EE identities and the verified-viewer requirement still need your review.",
-        default: false
+        description: "Approve DASS viewers automatically. Turn off to require permission for each watch request. Changed fingerprints always require review; verified-only policy still applies.",
+        default: true
     }
 });
 

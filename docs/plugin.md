@@ -287,10 +287,17 @@ subscription until the viewer accepts the new identity.
 dialog on the publisher's client, closed automatically once the request is
 decided or expires. The backend closes a viewer's setup 15 seconds after it
 joins, so an unanswered prompt shows the viewer "The streamer did not approve
-your request in time." The `autoApproveViewers` setting (off by default)
+your request in time." The `autoApproveViewers` setting (on by default)
 approves first-contact and pinned identities without a prompt. Changed
 identities and viewers refused by `requireVerifiedViewers` still prompt. Both
 publisher and viewer need this build; an older publisher client has no prompt.
+Turn it off to require permission for each watch request. Existing saved settings
+are retained. Fingerprint pinning and changed-key warnings remain active in either
+mode; automatic approval never accepts a changed key. Rejoining with the same
+device key is allowed and rotates the media epoch again. A different device key
+cannot replace an admitted device until the publisher removes that account from
+the stream. Pinning detects changes after first contact, not a malicious key on
+first contact; compare safety numbers independently for that protection.
 
 **Historical chooser-only behavior:** On Discord stable build **634304**, the center voice tray and left Voice Connected
 panel share buttons now declare an explicit Discord/DASS chooser before their

@@ -28,10 +28,14 @@ function ViewerApproval({ publisher, requestId, ...modalProps }: ApprovalProps) 
         actions={[
             { text: "Block", variant: "critical-primary", onClick: () => void publisher.decideView(requestId, "block") },
             { text: "Deny", variant: "secondary", onClick: () => void publisher.decideView(requestId, "deny") },
+            ...(pending.trust.kind !== "verified" && pending.safetyNumber ? [{
+                text: "Safety number compared", variant: "secondary" as const, onClick: () => void publisher.verifyViewerIdentity(requestId)
+            }] : []),
             changed
                 ? { text: "Accept new identity", variant: "critical-primary", onClick: () => void publisher.acceptViewerIdentity(requestId) }
                 : { text: "Approve", variant: "primary", onClick: () => void publisher.decideView(requestId, "approve") }
         ]}>
+        <Paragraph role="status">{status.message}</Paragraph>
         <Paragraph>{trustPrompt(pending.trust)}</Paragraph>
         {pending.safetyNumber && <Paragraph>Safety number: {pending.safetyNumber}</Paragraph>}
     </Modal>;
