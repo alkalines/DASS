@@ -61,6 +61,9 @@ export function signalingFailureMessage(error: unknown): string {
     if (error instanceof SpikeSignalingError && error.code === "rejected:replay") {
         return "The DASS backend rejected a duplicate login or request [rejected:replay]. This account may already have an active connection. Your credentials were kept; no Discord fallback.";
     }
+    if (error instanceof SpikeSignalingError && error.code === "rejected:overloaded") {
+        return "The DASS backend is at capacity or rate-limiting requests [rejected:overloaded]. Each publisher and viewer uses a separate media slot; ask the administrator to check DASS_MAX_MEDIA_SESSIONS, including saved database settings. Retry later; your credentials were kept. No Discord fallback.";
+    }
     if (error instanceof SpikeSignalingError && (error.code === "expired" || error.code === "server:expired")) {
         return "DASS connection expired. Retry to authenticate again; your credentials were kept. No Discord fallback.";
     }
@@ -77,7 +80,7 @@ export class SpikeSignaling {
     private requestWindowStartedMs = -Infinity;
     private requestsInWindow = 0;
     private openWait?: Pending<void>;
-    private pending?: Pending<ServerOperation> & { requestId: string; expectedType: ServerOperation["type"]; };
+    private pending?: Pending<ServerOperation> & { requestId: string; requestType: ClientOperation["type"]; expectedType: ServerOperation["type"]; };
     private expiryTimer?: ReturnType<typeof setTimeout>;
     private publisherPresence?: { sessionId: string; viewerCount: number; listener: (presence: ViewerPresence) => void; };
     private viewRequestListener?: { sessionId: string; listener: (request: ViewRequest) => void; };
@@ -358,7 +361,7 @@ export class SpikeSignaling {
             }
             return await new Promise<ServerOperation>((resolve, reject) => {
                 if (operation.type !== "directory") logDiagnostic("signaling request", { type: operation.type });
-                this.pending = { requestId, expectedType, resolve, reject, timer: setTimeout(() => this.close("timeout"), LOGIN_DEADLINE_MS) };
+                this.pending = { requestId, requestType: operation.type, expectedType, resolve, reject, timer: setTimeout(() => this.close("timeout"), LOGIN_DEADLINE_MS) };
                 try { this.socket.send(message); } catch { this.close("socket"); }
             });
         } finally {
@@ -368,7 +371,7 @@ export class SpikeSignaling {
 
     close(code: SignalingFailureCode = "closed") {
         // Pending waits are rejected even if cancellation preceded wait registration.
-        if (this.active) logDiagnostic("signaling closed", { code, pendingType: this.pending?.expectedType ?? "none" }, !["closed", "cancelled"].includes(code));
+        if (this.active) logDiagnostic("signaling closed", { code, pendingType: this.pending?.expectedType ?? "none", requestType: this.pending?.requestType ?? "none" }, !["closed", "cancelled"].includes(code));
         if (this.active) this.failureCode = code;
         const error = new SpikeSignalingError(this.failureCode);
         if (this.openWait) { clearTimeout(this.openWait.timer); this.openWait.reject(error); this.openWait = undefined; }

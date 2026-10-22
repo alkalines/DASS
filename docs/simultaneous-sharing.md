@@ -79,6 +79,24 @@ unlimited-capacity claim.
   total key-relay work across all intermediate rosters. This is not a scalable
   group-key protocol or a new security assurance.
 
+## Viewer rejected after publisher approval
+
+Older builds can report `rejected:invalid_state` when subscribing exceeds the
+media-session budget, not just when the publisher route is missing. Two active
+publishers plus one viewer require **three** media slots; two publishers each
+watching the other require **four**. Check the saved `DASS_MAX_MEDIA_SESSIONS`
+value in `/admin/settings`; an existing SQLite value overrides the environment.
+
+Updated builds report capacity exhaustion as `rejected:overloaded`. Server logs
+distinguish fixed setup stages `media_capacity`, `media_route_unavailable` and
+`media_transport_unavailable`; client closure logs include `requestType` (for
+example `subscribe`) as well as the expected response type. These diagnostics
+contain no credentials, session IDs, addresses or SDP. An `overloaded` response
+can also mean another resource/rate limit; it is not proof of media exhaustion
+without the server stage. Capture both peers' DASS logs and backend logs for the
+same attempt if the budget is sufficient. Approval does not guarantee transport
+admission or connectivity.
+
 ## Upgrade an existing installation
 
 1. Build and validate the updated backend. From the repository root:

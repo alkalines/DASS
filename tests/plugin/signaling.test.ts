@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import { BrowserSocket, isAuthenticationRejected, signalingFailureMessage, signalingUrl, SpikeSignaling, SpikeSignalingError, type KeyRelay, type ViewerPresence } from "../../clients/spike/signaling";
 
 class Socket extends EventTarget implements BrowserSocket {
@@ -38,6 +38,16 @@ test("replay reports duplicate access, not an offline backend or invalid credent
     expect(signalingFailureMessage(error)).toContain("rejected:replay");
     expect(signalingFailureMessage(error)).not.toContain("Could not connect");
     expect(signalingFailureMessage(new SpikeSignalingError("protocol"))).toContain("[protocol]");
+});
+
+test("overload explains independent publisher/viewer capacity and persisted settings", () => {
+    const error = new SpikeSignalingError("rejected:overloaded");
+    expect(isAuthenticationRejected(error)).toBe(false);
+    const message = signalingFailureMessage(error);
+    expect(message).toContain("DASS_MAX_MEDIA_SESSIONS");
+    expect(message).toContain("saved database settings");
+    expect(message).toContain("rate-limiting");
+    expect(message).toContain("credentials were kept");
 });
 
 test("login, validated response correlation, busy admission and abort cleanup", async () => {
@@ -124,14 +134,21 @@ test("unexpected IDs, malformed messages and server closure fail closed", async 
 test("validated backend rejection survives socket cleanup without exposing request data", async () => {
     const socket = new Socket();
     const connection = await connect(socket);
-    const pending = connection.request({ type: "subscribe", session_id: "session", publisher_id: "private_source", approval_id: "private_approval" }, "accepted");
-    socket.reply({ type: "rejected", code: "invalid_state" });
-    await expect(pending).rejects.toThrow("rejected:invalid_state");
-    expect(connection.closed.reason).toBeInstanceOf(SpikeSignalingError);
-    expect(connection.closed.reason.code).toBe("rejected:invalid_state");
-    expect(connection.closed.reason.message).not.toContain("private_source");
-    connection.close();
-    expect(connection.closed.reason.code).toBe("rejected:invalid_state");
+    const diagnostic = spyOn(console, "error").mockImplementation(() => {});
+    try {
+        const pending = connection.request({ type: "subscribe", session_id: "session", publisher_id: "private_source", approval_id: "private_approval" }, "accepted");
+        socket.reply({ type: "rejected", code: "invalid_state" });
+        await expect(pending).rejects.toThrow("rejected:invalid_state");
+        expect(connection.closed.reason).toBeInstanceOf(SpikeSignalingError);
+        expect(connection.closed.reason.code).toBe("rejected:invalid_state");
+        expect(connection.closed.reason.message).not.toContain("private_source");
+        connection.close();
+        expect(connection.closed.reason.code).toBe("rejected:invalid_state");
+        expect(diagnostic).toHaveBeenCalledWith("[DASS] signaling closed", {
+            code: "rejected:invalid_state", pendingType: "accepted", requestType: "subscribe"
+        });
+        expect(JSON.stringify(diagnostic.mock.calls)).not.toContain("private_");
+    } finally { diagnostic.mockRestore(); connection.close(); }
 });
 
 test("aborted connect never opens a socket", async () => {

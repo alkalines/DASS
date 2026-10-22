@@ -269,6 +269,24 @@ fn bounded_integer(
 #[derive(Debug)]
 pub struct MediaFailure;
 
+/// Fixed, non-sensitive setup reasons; never include addresses or SDP.
+#[derive(Debug, PartialEq, Eq)]
+pub enum MediaSetupFailure {
+    Overloaded,
+    InvalidRoute,
+    TransportUnavailable,
+}
+
+impl MediaSetupFailure {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::Overloaded => "media_capacity",
+            Self::InvalidRoute => "media_route_unavailable",
+            Self::TransportUnavailable => "media_transport_unavailable",
+        }
+    }
+}
+
 /// One second of byte budget for a single media session.
 #[derive(Debug)]
 struct ByteWindow {
@@ -371,22 +389,16 @@ impl MediaPeer {
         config: &TransportConfig,
         observed_peer_ip: Option<IpAddr>,
     ) -> Result<Self, MediaFailure> {
-        let admission = MediaAdmission::new(
-            config.mode,
-            observed_peer_ip,
-            config.allowed_peers.clone(),
-            config.trusted_client_ips.clone(),
-            config.auto_lan_peers,
-        );
-        // A session without an admissible peer never carries media.
-        if !admission.admits_media() {
-            return Err(MediaFailure);
-        }
-        let admission_permit = config
-            .admission
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| MediaFailure)?;
+        let (admission, admission_permit) =
+            Self::reserve_session(config, observed_peer_ip).map_err(|_| MediaFailure)?;
+        Self::bind_admitted(config, admission, admission_permit).await
+    }
+
+    async fn bind_admitted(
+        config: &TransportConfig,
+        admission: MediaAdmission,
+        admission_permit: OwnedSemaphorePermit,
+    ) -> Result<Self, MediaFailure> {
         let now = Instant::now();
         let mut rtc = Rtc::builder()
             .set_crypto_provider(Arc::new(str0m_aws_lc_rs::default_provider()))
@@ -462,7 +474,7 @@ impl MediaPeer {
         config: &TransportConfig,
         room_id: &str,
         publisher_id: &str,
-    ) -> Result<Self, MediaFailure> {
+    ) -> Result<Self, MediaSetupFailure> {
         Self::publisher_for_session(config, room_id, publisher_id, None).await
     }
 
@@ -471,12 +483,15 @@ impl MediaPeer {
         room_id: &str,
         publisher_id: &str,
         observed_peer_ip: Option<IpAddr>,
-    ) -> Result<Self, MediaFailure> {
+    ) -> Result<Self, MediaSetupFailure> {
+        let (admission, permit) = Self::reserve_session(config, observed_peer_ip)?;
         let route = config
             .hub
             .publish(room_id, publisher_id)
-            .map_err(|_| MediaFailure)?;
-        let mut peer = Self::bind_for_session(config, observed_peer_ip).await?;
+            .map_err(|_| MediaSetupFailure::InvalidRoute)?;
+        let mut peer = Self::bind_admitted(config, admission, permit)
+            .await
+            .map_err(|_| MediaSetupFailure::TransportUnavailable)?;
         peer.route = PeerRoute::Publisher(route);
         Ok(peer)
     }
@@ -486,7 +501,7 @@ impl MediaPeer {
         room_id: &str,
         publisher_id: &str,
         subscriber_id: &str,
-    ) -> Result<Self, MediaFailure> {
+    ) -> Result<Self, MediaSetupFailure> {
         Self::subscriber_for_session(config, room_id, publisher_id, subscriber_id, None).await
     }
 
@@ -496,14 +511,41 @@ impl MediaPeer {
         publisher_id: &str,
         subscriber_id: &str,
         observed_peer_ip: Option<IpAddr>,
-    ) -> Result<Self, MediaFailure> {
+    ) -> Result<Self, MediaSetupFailure> {
+        let (admission, permit) = Self::reserve_session(config, observed_peer_ip)?;
         let route = config
             .hub
             .subscribe(room_id, publisher_id, subscriber_id)
-            .map_err(|_| MediaFailure)?;
-        let mut peer = Self::bind_for_session(config, observed_peer_ip).await?;
+            .map_err(|_| MediaSetupFailure::InvalidRoute)?;
+        let mut peer = Self::bind_admitted(config, admission, permit)
+            .await
+            .map_err(|_| MediaSetupFailure::TransportUnavailable)?;
         peer.route = PeerRoute::Subscriber(route);
         Ok(peer)
+    }
+
+    fn reserve_session(
+        config: &TransportConfig,
+        observed_peer_ip: Option<IpAddr>,
+    ) -> Result<(MediaAdmission, OwnedSemaphorePermit), MediaSetupFailure> {
+        let admission = MediaAdmission::new(
+            config.mode,
+            observed_peer_ip,
+            config.allowed_peers.clone(),
+            config.trusted_client_ips.clone(),
+            config.auto_lan_peers,
+        );
+        if !admission.admits_media() {
+            return Err(MediaSetupFailure::TransportUnavailable);
+        }
+        // Reserve before mutating the hub: a full deployment is overload,
+        // not an invalid viewer state or a missing publisher route.
+        let permit = config
+            .admission
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| MediaSetupFailure::Overloaded)?;
+        Ok((admission, permit))
     }
 
     pub fn expired(&self) -> bool {
@@ -1348,6 +1390,37 @@ mod tests {
             config.first_port = free_test_port_pair();
         }
         config
+    }
+
+    #[tokio::test]
+    async fn two_publishers_exhaust_legacy_budget_and_viewer_can_retry_after_release() {
+        let mut config = config(true, "127.0.0.1:50000").unwrap().unwrap();
+        config.admission = Arc::new(Semaphore::new(2));
+        config.hub = Arc::new(MediaHub::new(2));
+        let publisher = MediaPeer::publisher(&config, "room", "publisher")
+            .await
+            .unwrap();
+        let other = MediaPeer::publisher(&config, "room", "other")
+            .await
+            .unwrap();
+        assert!(matches!(
+            MediaPeer::subscriber(&config, "room", "publisher", "viewer").await,
+            Err(MediaSetupFailure::Overloaded)
+        ));
+        drop(other);
+        // A missing source releases the reserved slot and does not disturb the
+        // existing publisher. The following valid subscription must succeed.
+        assert!(matches!(
+            MediaPeer::subscriber(&config, "room", "missing", "viewer").await,
+            Err(MediaSetupFailure::InvalidRoute)
+        ));
+        let viewer = MediaPeer::subscriber(&config, "room", "publisher", "viewer")
+            .await
+            .unwrap();
+        assert_eq!(config.admission.available_permits(), 0);
+        drop(viewer);
+        drop(publisher);
+        assert_eq!(config.admission.available_permits(), 2);
     }
 
     fn public_config() -> Result<Option<TransportConfig>, &'static str> {

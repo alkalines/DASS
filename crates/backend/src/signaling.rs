@@ -6,7 +6,7 @@
 
 use crate::auth::{InviteStore, random_identifier};
 use crate::listener::PeerAddress;
-use crate::rtc::{MediaCounters, MediaPeer, TransportConfig};
+use crate::rtc::{MediaCounters, MediaPeer, MediaSetupFailure, TransportConfig};
 use crate::transport::is_private_or_loopback;
 use axum::{
     Router,
@@ -2033,12 +2033,12 @@ async fn media_operation(
                     joined.receive_peer = Some(peer);
                     state.metrics.media_session_started();
                 }
-                Err(_) => {
+                Err(error) => {
                     state.metrics.media_session_failed();
                     state
                         .metrics
                         .event(crate::metrics::Severity::Warning, "media_session_failed");
-                    return Ok(Some(rejected(ErrorCode::Overloaded)));
+                    return Ok(Some(media_setup_rejection("publish", error)));
                 }
             }
             // Only record the E2EE identity once the media route exists, so a
@@ -2092,9 +2092,9 @@ async fn media_operation(
                     peer
                 }
                 // Deliberately do not disclose whether a publisher exists in another room.
-                Err(_) => {
+                Err(error) => {
                     state.metrics.media_session_failed();
-                    return Ok(Some(rejected(ErrorCode::InvalidState)));
+                    return Ok(Some(media_setup_rejection("subscribe", error)));
                 }
             };
             let peer_counters = peer.counters().clone();
@@ -2143,6 +2143,15 @@ async fn media_operation(
 
 fn rejected(code: ErrorCode) -> ServerOperation {
     ServerOperation::Rejected { code }
+}
+
+fn media_setup_rejection(operation: &'static str, error: MediaSetupFailure) -> ServerOperation {
+    tracing::warn!(operation, stage = error.code(), "media setup rejected");
+    rejected(match error {
+        MediaSetupFailure::Overloaded => ErrorCode::Overloaded,
+        MediaSetupFailure::InvalidRoute => ErrorCode::InvalidState,
+        MediaSetupFailure::TransportUnavailable => ErrorCode::TransportUnavailable,
+    })
 }
 
 #[cfg(test)]
@@ -2354,6 +2363,18 @@ mod tests {
     use crate::auth::{
         InviteFile, UsersFile, create_invite, create_invite_with_display_name, create_user,
     };
+
+    #[test]
+    fn media_setup_failures_distinguish_capacity_route_and_transport() {
+        for (failure, expected) in [
+            (MediaSetupFailure::Overloaded, "overloaded"),
+            (MediaSetupFailure::InvalidRoute, "invalid_state"),
+            (MediaSetupFailure::TransportUnavailable, "transport_unavailable"),
+        ] {
+            let response = media_setup_rejection("subscribe", failure);
+            assert_eq!(serde_json::to_value(response).unwrap()["code"], expected);
+        }
+    }
 
     fn store_with_invites(invites: Vec<crate::auth::Invite>) -> Arc<InviteStore> {
         Arc::new(
