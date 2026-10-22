@@ -2369,7 +2369,10 @@ mod tests {
         for (failure, expected) in [
             (MediaSetupFailure::Overloaded, "overloaded"),
             (MediaSetupFailure::InvalidRoute, "invalid_state"),
-            (MediaSetupFailure::TransportUnavailable, "transport_unavailable"),
+            (
+                MediaSetupFailure::TransportUnavailable,
+                "transport_unavailable",
+            ),
         ] {
             let response = media_setup_rejection("subscribe", failure);
             assert_eq!(serde_json::to_value(response).unwrap()["code"], expected);
