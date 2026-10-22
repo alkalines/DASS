@@ -2983,8 +2983,14 @@ mod tests {
         assert!(history.remember("client_10001").is_ok());
         let mut legacy = RequestHistory::new("opaque_login");
         assert!(legacy.remember("client_1").is_ok());
-        assert!(matches!(legacy.remember("client_1"), Err(ErrorCode::Replay)));
-        assert!(matches!(legacy.remember("opaque_login"), Err(ErrorCode::Replay)));
+        assert!(matches!(
+            legacy.remember("client_1"),
+            Err(ErrorCode::Replay)
+        ));
+        assert!(matches!(
+            legacy.remember("opaque_login"),
+            Err(ErrorCode::Replay)
+        ));
         assert!(matches!(legacy, RequestHistory::Opaque(_)));
     }
 
@@ -3451,6 +3457,16 @@ mod network_tests {
         )
         .await;
         assert_eq!(denied["operation"]["code"], "replay");
+        // Four logins exhaust the per-source window on fast runs. Expire it
+        // without sleeping so this assertion tests credentials, not throttling.
+        server
+            .state
+            .login_sources
+            .lock()
+            .unwrap()
+            .get_mut(&server.address.ip())
+            .unwrap()
+            .start = Instant::now() - Duration::from_secs(1);
         let mut invalid = connect(&server, "https://discord.com", "").await.unwrap();
         let denied = request(
             &mut invalid,
@@ -3463,7 +3479,9 @@ mod network_tests {
             server.state.active_accounts.lock().unwrap().get("alice"),
             Some(&3)
         );
-        server.invites.send_replace(Arc::new(InviteStore::default()));
+        server
+            .invites
+            .send_replace(Arc::new(InviteStore::default()));
         for client in &mut clients {
             let closed = response(client).await;
             assert_eq!(closed["operation"]["reason"], "revoked");

@@ -209,9 +209,11 @@ impl PublisherEndpoint {
     }
 
     pub fn has_ready_viewer(&self) -> bool {
-        self.publisher.state.lock().ok().is_some_and(|state| {
-            state.active && state.viewers.values().any(|viewer| viewer.ready)
-        })
+        self.publisher
+            .state
+            .lock()
+            .ok()
+            .is_some_and(|state| state.active && state.viewers.values().any(|viewer| viewer.ready))
     }
 }
 
@@ -338,7 +340,10 @@ mod tests {
             }
         }
         let extra: Vec<_> = (0..3)
-            .map(|index| hub.publish("another_room", &format!("extra_{index}")).unwrap())
+            .map(|index| {
+                hub.publish("another_room", &format!("extra_{index}"))
+                    .unwrap()
+            })
             .collect();
         assert!(hub.publish("another_room", "over_budget").is_err());
         assert!(hub.subscribe("room_1", "source_1", "over_budget").is_err());
@@ -358,7 +363,10 @@ mod tests {
         for _ in 0..=PACKET_QUEUE_CAPACITY {
             let input = packet();
             publisher.forward(input.clone()).unwrap();
-            assert!(Arc::ptr_eq(&input.payload, &fast.try_packet().unwrap().unwrap().payload));
+            assert!(Arc::ptr_eq(
+                &input.payload,
+                &fast.try_packet().unwrap().unwrap().payload
+            ));
         }
         assert!(slow.try_packet().is_err());
         assert!(unready.try_packet().unwrap().is_none());

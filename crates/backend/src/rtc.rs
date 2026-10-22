@@ -13,7 +13,6 @@ use crate::forwarding::{
     ForwardPacket, MediaHub, PACKET_QUEUE_CAPACITY, PublisherEndpoint, SubscriberEndpoint,
 };
 use crate::transport::{MediaAdmission, Refusal, TransportMode, is_global_unicast};
-use udp::{SessionUdp, SharedUdp};
 use std::{
     collections::HashSet,
     net::{IpAddr, SocketAddr},
@@ -33,6 +32,7 @@ use str0m::{
     rtp::RtpWrite,
 };
 use tokio::sync::{OnceCell, OwnedSemaphorePermit, Semaphore};
+use udp::{SessionUdp, SharedUdp};
 
 const MAX_CANDIDATES: usize = 16;
 const MAX_TRUSTED_CLIENT_IPS: usize = 16;
@@ -1148,7 +1148,10 @@ mod tests {
         let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let mut publisher = TestClient::negotiate(socket, &mut publisher_peer, false).await;
         let (stop, receiver) = tokio::sync::watch::channel(false);
-        let mut owners = vec![tokio::spawn(run_test_peer(publisher_peer, receiver.clone()))];
+        let mut owners = vec![tokio::spawn(run_test_peer(
+            publisher_peer,
+            receiver.clone(),
+        ))];
         let mut viewers = Vec::new();
         for index in 0..3 {
             let mut peer = MediaPeer::subscriber_for_session(
@@ -1166,7 +1169,10 @@ mod tests {
         }
         let deadline = Instant::now() + Duration::from_secs(10);
         while !publisher.connected || viewers.iter().any(|viewer| !viewer.connected) {
-            assert!(Instant::now() < deadline, "multi-viewer DTLS setup deadline");
+            assert!(
+                Instant::now() < deadline,
+                "multi-viewer DTLS setup deadline"
+            );
             publisher.step().await;
             for viewer in &mut viewers {
                 viewer.step().await;
@@ -1181,15 +1187,26 @@ mod tests {
         publisher.write(Codec::Opus, &[0x78, 0], 960).await;
         publisher.write(Codec::Vp8, &[0x10, 0, 0, 0], 3000).await;
         while viewers.iter().any(|viewer| viewer.received.len() < 2) {
-            assert!(Instant::now() < deadline, "multi-viewer forwarding deadline");
+            assert!(
+                Instant::now() < deadline,
+                "multi-viewer forwarding deadline"
+            );
             publisher.step().await;
             for viewer in &mut viewers {
                 viewer.step().await;
             }
         }
         for viewer in viewers {
-            assert!(viewer.received.contains(&(Codec::Opus, vec![0x78, 0], 960, true)));
-            assert!(viewer.received.contains(&(Codec::Vp8, vec![0x10, 0, 0, 0], 3000, true)));
+            assert!(
+                viewer
+                    .received
+                    .contains(&(Codec::Opus, vec![0x78, 0], 960, true))
+            );
+            assert!(
+                viewer
+                    .received
+                    .contains(&(Codec::Vp8, vec![0x10, 0, 0, 0], 3000, true))
+            );
         }
         stop.send_replace(true);
         for owner in owners {
@@ -1547,20 +1564,20 @@ mod tests {
             ports.insert(peer.advertised.port());
             peers.push(peer);
         }
-        assert_eq!(ports, HashSet::from([config.first_port, config.first_port + 1]));
-        assert!(MediaPeer::bind_for_session(
-            &config,
-            Some(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)),
-        )
-        .await
-        .is_err());
+        assert_eq!(
+            ports,
+            HashSet::from([config.first_port, config.first_port + 1])
+        );
+        assert!(
+            MediaPeer::bind_for_session(&config, Some(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)),)
+                .await
+                .is_err()
+        );
         let released = peers.pop().unwrap().advertised.port();
-        let replacement = MediaPeer::bind_for_session(
-            &config,
-            Some(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)),
-        )
-        .await
-        .unwrap();
+        let replacement =
+            MediaPeer::bind_for_session(&config, Some(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)))
+                .await
+                .unwrap();
         assert_eq!(replacement.advertised.port(), released);
         assert_eq!(config.admission.available_permits(), 0);
         drop(peers);
@@ -1937,6 +1954,8 @@ mod tests {
                 }
                 tokio::task::yield_now().await;
             }
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
     }
 }

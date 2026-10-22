@@ -11,7 +11,7 @@ use std::{
     sync::{Arc, Mutex, Weak},
     time::{Duration, Instant},
 };
-use str0m::{IceCreds, crypto::Sha1HmacProvider, net::StunMessage};
+use str0m::{IceCreds, crypto::Sha1HmacProvider, ice::StunMessage};
 use tokio::{
     net::UdpSocket,
     sync::{Mutex as AsyncMutex, mpsc},
@@ -254,7 +254,10 @@ async fn read_socket(socket: Arc<UdpSocket>, registry: Weak<Mutex<Registry>>, po
 }
 
 impl SessionUdp {
-    pub(super) fn admit_offer(&self, session_peers: &HashSet<SocketAddr>) -> Result<(), MediaFailure> {
+    pub(super) fn admit_offer(
+        &self,
+        session_peers: &HashSet<SocketAddr>,
+    ) -> Result<(), MediaFailure> {
         if session_peers.len() > MAX_CANDIDATES {
             return Err(MediaFailure);
         }
@@ -328,9 +331,19 @@ mod tests {
             let probe = UdpSocket::bind("127.0.0.1:0").await.unwrap();
             let port = probe.local_addr().unwrap().port();
             drop(probe);
-            if port == 65535 { continue; }
-            if let Ok(pair) = SharedUdp::bind("127.0.0.1".parse().unwrap(), port,
-                MediaLimits { max_sessions, ..MediaLimits::default() }).await {
+            if port == 65535 {
+                continue;
+            }
+            if let Ok(pair) = SharedUdp::bind(
+                "127.0.0.1".parse().unwrap(),
+                port,
+                MediaLimits {
+                    max_sessions,
+                    ..MediaLimits::default()
+                },
+            )
+            .await
+            {
                 return pair;
             }
         }
@@ -338,9 +351,22 @@ mod tests {
     }
 
     fn session(pair: &Arc<SharedUdp>, ufrag: &str, source: SocketAddr) -> SessionUdp {
-        let admission = MediaAdmission::new(TransportMode::Local, Some(source.ip()),
-            HashSet::new(), HashSet::new(), true);
-        let session = pair.register(IceCreds { ufrag: ufrag.into(), pass: "test-ice-password".into() }, admission).unwrap();
+        let admission = MediaAdmission::new(
+            TransportMode::Local,
+            Some(source.ip()),
+            HashSet::new(),
+            HashSet::new(),
+            true,
+        );
+        let session = pair
+            .register(
+                IceCreds {
+                    ufrag: ufrag.into(),
+                    pass: "test-ice-password".into(),
+                },
+                admission,
+            )
+            .unwrap();
         session.admit_offer(&HashSet::from([source])).unwrap();
         session
     }
@@ -350,26 +376,59 @@ mod tests {
         let request = StunMessage::binding_request(&username, TransId::new(), true, 42, 1, true);
         let mut bytes = [0_u8; 512];
         let hmac = str0m_aws_lc_rs::default_provider().sha1_hmac_provider;
-        let length = request.to_bytes(Some(password), &mut bytes,
-            |key, payloads| hmac.sha1_hmac(key, payloads)).unwrap();
+        let length = request
+            .to_bytes(Some(password), &mut bytes, |key, payloads| {
+                hmac.sha1_hmac(key, payloads)
+            })
+            .unwrap();
         bytes[..length].to_vec()
     }
 
     fn dispatch(pair: &SharedUdp, index: usize, source: SocketAddr, bytes: &[u8]) -> bool {
-        let sender = pair.registry.lock().unwrap().destination(index, source, bytes);
-        sender.is_some_and(|sender| sender.try_send(Datagram { bytes: bytes.into(), source }).is_ok())
+        let sender = pair
+            .registry
+            .lock()
+            .unwrap()
+            .destination(index, source, bytes);
+        sender.is_some_and(|sender| {
+            sender
+                .try_send(Datagram {
+                    bytes: bytes.into(),
+                    source,
+                })
+                .is_ok()
+        })
     }
 
     #[tokio::test]
     async fn sixty_four_sessions_use_only_the_same_two_ports_and_release_their_slots() {
         let pair = pair(64).await;
         let source = "127.0.0.1:55000".parse().unwrap();
-        let mut sessions: Vec<_> = (0..64).map(|index| session(&pair, &format!("session_{index}"), source)).collect();
-        let ports: HashSet<_> = sessions.iter().map(|session| session.local_addr().unwrap().port()).collect();
+        let mut sessions: Vec<_> = (0..64)
+            .map(|index| session(&pair, &format!("session_{index}"), source))
+            .collect();
+        let ports: HashSet<_> = sessions
+            .iter()
+            .map(|session| session.local_addr().unwrap().port())
+            .collect();
         let first = pair.sockets[0].local_addr().unwrap().port();
         assert_eq!(ports, HashSet::from([first, first + 1]));
-        assert!(pair.register(IceCreds { ufrag: "overflow".into(), pass: "test".into() },
-            MediaAdmission::new(TransportMode::Local, Some(source.ip()), HashSet::new(), HashSet::new(), true)).is_err());
+        assert!(
+            pair.register(
+                IceCreds {
+                    ufrag: "overflow".into(),
+                    pass: "test".into()
+                },
+                MediaAdmission::new(
+                    TransportMode::Local,
+                    Some(source.ip()),
+                    HashSet::new(),
+                    HashSet::new(),
+                    true
+                )
+            )
+            .is_err()
+        );
         drop(sessions.pop());
         let replacement = session(&pair, "replacement", source);
         drop(sessions);
@@ -387,34 +446,85 @@ mod tests {
         let other = session(&pair, "other", source);
         let valid = check("alice", b"test-ice-password");
         assert!(!dispatch(&pair, alice.port_index, source, &[128, 96, 0]));
-        assert!(!dispatch(&pair, alice.port_index, source, &check("alice", b"wrong-password")));
-        assert!(!dispatch(&pair, alice.port_index, "127.0.0.2:55000".parse().unwrap(), &valid));
+        assert!(!dispatch(
+            &pair,
+            alice.port_index,
+            source,
+            &check("alice", b"wrong-password")
+        ));
+        assert!(!dispatch(
+            &pair,
+            alice.port_index,
+            "127.0.0.2:55000".parse().unwrap(),
+            &valid
+        ));
         assert!(!dispatch(&pair, bob.port_index, source, &valid));
         assert!(dispatch(&pair, alice.port_index, source, &valid));
-        assert!(!dispatch(&pair, other.port_index, source, &check("other", b"test-ice-password")));
+        assert!(!dispatch(
+            &pair,
+            other.port_index,
+            source,
+            &check("other", b"test-ice-password")
+        ));
         assert!(dispatch(&pair, alice.port_index, source, &[128, 96, 0]));
         assert_eq!(alice.receiver.lock().await.len(), 2);
         assert!(bob.receiver.lock().await.is_empty());
         assert!(other.receiver.lock().await.is_empty());
         drop(alice);
         assert!(pair.registry.lock().unwrap().endpoints.is_empty());
-        assert!(dispatch(&pair, other.port_index, source, &check("other", b"test-ice-password")));
+        assert!(dispatch(
+            &pair,
+            other.port_index,
+            source,
+            &check("other", b"test-ice-password")
+        ));
     }
 
     #[tokio::test]
     async fn public_nat_endpoints_require_the_observed_ip_and_remain_bounded() {
         let pair = pair(4).await;
         let ip = "203.0.114.10".parse().unwrap();
-        let session = pair.register(IceCreds { ufrag: "public".into(), pass: "test-ice-password".into() },
-            MediaAdmission::new(TransportMode::Public, Some(ip), HashSet::new(), HashSet::new(), false)).unwrap();
+        let session = pair
+            .register(
+                IceCreds {
+                    ufrag: "public".into(),
+                    pass: "test-ice-password".into(),
+                },
+                MediaAdmission::new(
+                    TransportMode::Public,
+                    Some(ip),
+                    HashSet::new(),
+                    HashSet::new(),
+                    false,
+                ),
+            )
+            .unwrap();
         session.admit_offer(&HashSet::new()).unwrap();
         let bytes = check("public", b"test-ice-password");
-        assert!(!dispatch(&pair, session.port_index, "203.0.114.11:55000".parse().unwrap(), &bytes));
+        assert!(!dispatch(
+            &pair,
+            session.port_index,
+            "203.0.114.11:55000".parse().unwrap(),
+            &bytes
+        ));
         for offset in 0..MAX_CANDIDATES {
-            assert!(dispatch(&pair, session.port_index, SocketAddr::new(ip, 55000 + offset as u16), &bytes));
+            assert!(dispatch(
+                &pair,
+                session.port_index,
+                SocketAddr::new(ip, 55000 + offset as u16),
+                &bytes
+            ));
         }
-        assert!(!dispatch(&pair, session.port_index, SocketAddr::new(ip, 55016), &bytes));
-        assert_eq!(pair.registry.lock().unwrap().endpoints.len(), MAX_CANDIDATES);
+        assert!(!dispatch(
+            &pair,
+            session.port_index,
+            SocketAddr::new(ip, 55016),
+            &bytes
+        ));
+        assert_eq!(
+            pair.registry.lock().unwrap().endpoints.len(),
+            MAX_CANDIDATES
+        );
         drop(session);
         assert!(pair.registry.lock().unwrap().endpoints.is_empty());
     }
@@ -424,12 +534,29 @@ mod tests {
         for _ in 0..128 {
             let second = UdpSocket::bind("127.0.0.1:0").await.unwrap();
             let second_port = second.local_addr().unwrap().port();
-            if second_port <= 1024 { continue; }
+            if second_port <= 1024 {
+                continue;
+            }
             let first_port = second_port - 1;
-            let Ok(probe) = UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, first_port)).await else { continue; };
+            let Ok(probe) = UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, first_port)).await
+            else {
+                continue;
+            };
             drop(probe);
-            assert!(SharedUdp::bind("127.0.0.1".parse().unwrap(), first_port, MediaLimits::default()).await.is_err());
-            assert!(UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, first_port)).await.is_ok());
+            assert!(
+                SharedUdp::bind(
+                    "127.0.0.1".parse().unwrap(),
+                    first_port,
+                    MediaLimits::default()
+                )
+                .await
+                .is_err()
+            );
+            assert!(
+                UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, first_port))
+                    .await
+                    .is_ok()
+            );
             return;
         }
         panic!("could not reserve a test port pair");
@@ -441,12 +568,22 @@ mod tests {
         let source: SocketAddr = "127.0.0.1:55000".parse().unwrap();
         let slow = session(&pair, "slow", source);
         let fast = session(&pair, "fast", source);
-        assert!(dispatch(&pair, slow.port_index, source, &check("slow", b"test-ice-password")));
+        assert!(dispatch(
+            &pair,
+            slow.port_index,
+            source,
+            &check("slow", b"test-ice-password")
+        ));
         for _ in 0..INGRESS_QUEUE_PACKETS {
             dispatch(&pair, slow.port_index, source, &[128, 96, 0]);
         }
         assert_eq!(slow.receiver.lock().await.len(), INGRESS_QUEUE_PACKETS);
-        assert!(dispatch(&pair, fast.port_index, source, &check("fast", b"test-ice-password")));
+        assert!(dispatch(
+            &pair,
+            fast.port_index,
+            source,
+            &check("fast", b"test-ice-password")
+        ));
         assert_eq!(fast.receiver.lock().await.len(), 1);
     }
 
@@ -457,10 +594,21 @@ mod tests {
         let source = client.local_addr().unwrap();
         let session = session(&pair, "actual", source);
         let mut buffer = [0_u8; MAX_DATAGRAM_BYTES + 1];
-        assert!(tokio::time::timeout(Duration::from_millis(1), session.recv_from(&mut buffer)).await.is_err());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(1), session.recv_from(&mut buffer))
+                .await
+                .is_err()
+        );
         let bytes = check("actual", b"test-ice-password");
-        client.send_to(&bytes, session.local_addr().unwrap()).await.unwrap();
-        let (length, observed) = tokio::time::timeout(Duration::from_secs(1), session.recv_from(&mut buffer)).await.unwrap().unwrap();
+        client
+            .send_to(&bytes, session.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (length, observed) =
+            tokio::time::timeout(Duration::from_secs(1), session.recv_from(&mut buffer))
+                .await
+                .unwrap()
+                .unwrap();
         assert_eq!(observed, source);
         assert_eq!(&buffer[..length], &bytes);
         drop(session);
