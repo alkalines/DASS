@@ -1,5 +1,10 @@
 # Minimal publisher-to-viewer forwarding
 
+This page records the original single-route checkpoint. The current bounded
+multi-publisher/viewer increment and its pending runtime acceptance are documented in
+[simultaneous-sharing.md](simultaneous-sharing.md); earlier validation below
+does not validate that increment.
+
 Discord Alternative ScreenShare (DASS) now has source for a one-publisher/
 one-viewer feasibility path inside the existing Rust executable. **User-run Docker
 formatting, Clippy and all 41 Rust tests passed; the user subsequently confirmed

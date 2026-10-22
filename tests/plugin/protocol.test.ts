@@ -68,6 +68,7 @@ describe("proposed signaling protocol", () => {
             { type: "view_decision", session_id: "s", request_id: "pending_1", decision: "deny", approval_id: "", publisher_key: "", publisher_account: "" },
             { type: "view_request_closed", session_id: "s", request_id: "pending_1" },
             { type: "viewer_presence", session_id: "publisher_session", change: "joined", viewer_count: 1 },
+            { type: "viewer_presence", session_id: "publisher_session", change: "joined", viewer_count: 63 },
             { type: "viewer_presence", session_id: "publisher_session", change: "left", viewer_count: 0 },
             { type: "closed", session_id: "s", reason: "revoked" },
             { type: "rejected", code: "e2ee_unavailable" }
@@ -83,8 +84,8 @@ describe("proposed signaling protocol", () => {
             { type: "viewer_presence", session_id: "s", change: "connected", viewer_count: 1 },
             { type: "viewer_presence", session_id: "s", change: "joined", viewer_count: 0 },
             { type: "viewer_presence", session_id: "s", change: "left", viewer_count: -1 },
-            { type: "viewer_presence", session_id: "s", change: "left", viewer_count: 16 },
-            { type: "viewer_presence", session_id: "s", change: "left", viewer_count: 17 },
+            { type: "viewer_presence", session_id: "s", change: "left", viewer_count: 64 },
+            { type: "viewer_presence", session_id: "s", change: "left", viewer_count: 65 },
             { type: "viewer_presence", session_id: "s", change: "left", viewer_count: 0, viewer_id: "private" }
         ]) expect(() => parseServerMessage(message(operation))).toThrow();
     });

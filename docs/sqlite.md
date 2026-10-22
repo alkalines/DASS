@@ -101,7 +101,7 @@ apply immediately and disconnect existing DASS sessions.
 | `DASS_RTC_AUTO_LAN_PEERS` | false | `true` or `false`; local mode only |
 | `DASS_RTC_ALLOWED_PEERS` | empty | Up to 16 comma-separated safe, exact IP:port endpoints |
 | `DASS_RTC_TRUSTED_CLIENT_IPS` | empty | Up to 16 comma-separated safe IP addresses |
-| `DASS_MAX_MEDIA_SESSIONS` | 2 | 1–64 |
+| `DASS_MAX_MEDIA_SESSIONS` | 4 | 1–64 |
 | `DASS_MAX_PACKETS_PER_SECOND` | 2000 | 1–20000 per media session |
 | `DASS_MAX_INGRESS_BYTES_PER_SECOND` | 2000000 | 1–20000000 per media session |
 | `DASS_MAX_EGRESS_BYTES_PER_SECOND` | 4000000 | 1–40000000 per media session |

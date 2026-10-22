@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 pub const MAX_MESSAGE_BYTES: usize = 16_384;
 pub const MAX_SESSIONS: usize = 128;
-pub const MAX_ROOM_MEMBERS: usize = 16;
+pub const MAX_ROOM_MEMBERS: usize = 64;
 pub const MAX_QUEUED_MESSAGES: usize = 32;
 pub const LOGIN_DEADLINE_MS: usize = 5_000;
 pub const SETUP_DEADLINE_MS: usize = 15_000;

@@ -135,7 +135,7 @@ export class WatchController implements ScreenshareTransport {
         logDiagnostic("viewer setup failed", { code: error instanceof SpikeSignalingError ? error.code : browserFailureCode(error) }, true);
         const code = error instanceof SpikeSignalingError ? error.code : "";
         const unauthorized = isAuthenticationRejected(error);
-        const disconnected = ["socket", "closed", "timeout", "expired", "server:expired", "server:transport_failed"].includes(code);
+        const disconnected = ["socket", "closed", "timeout", "expired", "server:left", "server:expired", "server:transport_failed"].includes(code);
         const message = error instanceof SpikeSignalingError
             ? signalingFailureMessage(error)
                 : "DASS setup failed. Check TLS, room access, LAN IP matching and the UDP path. No Discord fallback.";

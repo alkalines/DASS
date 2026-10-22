@@ -7,8 +7,9 @@ environment configuration is now a one-time import source only; see
 [SQLite migration and direct provisioning](sqlite.md). The older hash-generation
 commands below remain optional import tooling, not live configuration edits.
 This replaces repeatedly handing around invite strings or editing client UDP
-ports. It remains LAN-only experimental functionality: one publisher and one
-viewer backend-wide, TLS/DTLS-SRTP, no E2EE, and readiness still returns 503.
+ports. Simultaneous sharing and watching now has an experimental multi-publisher,
+multi-viewer path; see [simultaneous-sharing.md](simultaneous-sharing.md)
+for upgrade requirements and validation limits. Readiness still returns 503.
 
 ## The implemented flow
 
@@ -101,8 +102,9 @@ shown below. Both files are private and ignored by Git.
   `display_name`.
 - Environment account changes require recreating the container. SIGHUP reload
   remains specific to the invite-file mode; it does not reread a host environment.
-- Accounts are exclusive to one live authenticated connection in this experiment.
-  Do not share one account between clients. Account login is bounded/rate-limited
+- Accounts permit three live authenticated connections for discovery, publishing
+  and watching. Legacy invites remain exclusive. Do not share accounts between
+  clients. Account login is bounded/rate-limited
   per connection source and globally, but this is not a completed production
   brute-force or multi-device system.
 - Session lifetime is a fixed 600 seconds from authentication; there is no
@@ -235,7 +237,7 @@ work around certificate failures. Shell-exported settings take precedence over
 
 This is an explicit user startup command, not a service deployed by the agent.
 It retains the non-root, read-only, capability-free, bounded backend container.
-It publishes TLS TCP 8080 and the backend's two fixed UDP ports, 50000/50001, on
+It publishes TLS TCP 8080 and the backend's default shared UDP pair, 50000/50001, on
 the selected LAN address. Those **server** ports/firewall rules still need one-time
 configuration. The **client** ports no longer need manual allowlisting per share.
 The static exact/trusted-IP policies remain the default in other configurations;

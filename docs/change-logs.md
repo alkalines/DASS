@@ -3,11 +3,10 @@
 Notable changes to Discord Alternative ScreenShare (DASS), newest first.
 Dates use `YYYY-MM-DD`; commit links identify implementations, not runtime acceptance.
 Publication status is recorded by [GitHub Releases](https://github.com/alkalines/DASS/releases), not by an entry's date.
-Uncommitted work has no commit ID until it is committed. See [release guidance](releasing.md).
+Uncommitted work has no commit ID until it is committed.
 
 > [!WARNING]
-> DASS is experimental. Production use and unrestricted public deployment are
-> not recommended. Functional tests are not an independent security audit.
+> DASS is experimental. Production use and unrestricted public deployment are not recommended. Functional tests are not an independent security audit.
 
 ## [1.0.0] - 2026-10-22
 
@@ -32,23 +31,6 @@ Uncommitted work has no commit ID until it is committed. See [release guidance](
 - **Plugin builds:** tolerate staged protocol-header line endings during validation.
   ([`1574b97`](https://github.com/alkalines/DASS/commit/1574b97))
 
-### Validation
-
-- **User-reported on 2026-10-22:** E2EE and public hosting were tested and are
-  working in the tested setup. Exact source/artifact hashes, client versions,
-  network topology and test matrix were not supplied with this report. This is
-  functional evidence, not cryptographic review, capacity evidence or a production
-  recommendation. Existing [security findings](security-release.md) remain open.
-
-### Pending / not released
-
-- **Simultaneous sharing:** working-tree changes add a bounded two-publisher
-  topology with one viewer per publisher, not arbitrary multi-viewer support.
-  No commit ID or runtime acceptance is recorded yet; see
-  [simultaneous sharing](simultaneous-sharing.md).
-- **Pelican egg:** planned hosting integration; no committed egg or validation
-  evidence is recorded here yet. Do not treat the Pterodactyl image as a tested
-  Pelican egg.
 
 ## [0.1.0] - 2026-10-21
 

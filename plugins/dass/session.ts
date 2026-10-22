@@ -26,7 +26,7 @@ export class DassSession {
     private backendUrl?: string;
     private pending?: AbortController;
     private idleConnection?: SpikeSignaling;
-    private leasedConnection?: SpikeSignaling;
+    private leasedConnections = new Set<SpikeSignaling>();
     private lastReleaseAtMs = -Infinity;
     private epoch = 0;
     private active = false;
@@ -140,29 +140,39 @@ export class DassSession {
         signalingUrl(options.backendUrl);
         const { epoch } = this;
         let connection = this.idleConnection;
+        // Reserve the idle socket before awaiting: simultaneous callers must
+        // never acquire the same signaling owner.
+        this.idleConnection = undefined;
         if (!connection || connection.closed.aborted || new URL(options.backendUrl).origin !== this.backendUrl
             || options.username !== this.access?.username || options.password !== this.access?.password
-            || options.credential !== this.access?.credential) connection = await this.authenticateAfterRelease(options);
+            || options.credential !== this.access?.credential) {
+            connection?.close();
+            connection = await this.authenticateAfterRelease(options);
+        }
         if (options.signal.aborted || this.epoch !== epoch) { connection.close(); throw new SpikeSignalingError("cancelled"); }
-        this.idleConnection = undefined;
-        this.leasedConnection = connection;
+        this.leasedConnections.add(connection);
         const leased = connection;
         const abort = () => leased.close();
         const cleanup = () => options.signal.removeEventListener("abort", abort);
         options.signal.addEventListener("abort", abort, { once: true });
         leased.closed.addEventListener("abort", () => {
             cleanup();
-            if (this.leasedConnection === leased) {
-                this.leasedConnection = undefined;
+            if (this.leasedConnections.delete(leased)) {
                 this.lastReleaseAtMs = Date.now();
             }
         }, { once: true });
+        if (options.signal.aborted) abort();
+        if (leased.closed.aborted) {
+            cleanup();
+            this.leasedConnections.delete(leased);
+            throw leased.closed.reason;
+        }
         return connection;
     }
 
     private async authenticateAfterRelease(options: Parameters<typeof SpikeSignaling.connect>[0]) {
-        // A local close is synchronous, but the backend releases its exclusive
-        // account lease asynchronously. Retry only this narrowly scoped race,
+        // A local close is synchronous, but the backend releases its bounded
+        // account connection slot asynchronously. Retry only this scoped race,
         // never bad credentials, network failures or arbitrary replay denials.
         const recentlyReleased = Date.now() - this.lastReleaseAtMs < 2_000;
         for (let attempt = 0; ; attempt++) {
@@ -203,10 +213,10 @@ export class DassSession {
         ++this.epoch;
         this.pending?.abort();
         this.pending = undefined;
-        if (this.idleConnection || this.leasedConnection) this.lastReleaseAtMs = Date.now();
+        if (this.idleConnection || this.leasedConnections.size) this.lastReleaseAtMs = Date.now();
         this.idleConnection?.close();
-        this.leasedConnection?.close();
-        this.leasedConnection = undefined;
+        for (const connection of this.leasedConnections) connection.close();
+        this.leasedConnections.clear();
         this.idleConnection = undefined;
         this.access = undefined;
         this.backendUrl = undefined;

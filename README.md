@@ -18,7 +18,11 @@ Discord still handles your voice call; DASS handles the screen and optional shar
 
 ## Current status
 
-E2EE and Public Hosting is still untested, use it at your own risk.
+**Experimental — production use and unrestricted public deployment are not recommended.**
+E2EE and public hosting have been user-tested and reported working in the tested
+setup (2026-10-22). This is functional evidence, not an independent security audit
+or a production-readiness claim; [security findings](docs/security-release.md)
+remain open. See the [changelog](docs/change-logs.md) for changes and evidence limits.
 
 ## Install the client
 

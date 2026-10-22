@@ -9,9 +9,12 @@ policy), `crates/backend/src/rtc.rs` (the media owner), `crates/backend/src/conf
 (deployment rules and limits), `crates/backend/src/listener.rs` (socket and TLS
 admission) and `crates/backend/src/metrics.rs` (bounded operational counters).
 
-**This is not deployment authorization and not interoperability evidence.**
-Roadmap section 7 (the pilot gate) still requires an independent review, real
-clients on separate networks and explicit operator approval.
+**Experimental: production use and unrestricted public deployment are not recommended.**
+On 2026-10-22 the user reported E2EE and public hosting tested and working in their
+setup. Exact revisions, client builds and network/test matrix were not supplied;
+this is functional evidence, not independent security review or general network
+compatibility. Roadmap section 7 still requires its documented evidence and
+explicit operator approval.
 
 ## Transport modes
 
@@ -97,7 +100,7 @@ default Compose profile.
 | Transport encryption | `DASS_TLS_CERT_FILE` and `DASS_TLS_KEY_FILE`, TLS 1.3 only |
 | Plaintext | `DASS_INSECURE_LOCAL_DEV` must be unset; the public mode rejects it |
 | Public media address | `DASS_RTC_ADVERTISED_IP` must be a globally routable literal IP of the same family as `DASS_RTC_BIND_IP` |
-| Media transport | `DASS_RTC_SPIKE=true` and `DASS_RTC_FIRST_PORT` (the UDP port range) |
+| Media transport | `DASS_RTC_SPIKE=true` and `DASS_RTC_FIRST_PORT` (that port plus exactly one above it) |
 | Published ports | TCP 8080 (signaling) and the UDP media port(s) to the Internet |
 | Accounts | `DASS_USERS` (hashed accounts) or `DASS_INVITE_FILE` |
 | Administration | `DASS_ADMIN_USERS` plus a network-restricted panel path; the panel is not an Internet-facing surface |
@@ -134,7 +137,7 @@ a restart.
 
 ### Firewall and exposure
 
-- Publish TCP 8080 and the UDP media port range. Nothing else is needed.
+- Publish TCP 8080 and exactly the UDP pair FIRST/FIRST+1, independent of client count.
 - Keep the administration panel on a restricted network path or behind a
   separate, private listener. The panel shares the process with the public
   signaling service; it is protected by separate administrator credentials,
@@ -173,7 +176,7 @@ hostile client.
 | `DASS_MAX_UNAUTHENTICATED_SESSIONS` | 16 | 1–256 sessions before login |
 | `DASS_MAX_TCP_CONNECTIONS` | 128 | 1–4096 accepted TCP connections |
 | `DASS_MAX_PASSWORD_VERIFICATIONS` | 2 | 1–16 concurrent password hashes |
-| `DASS_MAX_MEDIA_SESSIONS` | 2 | 1–64 concurrent media-session admission permits; increasing it does not increase forwarding topology |
+| `DASS_MAX_MEDIA_SESSIONS` | 4 | 1–64 concurrent publisher uploads plus viewer subscriptions; independent of the fixed two-port UDP pair |
 | `DASS_MAX_PACKETS_PER_SECOND` | 2000 | 1–20000 UDP datagrams per media session |
 | `DASS_MAX_INGRESS_BYTES_PER_SECOND` | 2000000 | media bytes per session per second |
 | `DASS_MAX_EGRESS_BYTES_PER_SECOND` | 4000000 | forwarded bytes per session per second |
@@ -185,11 +188,12 @@ of media sessions times the per-session egress budget. Application limits
 cannot prevent upstream link saturation; hosting-provider DDoS protection and
 the residual availability risk stay with the operator.
 
-The media topology is still one publisher and one viewer **backend-wide**, with
-one in-process queue of 32 packets between them. `DASS_MAX_MEDIA_SESSIONS` is a
-transport admission ceiling, not a capacity setting; values above two do not
-enable additional routes. Multi-user forwarding is roadmap section 9, not this
-build.
+The experimental router supports multiple publishers and multiple viewers per
+stream, each viewer with an independent 32-packet queue. Publisher and viewer
+counts may be unequal. The total number of RTC owners is bounded by
+`DASS_MAX_MEDIA_SESSIONS` (currently 1–64), not a fixed role topology. Four slots
+are needed for two people sharing and watching each other. See [simultaneous-sharing.md](simultaneous-sharing.md)
+for existing-database upgrades, UDP mapping requirements and unverified runtime status.
 
 ## Operational metrics
 
@@ -211,15 +215,15 @@ not change that: the media path has not passed the real-client gate.
 
 ## What is not proven
 
-- No real client has exchanged media over the public mode. The two-client
-  evidence checklist in [transport-gate.md](transport-gate.md) is still open,
-  and the public mode adds a separate requirement: two clients on separate
-  Internet networks.
+- User-reported E2EE/public-hosting success is recorded above. The detailed
+  two-client evidence checklist in [transport-gate.md](transport-gate.md) is still
+  open; separate-Internet-network topology and exact build provenance were not
+  supplied with that report.
 - The Rust changes in this increment have not been compiled, formatted,
   linted or tested in Docker. The Docker socket was not accessible in the
   authoring session, so the canonical checks are blocked, not passed.
-- The public mode's admission rules are covered by unit tests over the
-  policy functions only. They are not exercised by a real ICE exchange.
+- Unit tests cover the public mode's admission policy functions. The user report
+  does not supply a hostile-network/admission regression matrix for real ICE.
 - The certificate expiry reader is a minimal DER reader. It reports what it
   can parse and stays silent otherwise; it is not a certificate validator.
 - There is no TURN, no relay, no TCP media fallback, no IPv6-only deployment

@@ -138,9 +138,10 @@ The intended connection sequence is:
    follows the viewer's explicit leave, control-session disconnect, expiry,
    revocation, timeout or transport cleanup. No event is emitted for
    rejected/unavailable subscriptions, and events are never broadcast to other
-   publishers. The current RTC experiment
-   is limited to one publisher and one viewer backend-wide, so its count is at most
-   one.
+   publishers. The resource-bounded router now supports multiple viewers per
+   publisher. Counts are bounded below `MAX_ROOM_MEMBERS` (now 64), and total
+   media owners by the configured media-session budget. Rebuild both backend and
+   clients together: older strict clients reject counts above their old limit.
 
    This is an additive operation in protocol v1: old request/response operations
    and fields are unchanged. A new opt-in client must use a backend that supports

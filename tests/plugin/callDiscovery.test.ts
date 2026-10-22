@@ -14,6 +14,66 @@ import { PublishController } from "../../plugins/dass/publishing";
 import { SpikeSignaling, SpikeSignalingError } from "../../clients/spike/signaling";
 import { SpikePeer } from "../../clients/spike/peer";
 
+for (const first of ["publish", "watch"] as const) {
+    test(`account can ${first} first, then publish and watch with directory discovery still active`, async () => {
+        const connections: AbortController[] = [];
+        const session = new DassSession(undefined, async () => {
+            const closed = new AbortController();
+            connections.push(closed);
+            expect(connections.filter(connection => !connection.signal.aborted).length).toBeLessThanOrEqual(3);
+            return { closed: closed.signal, close: () => closed.abort(),
+                request: async () => ({ type: "directory", room_id: "call_a", publishers: [{ publisher_id: "remote", display_name: "Friend" }] })
+            } as unknown as SpikeSignaling;
+        }, () => "call_a");
+        const prepare: typeof SpikePeer.prepare = async options => {
+            const closed = new AbortController();
+            const track = Object.assign(new EventTarget(), { readyState: "live", stop: () => {} });
+            options.signal.addEventListener("abort", () => closed.abort(), { once: true });
+            return { closed: closed.signal, close: () => closed.abort(), candidates: [],
+                activate: async () => options.capture ? "local" : "viewer",
+                receivedStream: { getVideoTracks: () => [track], getTracks: () => [track] }, tracksChanged: new EventTarget()
+            } as unknown as SpikePeer;
+        };
+        const dependencies = { connect: (options: Parameters<typeof SpikeSignaling.connect>[0]) => session.connect(options),
+            prepare, identityStore: async () => memoryIdentityStore() };
+        const directory = new WatchController(() => "call_a", dependencies);
+        const watching = new WatchController(() => "call_a", dependencies);
+        const publisher = new PublishController(session, () => "call_a", dependencies);
+        const discovery = createCallDiscovery(session, directory, () => "https://dass.example");
+        const publish = () => publisher.publish("https://dass.example", { version: 1,
+            capture: async () => ({ stream: {} as MediaStream, audioSelected: false, release: () => {} }) });
+        const watch = () => watching.watchListedShare("https://dass.example", { roomId: "call_a", shareId: "remote" }, session.getAccess());
+        publisher.start();
+        watching.start();
+        discovery.start();
+        try {
+            await session.start("https://dass.example");
+            await session.login({ backendUrl: "https://dass.example", username: "alice", password: "separate_password" }, false);
+            for (let i = 0; i < 10; i++) await Promise.resolve();
+            if (first === "publish") { await publish(); await watch(); }
+            else { await watch(); await publish(); }
+            discovery.sync();
+            expect(publisher.getSnapshot().phase).toBe("publishing");
+            expect(watching.getSnapshot().phase).toBe("watching");
+            expect(directory.getSnapshot().phase).toBe("ready");
+            expect(connections).toHaveLength(3);
+            if (first === "publish") {
+                publisher.reset();
+                expect(watching.getSnapshot().phase).toBe("watching");
+            } else {
+                // The peer's stream ended, but this account still publishes.
+                connections[1].abort(new SpikeSignalingError("server:left"));
+                expect(watching.getSnapshot().phase).toBe("disconnected");
+                expect(session.getSnapshot().configured).toBe(true);
+                expect(publisher.getSnapshot().phase).toBe("publishing");
+            }
+            expect(directory.getSnapshot().phase).toBe("ready");
+            session.clear();
+            expect(connections.every(connection => connection.signal.aborted)).toBe(true);
+        } finally { discovery.stop(); publisher.stop(); watching.stop(); session.stop(); }
+    });
+}
+
 function fixture() {
     let roomId = "call_a";
     let backendUrl = "https://dass.example";

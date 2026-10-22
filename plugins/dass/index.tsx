@@ -47,8 +47,7 @@ const watching = new WatchController(currentCall, { connect: options => session.
 const directory = new WatchController(currentCall, { connect: options => session.connect(options), prepare: SpikePeer.prepare, identityStore: defaultIdentityStore });
 const publisher = new PublishController(session, currentCall, { connect: options => session.connect(options), prepare: SpikePeer.prepare, identityStore: defaultIdentityStore,
     requireVerifiedViewers: () => settings.store.requireVerifiedViewers, autoApproveViewers: () => settings.store.autoApproveViewers });
-const callDiscovery = createCallDiscovery(session, directory, () => settings.store.backendUrl,
-    () => !["idle", "failed"].includes(publisher.getSnapshot().phase) || ["loading", "ready", "watching"].includes(watching.getSnapshot().phase));
+const callDiscovery = createCallDiscovery(session, directory, () => settings.store.backendUrl);
 const localCapture = new LocalCaptureCheck();
 let pluginActive = false;
 let buildWarningShown = false;
@@ -340,7 +339,6 @@ export default definePlugin({
             () => {
                 logDiagnostic("transport selected", { transport: "dass" });
                 if (!session.getSnapshot().configured) return showToast("Configure your DASS account in plugin settings before sharing.");
-                stopGridWatching();
                 stopSpikeTest();
                 localCapture.stop();
                 const bridge = getCaptureBridge();

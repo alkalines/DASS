@@ -114,7 +114,7 @@ test("unauthorized discovery is explicit and exposes no shares", async () => {
     } finally { f.controller.stop(); }
 });
 
-for (const code of ["socket", "timeout", "expired", "server:expired", "server:transport_failed"] as const) {
+for (const code of ["socket", "timeout", "expired", "server:left", "server:expired", "server:transport_failed"] as const) {
     test(`viewer ${code} is a disconnect, not a credential rejection`, async () => {
         const controller = new WatchController(() => "voice_context", {
             connect: async () => { throw new SpikeSignalingError(code); },

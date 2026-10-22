@@ -1,5 +1,10 @@
 # Rust WebRTC feasibility spike
 
+This page records earlier checkpoints. The current experimental transport shares
+exactly two UDP listeners across resource-bounded sessions; see
+[simultaneous-sharing.md](simultaneous-sharing.md). Earlier Docker/client results
+below do not validate the new shared-socket dispatcher.
+
 Discord Alternative ScreenShare (DASS) has an **opt-in** WebRTC
 implementation in the existing Rust executable. Its first receive-only checkpoint
 passed user-run Docker checks/builds and provider-feature review. The subsequent

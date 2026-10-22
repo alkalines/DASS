@@ -57,6 +57,57 @@ test("login, validated response correlation, busy admission and abort cleanup", 
     expect(socket.closeCount).toBe(1);
 });
 
+test("publisher signaling can continue past 256 requests using monotonically increasing IDs", async () => {
+    const socket = new Socket();
+    const connection = await connect(socket);
+    try {
+        // Exercise the former limit without sending hundreds of rate-limited messages.
+        Object.assign(connection, { sequence: 256 });
+        const pending = connection.request({ type: "directory", room_id: "room" }, "directory");
+        const requestId = JSON.parse(socket.messages.at(-1)!).request_id;
+        expect(requestId).toBe("client_257");
+        socket.reply({ type: "directory", room_id: "room", publisher_ids: [], publishers: [] }, requestId);
+        expect((await pending).type).toBe("directory");
+        expect(connection.closed.aborted).toBe(false);
+    } finally { connection.close(); }
+});
+
+test("large control bursts are paced and a waiting send is bounded, busy and cancellable", async () => {
+    const socket = new Socket();
+    const connection = await connect(socket);
+    try {
+        for (let index = 0; index < 15; index++) {
+            const pending = connection.request({ type: "directory", room_id: "room" }, "directory");
+            socket.reply({ type: "directory", room_id: "room", publisher_ids: [], publishers: [] });
+            await pending;
+        }
+        expect(socket.messages).toHaveLength(16);
+        const paced = connection.request({ type: "directory", room_id: "room" }, "directory");
+        expect(socket.messages).toHaveLength(16);
+        await expect(connection.request({ type: "directory", room_id: "room" }, "directory")).rejects.toThrow("busy");
+        connection.close();
+        await expect(paced).rejects.toThrow("closed");
+        expect(socket.messages).toHaveLength(16);
+    } finally { connection.close(); }
+});
+
+test("paced control requests resume with correctly correlated responses", async () => {
+    const socket = new Socket();
+    const connection = await connect(socket);
+    try {
+        // Login plus 20 directory operations crosses a pacing window.
+        socket.send = message => {
+            socket.messages.push(message);
+            queueMicrotask(() => socket.reply({ type: "directory", room_id: "room", publisher_ids: [], publishers: [] }));
+        };
+        for (let index = 0; index < 20; index++) {
+            expect((await connection.request({ type: "directory", room_id: "room" }, "directory")).type).toBe("directory");
+        }
+        expect(socket.messages).toHaveLength(21);
+        expect(connection.closed.aborted).toBe(false);
+    } finally { connection.close(); }
+});
+
 test("unexpected IDs, malformed messages and server closure fail closed", async () => {
     for (const kind of ["id", "malformed", "closed"]) {
         const socket = new Socket();

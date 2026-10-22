@@ -73,6 +73,9 @@ export class SpikeSignaling {
     private active = true;
     private failureCode: SignalingFailureCode = "closed";
     private sequence = 0;
+    private requestInFlight = false;
+    private requestWindowStartedMs = -Infinity;
+    private requestsInWindow = 0;
     private openWait?: Pending<void>;
     private pending?: Pending<ServerOperation> & { requestId: string; expectedType: ServerOperation["type"]; };
     private expiryTimer?: ReturnType<typeof setTimeout>;
@@ -323,22 +326,44 @@ export class SpikeSignaling {
         });
     }
 
-    request(operation: ClientOperation, expectedType: ServerOperation["type"]): Promise<ServerOperation> {
-        if (!this.active || this.signal.aborted || this.socket.readyState !== 1 || this.pending || this.sequence >= 256) {
+    async request(operation: ClientOperation, expectedType: ServerOperation["type"]): Promise<ServerOperation> {
+        if (!this.active || this.signal.aborted || this.socket.readyState !== 1 || this.requestInFlight || this.sequence >= Number.MAX_SAFE_INTEGER) {
             return Promise.reject(new Error("DASS connection is unavailable or busy."));
         }
-        const requestId = `client_${++this.sequence}`;
-        const message = JSON.stringify({ protocol_version: PROTOCOL_VERSION, request_id: requestId, operation });
-        try { parseClientMessage(message); } catch { return Promise.reject(new Error("Invalid DASS request.")); }
-        if (this.socket.bufferedAmount + new TextEncoder().encode(message).byteLength > MAX_MESSAGE_BYTES * 2) {
-            this.close("overloaded");
-            return Promise.reject(new Error("DASS connection is overloaded."));
+        this.requestInFlight = true;
+        try {
+            // Large E2EE rosters send one wrapped key per viewer. Pace bursts
+            // below the backend's 32 messages/s instead of weakening its limit.
+            while (this.requestsInWindow >= 16 && performance.now() - this.requestWindowStartedMs < 1_000) {
+                await new Promise<void>((resolve, reject) => {
+                    const cleanup = () => { clearTimeout(timer); this.closed.removeEventListener("abort", abort); };
+                    const abort = () => { cleanup(); reject(new SpikeSignalingError(this.failureCode)); };
+                    const timer = setTimeout(() => { cleanup(); resolve(); }, 1_000 - (performance.now() - this.requestWindowStartedMs));
+                    this.closed.addEventListener("abort", abort, { once: true });
+                    if (this.closed.aborted) abort();
+                });
+            }
+            if (!this.active || this.signal.aborted) throw new SpikeSignalingError(this.failureCode);
+            if (performance.now() - this.requestWindowStartedMs >= 1_000) {
+                this.requestWindowStartedMs = performance.now();
+                this.requestsInWindow = 0;
+            }
+            this.requestsInWindow++;
+            const requestId = `client_${++this.sequence}`;
+            const message = JSON.stringify({ protocol_version: PROTOCOL_VERSION, request_id: requestId, operation });
+            try { parseClientMessage(message); } catch { return Promise.reject(new Error("Invalid DASS request.")); }
+            if (this.socket.bufferedAmount + new TextEncoder().encode(message).byteLength > MAX_MESSAGE_BYTES * 2) {
+                this.close("overloaded");
+                return Promise.reject(new Error("DASS connection is overloaded."));
+            }
+            return await new Promise<ServerOperation>((resolve, reject) => {
+                if (operation.type !== "directory") logDiagnostic("signaling request", { type: operation.type });
+                this.pending = { requestId, expectedType, resolve, reject, timer: setTimeout(() => this.close("timeout"), LOGIN_DEADLINE_MS) };
+                try { this.socket.send(message); } catch { this.close("socket"); }
+            });
+        } finally {
+            this.requestInFlight = false;
         }
-        return new Promise((resolve, reject) => {
-            if (operation.type !== "directory") logDiagnostic("signaling request", { type: operation.type });
-            this.pending = { requestId, expectedType, resolve, reject, timer: setTimeout(() => this.close("timeout"), LOGIN_DEADLINE_MS) };
-            try { this.socket.send(message); } catch { this.close("socket"); }
-        });
     }
 
     close(code: SignalingFailureCode = "closed") {

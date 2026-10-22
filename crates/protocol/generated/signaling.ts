@@ -3,7 +3,7 @@
 export const PROTOCOL_VERSION = 1;
 export const MAX_MESSAGE_BYTES = 16384;
 export const MAX_SESSIONS = 128;
-export const MAX_ROOM_MEMBERS = 16;
+export const MAX_ROOM_MEMBERS = 64;
 export const MAX_QUEUED_MESSAGES = 32;
 export const LOGIN_DEADLINE_MS = 5000;
 export const SETUP_DEADLINE_MS = 15000;

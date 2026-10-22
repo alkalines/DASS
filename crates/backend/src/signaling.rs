@@ -1,4 +1,4 @@
-//! Authenticated control plane with an explicit one-publisher/one-viewer media
+//! Authenticated control plane with a resource-bounded multi-publisher media
 //! transport. Rooms are discovery grouping only. Stream admission is decided
 //! solely by the authenticated publisher through bounded, single-use approval
 //! requests; the backend relays and enforces decisions but never grants
@@ -112,7 +112,7 @@ pub struct SignalingState {
     unauthenticated: Arc<Semaphore>,
     verifications: Arc<Semaphore>,
     metrics: Arc<crate::metrics::Metrics>,
-    active_accounts: Arc<Mutex<HashSet<String>>>,
+    active_accounts: Arc<Mutex<HashMap<String, usize>>>,
     rooms: Arc<Mutex<RoomMap>>,
     publishers: Arc<Mutex<PublisherMap>>,
     /// Live authenticated sessions, keyed by session ID. This is the same
@@ -421,7 +421,7 @@ impl SignalingState {
             unauthenticated: Arc::new(Semaphore::new(resources.max_login_handshakes)),
             verifications: Arc::new(Semaphore::new(resources.max_password_verifications)),
             metrics: Arc::new(crate::metrics::Metrics::new()),
-            active_accounts: Arc::new(Mutex::new(HashSet::new())),
+            active_accounts: Arc::new(Mutex::new(HashMap::new())),
             rooms: Arc::new(Mutex::new(HashMap::new())),
             publishers: Arc::new(Mutex::new(HashMap::new())),
             sessions: Arc::new(Mutex::new(HashMap::new())),
@@ -446,14 +446,24 @@ impl SignalingState {
         self
     }
 
-    fn claim_account(&self, account: String) -> Result<AccountLease, ErrorCode> {
+    fn claim_account(
+        &self,
+        account: String,
+        account_login: bool,
+    ) -> Result<AccountLease, ErrorCode> {
         let mut active = self
             .active_accounts
             .lock()
             .map_err(|_| ErrorCode::Overloaded)?;
-        if !active.insert(account.clone()) {
+        // Account clients own independent directory, publisher and viewer sockets.
+        // Legacy bearer invites remain exclusive. Password verification, global
+        // admission and per-source login throttles apply to every connection.
+        let maximum = if account_login { 3 } else { 1 };
+        let count = active.entry(account.clone()).or_default();
+        if *count >= maximum {
             return Err(ErrorCode::Replay);
         }
+        *count += 1;
         Ok(AccountLease {
             account,
             active: self.active_accounts.clone(),
@@ -597,7 +607,7 @@ impl SignalingState {
         self.metrics
             .event(crate::metrics::Severity::Warning, "admin_stream_stopped");
         events
-            .try_send(ConnectionEvent::Close(CloseReason::Revoked))
+            .try_send(ConnectionEvent::Close(CloseReason::Left))
             .map_err(|_| "stream state unavailable")
     }
 }
@@ -612,12 +622,17 @@ fn unix_seconds() -> u64 {
 
 struct AccountLease {
     account: String,
-    active: Arc<Mutex<HashSet<String>>>,
+    active: Arc<Mutex<HashMap<String, usize>>>,
 }
 impl Drop for AccountLease {
     fn drop(&mut self) {
-        if let Ok(mut active) = self.active.lock() {
-            active.remove(&self.account);
+        if let Ok(mut active) = self.active.lock()
+            && let Some(count) = active.get_mut(&self.account)
+        {
+            *count -= 1;
+            if *count == 0 {
+                active.remove(&self.account);
+            }
         }
     }
 }
@@ -747,7 +762,9 @@ impl Drop for PublisherLease {
         self.metrics
             .event(crate::metrics::Severity::Info, "stream_stopped");
         for (_, events) in closed_viewers {
-            let _ = events.try_send(ConnectionEvent::Close(CloseReason::Revoked));
+            // A stream ending does not revoke the viewer's account or its
+            // independent publisher connection.
+            let _ = events.try_send(ConnectionEvent::Close(CloseReason::Left));
         }
     }
 }
@@ -934,13 +951,18 @@ fn enable_viewer_presence(
     Ok(())
 }
 
-fn directory(state: &SignalingState, store: &InviteStore, room_id: String) -> ServerOperation {
+fn directory(
+    state: &SignalingState,
+    store: &InviteStore,
+    room_id: String,
+    account: &str,
+) -> ServerOperation {
     let Ok(publishers) = state.publishers.lock() else {
         return rejected(ErrorCode::Overloaded);
     };
     let mut publisher_metadata: Vec<PublisherMetadata> = publishers
         .iter()
-        .filter(|(_, publisher)| publisher.room_id == room_id)
+        .filter(|(_, publisher)| publisher.room_id == room_id && publisher.account != account)
         .map(|(publisher_id, publisher)| PublisherMetadata {
             publisher_id: publisher_id.clone(),
             display_name: store.display_name(&publisher.account),
@@ -1171,7 +1193,7 @@ fn block_account_viewers(
             }
             let _ = viewer
                 .events
-                .try_send(ConnectionEvent::Close(CloseReason::Revoked));
+                .try_send(ConnectionEvent::Close(CloseReason::Left));
         }
     }
     if removed_any
@@ -1276,7 +1298,7 @@ fn remove_viewer(
         .metrics
         .event(crate::metrics::Severity::Info, "viewer_removed");
     for events in events {
-        let _ = events.try_send(ConnectionEvent::Close(CloseReason::Revoked));
+        let _ = events.try_send(ConnectionEvent::Close(CloseReason::Left));
     }
     for events in pending_ids {
         let _ = events.try_send(ConnectionEvent::ViewDecision {
@@ -1607,6 +1629,7 @@ async fn login(
     let invites = state.invites.borrow_and_update().clone();
     let verification_invites = invites.clone();
     // A cancelled login leaves the permit inside the non-cancellable bounded worker.
+    let account_login = matches!(&login_input, LoginInput::Account { .. });
     let account = tokio::task::spawn_blocking(move || {
         let _permit = permit;
         match login_input {
@@ -1626,7 +1649,7 @@ async fn login(
     if current_policy.current(&account).is_none() {
         return Err(ErrorCode::Unauthorized);
     }
-    let lease = state.claim_account(account)?;
+    let lease = state.claim_account(account, account_login)?;
     Ok((message.request_id, lease))
 }
 
@@ -1639,6 +1662,47 @@ fn remember_request(seen: &mut HashSet<String>, request_id: &str) -> Result<(), 
     }
     seen.insert(request_id.to_owned());
     Ok(())
+}
+
+/// Ordered WebSockets let sequence-based clients retain replay evidence in O(1)
+/// memory. Legacy opaque IDs retain the bounded, never-evicted replay table.
+enum RequestHistory {
+    Sequenced(u64),
+    Opaque(HashSet<String>),
+}
+
+fn request_sequence(request_id: &str) -> Option<u64> {
+    let digits = request_id.strip_prefix("client_")?;
+    if digits.starts_with('0') {
+        return None;
+    }
+    if !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    digits.parse().ok()
+}
+
+impl RequestHistory {
+    fn new(login_request_id: &str) -> Self {
+        match request_sequence(login_request_id) {
+            Some(sequence) => Self::Sequenced(sequence),
+            None => Self::Opaque(HashSet::from([login_request_id.to_owned()])),
+        }
+    }
+
+    fn remember(&mut self, request_id: &str) -> Result<(), ErrorCode> {
+        match self {
+            Self::Sequenced(high_water) => {
+                let sequence = request_sequence(request_id).ok_or(ErrorCode::Replay)?;
+                if sequence <= *high_water {
+                    return Err(ErrorCode::Replay);
+                }
+                *high_water = sequence;
+                Ok(())
+            }
+            Self::Opaque(seen) => remember_request(seen, request_id),
+        }
+    }
 }
 
 async fn run(
@@ -1695,7 +1759,7 @@ async fn run(
     // expiration. Re-authentication starts a fresh session and approvals.
     let expires = now.saturating_add(SESSION_LIFETIME_SECONDS);
     let expiry_deadline = Instant::now() + Duration::from_secs(SESSION_LIFETIME_SECONDS as u64);
-    let mut seen = HashSet::from([request_id.clone()]);
+    let mut seen = RequestHistory::new(&request_id);
     if !send(
         &mut socket,
         request_id,
@@ -1818,7 +1882,7 @@ async fn run(
                     Some(Ok(Message::Ping(_) | Message::Pong(_))) => continue,
                     _ => break,
                 };
-                if let Err(code) = remember_request(&mut seen, &message.request_id) {
+                if let Err(code) = seen.remember(&message.request_id) {
                     let _ = send(&mut socket, message.request_id, ServerOperation::Rejected { code }).await;
                     close(&mut socket, session.as_ref(), CloseReason::TransportFailed).await;
                     break;
@@ -1868,7 +1932,7 @@ async fn run(
             }
         }
     }
-    // RAII releases membership, pending approvals and the exclusive account lease
+    // RAII releases membership, pending approvals and the account connection slot
     // on every exit.
     if let Some(joined) = session.as_mut() {
         let session_id = joined.session_id.clone();
@@ -2116,7 +2180,7 @@ fn operate_for_peer(
         }
         ClientOperation::Directory { room_id } => {
             let store = state.invites.borrow().clone();
-            directory(state, &store, room_id)
+            directory(state, &store, room_id, account)
         }
         ClientOperation::Join { room_id, .. } => {
             if session.is_some() {
@@ -2559,7 +2623,7 @@ mod tests {
         .unwrap();
         assert!(matches!(
             next_event(&mut active_events).await,
-            ConnectionEvent::Close(CloseReason::Revoked)
+            ConnectionEvent::Close(CloseReason::Left)
         ));
         assert!(matches!(
             request_view(&state, &viewer, "publisher_session", "aXYtcHVibGljLWtleQ"),
@@ -2687,7 +2751,7 @@ mod tests {
         ));
         assert!(matches!(
             next_event(&mut active_events).await,
-            ConnectionEvent::Close(CloseReason::Revoked)
+            ConnectionEvent::Close(CloseReason::Left)
         ));
         assert!(state.view_requests.lock().unwrap().is_empty());
         assert!(state.publishers.lock().unwrap().is_empty());
@@ -2875,7 +2939,7 @@ mod tests {
         assert!(state.stop_stream("session_1").is_ok());
         assert!(matches!(
             stream_receiver.recv().await,
-            Some(ConnectionEvent::Close(CloseReason::Revoked))
+            Some(ConnectionEvent::Close(CloseReason::Left))
         ));
         assert!(state.stop_stream("missing").is_err());
     }
@@ -2897,6 +2961,31 @@ mod tests {
         assert!(exact_origin(&headers));
         headers.append(header::ORIGIN, "https://discord.com".parse().unwrap());
         assert!(!exact_origin(&headers));
+    }
+
+    #[test]
+    fn ordered_request_history_scales_without_eviction_or_replay_downgrade() {
+        let mut history = RequestHistory::new("client_1");
+        for sequence in 2..=10_000 {
+            assert!(history.remember(&format!("client_{sequence}")).is_ok());
+        }
+        assert!(matches!(history, RequestHistory::Sequenced(10_000)));
+        for replay in [
+            "client_1",
+            "client_9999",
+            "client_10000",
+            "client_010001",
+            "client_+10001",
+            "arbitrary",
+        ] {
+            assert!(matches!(history.remember(replay), Err(ErrorCode::Replay)));
+        }
+        assert!(history.remember("client_10001").is_ok());
+        let mut legacy = RequestHistory::new("opaque_login");
+        assert!(legacy.remember("client_1").is_ok());
+        assert!(matches!(legacy.remember("client_1"), Err(ErrorCode::Replay)));
+        assert!(matches!(legacy.remember("opaque_login"), Err(ErrorCode::Replay)));
+        assert!(matches!(legacy, RequestHistory::Opaque(_)));
     }
 
     #[test]
@@ -2923,18 +3012,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn account_clients_have_three_independent_bounded_connection_leases() {
+        let (_sender, receiver) = watch::channel(Arc::new(InviteStore::default()));
+        let state = SignalingState::new(receiver);
+        let mut leases: Vec<_> = (0..3)
+            .map(|_| {
+                state
+                    .claim_account("alice".into(), true)
+                    .unwrap_or_else(|_| panic!("lease"))
+            })
+            .collect();
+        assert!(matches!(
+            state.claim_account("alice".into(), true),
+            Err(ErrorCode::Replay)
+        ));
+        let bob = state
+            .claim_account("bob".into(), true)
+            .unwrap_or_else(|_| panic!("lease"));
+        drop(leases.pop());
+        let replacement = state
+            .claim_account("alice".into(), true)
+            .unwrap_or_else(|_| panic!("lease"));
+        drop(leases);
+        assert_eq!(state.active_accounts.lock().unwrap().get("alice"), Some(&1));
+        drop(replacement);
+        assert!(!state.active_accounts.lock().unwrap().contains_key("alice"));
+        drop(bob);
+        assert!(state.active_accounts.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn room_and_account_leases_are_bounded_and_released() {
         let (_sender, receiver) = watch::channel(Arc::new(InviteStore::default()));
         let state = SignalingState::new(receiver);
         let lease = state
-            .claim_account("account_1".into())
+            .claim_account("account_1".into(), false)
             .unwrap_or_else(|_| panic!("lease"));
         assert!(matches!(
-            state.claim_account("account_1".into()),
+            state.claim_account("account_1".into(), false),
             Err(ErrorCode::Replay)
         ));
         drop(lease);
-        assert!(state.claim_account("account_1".into()).is_ok());
+        assert!(state.claim_account("account_1".into(), false).is_ok());
         let members: Vec<_> = (0..MAX_ROOM_MEMBERS)
             .map(|_| {
                 state
@@ -3033,15 +3152,21 @@ mod tests {
             publishers,
             publisher_ids,
             ..
-        } = directory(&state, &store, "room".into())
+        } = directory(&state, &store, "room".into(), "viewer")
         else {
             panic!("directory");
         };
         assert_eq!(publisher_ids, vec!["source"]);
         assert_eq!(publishers[0].display_name, "Studio PC");
+        let ServerOperation::Directory { publisher_ids, .. } =
+            directory(&state, &store, "room".into(), "publisher")
+        else {
+            panic!("directory");
+        };
+        assert!(publisher_ids.is_empty());
         // Rooms group discovery: another room sees nothing.
         let ServerOperation::Directory { publisher_ids, .. } =
-            directory(&state, &store, "other".into())
+            directory(&state, &store, "other".into(), "viewer")
         else {
             panic!("directory");
         };
@@ -3087,7 +3212,7 @@ mod network_tests {
     use super::*;
     use crate::{
         app_with_signaling,
-        auth::{InviteFile, create_invite_with_display_name},
+        auth::{InviteFile, UsersFile, create_invite_with_display_name, create_user},
         config::{Config, DEFAULT_MAX_LOGIN_HANDSHAKES, TlsFiles},
         listener::{BoundedListener, tls_acceptor_from_der},
     };
@@ -3290,6 +3415,59 @@ mod network_tests {
             .as_str()
             .unwrap()
             .to_owned()
+    }
+
+    #[tokio::test]
+    async fn account_connections_authenticate_independently_and_revoke_together() {
+        let server = start().await;
+        let user = create_user("alice".into(), "separate account password", None).unwrap();
+        let store = InviteStore::from_users_bytes(
+            &serde_json::to_vec(&UsersFile {
+                version: 2,
+                users: vec![user],
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        server.invites.send_replace(Arc::new(store));
+        let mut clients = Vec::new();
+        for index in 0..3 {
+            let mut client = connect(&server, "https://discord.com", "").await.unwrap();
+            let authenticated = request(
+                &mut client,
+                "login",
+                serde_json::json!({ "type": "account_login", "username": "alice", "password": "separate account password" }),
+            )
+            .await;
+            assert_eq!(authenticated["operation"]["type"], "authenticated");
+            join(&mut client, "call", &format!("join_{index}")).await;
+            clients.push(client);
+        }
+        let mut extra = connect(&server, "https://discord.com", "").await.unwrap();
+        let denied = request(
+            &mut extra,
+            "extra",
+            serde_json::json!({ "type": "account_login", "username": "alice", "password": "separate account password" }),
+        )
+        .await;
+        assert_eq!(denied["operation"]["code"], "replay");
+        let mut invalid = connect(&server, "https://discord.com", "").await.unwrap();
+        let denied = request(
+            &mut invalid,
+            "invalid",
+            serde_json::json!({ "type": "account_login", "username": "alice", "password": "wrong password" }),
+        )
+        .await;
+        assert_eq!(denied["operation"]["code"], "unauthorized");
+        assert_eq!(
+            server.state.active_accounts.lock().unwrap().get("alice"),
+            Some(&3)
+        );
+        server.invites.send_replace(Arc::new(InviteStore::default()));
+        for client in &mut clients {
+            let closed = response(client).await;
+            assert_eq!(closed["operation"]["reason"], "revoked");
+        }
     }
 
     #[tokio::test]

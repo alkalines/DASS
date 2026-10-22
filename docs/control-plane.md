@@ -250,9 +250,12 @@ No GUI login/capture flow is wired to this server yet.
 - At most eight login attempts per global one-second window and 32 received
   WebSocket messages per connection/window. This is bounded load shedding, not
   complete per-IP rate limiting or denial-of-service protection.
-- Request IDs are remembered for the whole connection up to 256. Saturation
+- Legacy opaque request IDs are remembered for the whole connection up to 256. Saturation
   closes the connection rather than evicting replay evidence. Reconnect requires
-  fresh authentication. Room reservations time out after 15 seconds without RTC
+  fresh authentication. Updated clients use canonical increasing `client_N` IDs;
+  those connections use a constant-memory high-water mark instead, rejecting
+  duplicates, backward IDs and a switch to opaque IDs. Client pacing keeps key
+  relay bursts below the unchanged server message limit. Room reservations time out after 15 seconds without RTC
   setup. Only the explicitly enabled RTC spike can complete DTLS setup; default
   control-plane-only operation cannot.
 - There is no application outbound queue: one owner sends each response with a

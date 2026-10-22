@@ -34,17 +34,19 @@ services:
       DASS_RTC_SPIKE: "${DASS_RTC_SPIKE:-false}"
       DASS_RTC_BIND_IP: "0.0.0.0"
       DASS_RTC_ADVERTISED_IP: "${DASS_LAN_SERVER_IPV4:-127.0.0.1}"
-      DASS_RTC_FIRST_PORT: "50000"
+      DASS_RTC_FIRST_PORT: "${DASS_RTC_FIRST_PORT:-50000}"
       DASS_RTC_AUTO_LAN_PEERS: "${DASS_RTC_AUTO_LAN_PEERS:-false}"
       DASS_RTC_ALLOWED_PEERS: "${DASS_RTC_ALLOWED_PEERS:-}"
       DASS_RTC_TRUSTED_CLIENT_IPS: "${DASS_RTC_TRUSTED_CLIENT_IPS:-}"
-      DASS_MAX_MEDIA_SESSIONS: "${DASS_MAX_MEDIA_SESSIONS:-2}"
+      DASS_MAX_MEDIA_SESSIONS: "${DASS_MAX_MEDIA_SESSIONS:-4}"
       DASS_MAX_PACKETS_PER_SECOND: "${DASS_MAX_PACKETS_PER_SECOND:-2000}"
       DASS_MAX_INGRESS_BYTES_PER_SECOND: "${DASS_MAX_INGRESS_BYTES_PER_SECOND:-2000000}"
       DASS_MAX_EGRESS_BYTES_PER_SECOND: "${DASS_MAX_EGRESS_BYTES_PER_SECOND:-4000000}"
     ports:
       # Never change DASS_BIND_IP from loopback while insecure mode is enabled.
       - "${DASS_BIND_IP:-127.0.0.1}:8080:8080/tcp"
+      # The default shared pair. If FIRST_PORT changes, adjust these mappings
+      # to that port and FIRST_PORT + 1; Compose cannot evaluate arithmetic.
       - "${DASS_BIND_IP:-127.0.0.1}:50000:50000/udp"
       - "${DASS_BIND_IP:-127.0.0.1}:50001:50001/udp"
     volumes:

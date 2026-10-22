@@ -493,6 +493,36 @@ test("newly approved identity cannot decrypt recorded prior ciphertext while exi
     } finally { f.controller.stop(); }
 });
 
+test("three approved viewers receive one shared epoch and removal rekeys only the remaining members", async () => {
+    const f = fixture();
+    const viewers = await Promise.all(["alice", "bob", "charlie"].map(async viewerId => ({ viewerId, identity: await generateIdentity() })));
+    try {
+        await f.controller.publish("https://dass.example", f.bridge);
+        for (const viewer of viewers) {
+            f.request({ request_id: viewer.viewerId, viewer_id: viewer.viewerId, viewer_display_name: viewer.viewerId, viewer_key: viewer.identity.publicKey });
+            await Promise.resolve(); await Promise.resolve();
+            await f.controller.decideView(viewer.viewerId, "approve");
+        }
+        expect(f.controller.getSnapshot().approvedViewers).toHaveLength(3);
+        const epochs = await Promise.all(viewers.map(viewer => {
+            const relay = f.keyRelays.findLast(relay => relay.viewerId === viewer.viewerId)!;
+            return unwrapEpochKey(viewer.identity, f.publisherPublicKey(), "stream/publisher_session", relay.blob);
+        }));
+        expect(epochs.map(epoch => epoch.epoch)).toEqual([3, 3, 3]);
+        expect(epochs[0].keyBytes).toEqual(epochs[1].keyBytes);
+        expect(epochs[1].keyBytes).toEqual(epochs[2].keyBytes);
+        const beforeRemoval = f.keyRelays.length;
+        await f.controller.removeViewer("bob");
+        const relays = f.keyRelays.slice(beforeRemoval);
+        expect(relays.map(relay => relay.viewerId).sort()).toEqual(["alice", "charlie"]);
+        for (const viewer of [viewers[0], viewers[2]]) {
+            const epoch = await unwrapEpochKey(viewer.identity, f.publisherPublicKey(), "stream/publisher_session", relays.find(relay => relay.viewerId === viewer.viewerId)!.blob);
+            expect(epoch.epoch).toBe(4);
+            expect(epoch.keyBytes).not.toEqual(epochs[0].keyBytes);
+        }
+    } finally { f.controller.stop(); }
+});
+
 test("deferred stale membership wrap cannot relay or roll send epoch back after removal", async () => {
     const entered = deferred<void>();
     const release = deferred<void>();

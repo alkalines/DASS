@@ -16,8 +16,8 @@ export function createCallDiscovery(session: Pick<DassSession, "getSnapshot" | "
     function sync() {
         if (!active) return;
         const account = session.getSnapshot();
-        // The backend admits one connection per account. Directory polling must
-        // relinquish that connection before publisher/viewer authentication.
+        // Account mode allows independent directory, publishing and watching.
+        // The optional pause hook is retained for exclusive legacy-invite tests.
         const nextBinding = !mediaActive() && account.configured && account.phase === "ready" && account.roomId
             ? JSON.stringify([backendUrl(), account.username, account.roomId]) : undefined;
         if (binding === nextBinding) return;

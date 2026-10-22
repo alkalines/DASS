@@ -4,6 +4,50 @@ import { AccountCredentials, DassSession } from "../../plugins/dass/session";
 
 const account: AccountCredentials = { backendUrl: "https://dass.example", roomId: "room", username: "alice", password: "separate_dass_password" };
 
+test("directory, publisher and viewer have independent leases and logout closes all of them", async () => {
+    const connections: ReturnType<typeof fakeConnection>[] = [];
+    const session = new DassSession(undefined, async () => {
+        const next = fakeConnection();
+        connections.push(next);
+        return next.connection;
+    });
+    try {
+        await session.start(account.backendUrl);
+        await session.login(account, false);
+        const signals = Array.from({ length: 3 }, () => new AbortController());
+        const leases = await Promise.all(signals.map(abort => session.connect({
+            experimental: true, backendUrl: account.backendUrl, ...session.getAccess(), signal: abort.signal
+        })));
+        expect(new Set(leases).size).toBe(3);
+        expect(connections).toHaveLength(3);
+        signals[1].abort();
+        expect(connections.map(value => value.closed.signal.aborted)).toEqual([false, true, false]);
+        session.clear();
+        expect(connections.every(value => value.closed.signal.aborted)).toBe(true);
+    } finally { session.stop(); }
+});
+
+test("logout during a concurrent connection attempt closes the late result as well", async () => {
+    const first = fakeConnection();
+    const late = fakeConnection();
+    let complete: ((connection: SpikeSignaling) => void) | undefined;
+    let attempts = 0;
+    const session = new DassSession(undefined, async () => ++attempts === 1 ? first.connection : new Promise(resolve => { complete = resolve; }));
+    try {
+        await session.start(account.backendUrl);
+        await session.login(account, false);
+        const options = { experimental: true as const, backendUrl: account.backendUrl, ...session.getAccess(), signal: new AbortController().signal };
+        await session.connect(options);
+        const pending = session.connect(options);
+        session.clear();
+        complete!(late.connection);
+        await expect(pending).rejects.toThrow("cancelled");
+        expect(first.closed.signal.aborted).toBe(true);
+        expect(late.closed.signal.aborted).toBe(true);
+        expect(session.getSnapshot().configured).toBe(false);
+    } finally { session.stop(); }
+});
+
 test("call context is derived live and saved credentials contain no room selection", async () => {
     let callId: string | undefined;
     let saved: AccountCredentials | undefined;

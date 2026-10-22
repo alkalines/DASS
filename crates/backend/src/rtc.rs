@@ -1,4 +1,4 @@
-//! One-publisher/one-viewer media transport with an explicit deployment mode.
+//! Bounded media transport with an explicit deployment mode.
 //! Each mutation is completely drained before another mutation or socket await.
 //!
 //! The transport has two modes. `Local` is a test environment for private LAN
@@ -7,10 +7,13 @@
 //! address observed on that session's TCP connection, so the backend never
 //! dials a client-supplied destination and never becomes a scanner or a relay.
 
+mod udp;
+
 use crate::forwarding::{
     ForwardPacket, MediaHub, PACKET_QUEUE_CAPACITY, PublisherEndpoint, SubscriberEndpoint,
 };
 use crate::transport::{MediaAdmission, Refusal, TransportMode, is_global_unicast};
+use udp::{SessionUdp, SharedUdp};
 use std::{
     collections::HashSet,
     net::{IpAddr, SocketAddr},
@@ -29,10 +32,7 @@ use str0m::{
     net::{Protocol, Receive},
     rtp::RtpWrite,
 };
-use tokio::{
-    net::UdpSocket,
-    sync::{OwnedSemaphorePermit, Semaphore},
-};
+use tokio::sync::{OnceCell, OwnedSemaphorePermit, Semaphore};
 
 const MAX_CANDIDATES: usize = 16;
 const MAX_TRUSTED_CLIENT_IPS: usize = 16;
@@ -60,7 +60,7 @@ pub struct MediaLimits {
 impl Default for MediaLimits {
     fn default() -> Self {
         Self {
-            max_sessions: 2,
+            max_sessions: 4,
             max_packets_per_second: 2_000,
             max_ingress_bytes_per_second: 2_000_000,
             max_egress_bytes_per_second: 4_000_000,
@@ -82,10 +82,21 @@ pub struct TransportConfig {
     auto_lan_peers: bool,
     admission: Arc<Semaphore>,
     hub: Arc<MediaHub>,
+    sockets: Arc<OnceCell<Arc<SharedUdp>>>,
     limits: MediaLimits,
 }
 
 impl TransportConfig {
+    async fn shared_sockets(&self) -> Result<&Arc<SharedUdp>, MediaFailure> {
+        self.sockets
+            .get_or_try_init(|| SharedUdp::bind(self.bind_ip, self.first_port, self.limits))
+            .await
+    }
+
+    pub async fn initialize(&self) -> Result<(), MediaFailure> {
+        self.shared_sockets().await.map(|_| ())
+    }
+
     pub(crate) fn auto_lan_peers_enabled(&self) -> bool {
         self.auto_lan_peers
     }
@@ -136,7 +147,7 @@ impl TransportConfig {
             .parse()
             .map_err(|_| "invalid media transport UDP port")?;
         if !(1024..=65534).contains(&first_port) {
-            return Err("the media transport port range must contain two non-privileged ports");
+            return Err("the media transport requires two consecutive non-privileged UDP ports");
         }
         let auto_lan_peers = match lookup("DASS_RTC_AUTO_LAN_PEERS").as_deref() {
             None | Some("false") => false,
@@ -232,7 +243,8 @@ impl TransportConfig {
             trusted_client_ips,
             auto_lan_peers,
             admission: Arc::new(Semaphore::new(limits.max_sessions)),
-            hub: Arc::new(MediaHub::default()),
+            hub: Arc::new(MediaHub::new(limits.max_sessions)),
+            sockets: Arc::new(OnceCell::new()),
             limits,
         }))
     }
@@ -319,7 +331,7 @@ impl MediaCounters {
 
 pub struct MediaPeer {
     rtc: Rtc,
-    socket: UdpSocket,
+    socket: SessionUdp,
     advertised: SocketAddr,
     admission: MediaAdmission,
     session_peers: HashSet<SocketAddr>,
@@ -375,20 +387,8 @@ impl MediaPeer {
             .clone()
             .try_acquire_owned()
             .map_err(|_| MediaFailure)?;
-        let mut bound = None;
-        for port in config.first_port..=config.first_port + 1 {
-            if let Ok(socket) = UdpSocket::bind(SocketAddr::new(config.bind_ip, port)).await {
-                bound = Some(socket);
-                break;
-            }
-        }
-        let socket = bound.ok_or(MediaFailure)?;
-        let advertised = SocketAddr::new(
-            config.advertised_ip,
-            socket.local_addr().map_err(|_| MediaFailure)?.port(),
-        );
         let now = Instant::now();
-        let rtc = Rtc::builder()
+        let mut rtc = Rtc::builder()
             .set_crypto_provider(Arc::new(str0m_aws_lc_rs::default_provider()))
             .set_rtp_mode(true)
             .clear_codecs()
@@ -403,6 +403,15 @@ impl MediaPeer {
             .set_reordering_size_video(8)
             .set_sctp_max_buffered_amount(0)
             .build(now);
+        let credentials = rtc.direct_api().local_ice_credentials();
+        let socket = config
+            .shared_sockets()
+            .await?
+            .register(credentials, admission.clone())?;
+        let advertised = SocketAddr::new(
+            config.advertised_ip,
+            socket.local_addr().map_err(|_| MediaFailure)?.port(),
+        );
         let mut peer = Self {
             rtc,
             socket,
@@ -629,6 +638,7 @@ impl MediaPeer {
             .map_err(|_| MediaFailure)?;
         self.offered = true;
         self.candidates = candidates.len();
+        self.socket.admit_offer(&self.session_peers)?;
         let answer = answer.to_sdp_string();
         self.drain().await?;
         if answer.len() > 12_288 {
@@ -645,6 +655,7 @@ impl MediaPeer {
         if let Ok(candidate) = self.classify_candidate(text)? {
             if self.admission.mode() == TransportMode::Local {
                 self.session_peers.insert(candidate.addr());
+                self.socket.admit_offer(&self.session_peers)?;
             }
             self.rtc.add_remote_candidate(candidate);
             self.candidates += 1;
@@ -931,6 +942,7 @@ fn candidate_component_one(text: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::net::UdpSocket;
 
     struct TestClient {
         rtc: Rtc,
@@ -1110,13 +1122,89 @@ mod tests {
         }
     }
 
+    fn free_test_port_pair() -> u16 {
+        for _ in 0..128 {
+            let first = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+            let port = first.local_addr().unwrap().port();
+            if port == 65535 {
+                continue;
+            }
+            if std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, port + 1)).is_ok() {
+                return port;
+            }
+        }
+        panic!("could not reserve a test UDP port range");
+    }
+
+    #[tokio::test]
+    async fn one_dtls_publisher_fans_out_opus_and_vp8_to_three_viewers() {
+        let mut config = config_with_auto(true, None, None, true).unwrap().unwrap();
+        config.first_port = free_test_port_pair();
+        let localhost = Some(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
+        let mut publisher_peer =
+            MediaPeer::publisher_for_session(&config, "room", "publisher", localhost)
+                .await
+                .unwrap();
+        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let mut publisher = TestClient::negotiate(socket, &mut publisher_peer, false).await;
+        let (stop, receiver) = tokio::sync::watch::channel(false);
+        let mut owners = vec![tokio::spawn(run_test_peer(publisher_peer, receiver.clone()))];
+        let mut viewers = Vec::new();
+        for index in 0..3 {
+            let mut peer = MediaPeer::subscriber_for_session(
+                &config,
+                "room",
+                "publisher",
+                &format!("viewer_{index}"),
+                localhost,
+            )
+            .await
+            .unwrap();
+            let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            viewers.push(TestClient::negotiate(socket, &mut peer, true).await);
+            owners.push(tokio::spawn(run_test_peer(peer, receiver.clone())));
+        }
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !publisher.connected || viewers.iter().any(|viewer| !viewer.connected) {
+            assert!(Instant::now() < deadline, "multi-viewer DTLS setup deadline");
+            publisher.step().await;
+            for viewer in &mut viewers {
+                viewer.step().await;
+            }
+        }
+        for _ in 0..20 {
+            publisher.step().await;
+            for viewer in &mut viewers {
+                viewer.step().await;
+            }
+        }
+        publisher.write(Codec::Opus, &[0x78, 0], 960).await;
+        publisher.write(Codec::Vp8, &[0x10, 0, 0, 0], 3000).await;
+        while viewers.iter().any(|viewer| viewer.received.len() < 2) {
+            assert!(Instant::now() < deadline, "multi-viewer forwarding deadline");
+            publisher.step().await;
+            for viewer in &mut viewers {
+                viewer.step().await;
+            }
+        }
+        for viewer in viewers {
+            assert!(viewer.received.contains(&(Codec::Opus, vec![0x78, 0], 960, true)));
+            assert!(viewer.received.contains(&(Codec::Vp8, vec![0x10, 0, 0, 0], 3000, true)));
+        }
+        stop.send_replace(true);
+        for owner in owners {
+            owner.await.unwrap();
+        }
+        assert_eq!(config.admission.available_permits(), 4);
+    }
+
     #[tokio::test]
     async fn two_dtls_peers_forward_opus_and_vp8_payloads_without_transcoding() {
         let publisher_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let viewer_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let mut config = config_with_auto(true, None, None, true).unwrap().unwrap();
         let probe = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        config.first_port = probe.local_addr().unwrap().port().min(65534);
+        config.first_port = probe.local_addr().unwrap().port().min(65532);
         drop(probe);
         let mut publisher_peer = MediaPeer::publisher_for_session(
             &config,
@@ -1240,7 +1328,7 @@ mod tests {
     fn use_ephemeral_port(mut config: Option<TransportConfig>) -> Option<TransportConfig> {
         if let Some(config) = config.as_mut() {
             // Parallel tests must not compete for the production port range.
-            config.first_port = 0;
+            config.first_port = free_test_port_pair();
         }
         config
     }
@@ -1428,6 +1516,60 @@ mod tests {
     }
 
     #[test]
+    fn port_pair_is_independent_of_media_capacity_and_must_not_overflow() {
+        for (first_port, accepted) in [("65534", true), ("65535", false)] {
+            let result =
+                TransportConfig::from_lookup(true, TransportMode::Local, |name| match name {
+                    "DASS_RTC_SPIKE" => Some("true".into()),
+                    "DASS_RTC_BIND_IP" | "DASS_RTC_ADVERTISED_IP" => Some("127.0.0.1".into()),
+                    "DASS_RTC_FIRST_PORT" => Some(first_port.into()),
+                    "DASS_RTC_AUTO_LAN_PEERS" => Some("true".into()),
+                    "DASS_MAX_MEDIA_SESSIONS" => Some("64".into()),
+                    _ => None,
+                });
+            assert_eq!(result.is_ok(), accepted);
+        }
+    }
+
+    #[tokio::test]
+    async fn many_media_owners_share_exactly_two_ports_with_independent_admission() {
+        let mut config = config_with_auto(true, None, None, true).unwrap().unwrap();
+        config.first_port = free_test_port_pair();
+        let mut peers = Vec::new();
+        let mut ports = HashSet::new();
+        for _ in 0..4 {
+            let peer = MediaPeer::bind_for_session(
+                &config,
+                Some(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)),
+            )
+            .await
+            .unwrap();
+            ports.insert(peer.advertised.port());
+            peers.push(peer);
+        }
+        assert_eq!(ports, HashSet::from([config.first_port, config.first_port + 1]));
+        assert!(MediaPeer::bind_for_session(
+            &config,
+            Some(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)),
+        )
+        .await
+        .is_err());
+        let released = peers.pop().unwrap().advertised.port();
+        let replacement = MediaPeer::bind_for_session(
+            &config,
+            Some(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(replacement.advertised.port(), released);
+        assert_eq!(config.admission.available_permits(), 0);
+        drop(peers);
+        assert_eq!(config.admission.available_permits(), 3);
+        drop(replacement);
+        assert_eq!(config.admission.available_permits(), 4);
+    }
+
+    #[test]
     fn media_limits_are_bounded_and_configurable() {
         let limits = TransportConfig::from_lookup(true, TransportMode::Local, |name| match name {
             "DASS_RTC_SPIKE" => Some("true".into()),
@@ -1474,9 +1616,9 @@ mod tests {
     #[tokio::test]
     async fn owner_rejects_unsafe_candidates_and_unbounded_or_nonpublisher_sdp() {
         let mut config = config(true, "127.0.0.1:50000").unwrap().unwrap();
-        // Allocate a temporary two-port range rather than assume 45000 is unused.
+        // Allocate a temporary port range rather than assume 45000 is unused.
         let probe = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        config.first_port = probe.local_addr().unwrap().port().min(65534);
+        config.first_port = probe.local_addr().unwrap().port().min(65532);
         drop(probe);
         let peer = MediaPeer::bind(&config).await.unwrap();
         assert!(
@@ -1511,7 +1653,10 @@ mod tests {
             assert!(peer.validate_offer(sdp).is_err());
         }
         assert!(peer.validate_offer(&"x".repeat(12_289)).is_err());
-        assert_eq!(config.admission.available_permits(), 1);
+        assert_eq!(
+            config.admission.available_permits(),
+            config.limits.max_sessions - 1
+        );
         drop(peer);
         assert_eq!(
             config.admission.available_permits(),
@@ -1523,7 +1668,7 @@ mod tests {
     async fn trusted_client_ip_accepts_dynamic_nonprivileged_ports_only_for_configured_hosts() {
         let mut config = config_with(true, None, Some("127.0.0.1")).unwrap().unwrap();
         let probe = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        config.first_port = probe.local_addr().unwrap().port().min(65534);
+        config.first_port = probe.local_addr().unwrap().port().min(65532);
         drop(probe);
         let peer = MediaPeer::bind(&config).await.unwrap();
 
@@ -1677,7 +1822,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn udp_dtls_srtp_receives_encoded_payload_and_releases_socket() {
+    async fn udp_dtls_srtp_receives_encoded_payload_and_releases_pair_with_transport() {
         use str0m::{
             change::SdpAnswer,
             media::{Direction, MediaKind},
@@ -1689,7 +1834,7 @@ mod tests {
             .unwrap()
             .unwrap();
         let probe = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        config.first_port = probe.local_addr().unwrap().port().min(65534);
+        config.first_port = probe.local_addr().unwrap().port().min(65532);
         drop(probe);
         let mut peer = MediaPeer::bind(&config).await.unwrap();
         let peer_address = peer.socket.local_addr().unwrap();
@@ -1780,7 +1925,18 @@ mod tests {
             config.admission.available_permits(),
             config.limits.max_sessions
         );
-        let rebound = UdpSocket::bind(peer_address).await.unwrap();
-        drop(rebound);
+        // A session releases its routes, not the backend's listening pair.
+        assert!(UdpSocket::bind(peer_address).await.is_err());
+        drop(config);
+        // Dispatcher cancellation must release both sockets with the owner.
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if let Ok(rebound) = UdpSocket::bind(peer_address).await {
+                    drop(rebound);
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        }).await.unwrap();
     }
 }

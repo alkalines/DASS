@@ -70,6 +70,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .cloned()
             .or_else(|| std::env::var(name).ok())
     })?;
+    if let Some(transport) = &transport {
+        transport
+            .initialize()
+            .await
+            .map_err(|_| "could not bind the configured UDP port pair")?;
+    }
     let admin_credentials = database.credentials()?;
     let resources = config.resources;
     let (sender, receiver) = watch::channel(Arc::new(database.store()?));

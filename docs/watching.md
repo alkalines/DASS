@@ -55,7 +55,11 @@ the entry through owned cleanup. Close invalidates discovery before awaiting its
 close send. Offline publishers are filtered even before teardown completes.
 There is no client directory update operation; unknown update fields are rejected.
 Registrations and results are capped at 64, with the existing media hub limiting
-this experiment further to **one publisher and one viewer backend-wide**.
+this experiment further to the configured total publisher/subscriber budget
+(`DASS_MAX_MEDIA_SESSIONS`, default 4, supported range 1–64), with no fixed ratio
+of publishers to viewers. The protocol bounds room media membership to 64.
+Account-mode directory polling remains active while publishing or watching;
+own-account streams are excluded. See [simultaneous-sharing.md](simultaneous-sharing.md).
 
 The plugin validates IDs, unique entries, room and size, matches response request
 IDs, and rejects results from aborted requests or old binding epochs. It polls

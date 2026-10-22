@@ -165,7 +165,7 @@ browser security. Set the DASS backend URL on both to
 ## 4. Media activation remains the next supervised step
 
 Only after both HTTPS checks succeed, set `DASS_RTC_SPIKE=true` in `.env` and
-recreate the backend with the same Compose file. UDP 50000–50001 are already
+recreate the backend with the same Compose file. UDP 50000/50001 are already
 published on the backend LAN IP but media is disabled until this opt-in. Scope
 firewall access to the clients; do not forward ports on the router.
 

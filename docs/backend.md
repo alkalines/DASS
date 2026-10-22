@@ -6,7 +6,7 @@ functioning SFU. All Rust tooling runs inside Docker. Signaling types and
 structural parsers are documented in [protocol.md](protocol.md). An optional
 invite-backed HTTPS/WSS control plane now passes user-run Docker validation; see
 [control-plane.md](control-plane.md). The media transport exists as an
-experimental one-publisher/one-viewer path with an explicit Internet mode; see
+experimental resource-bounded multi-publisher/viewer path with an explicit Internet mode; see
 [public transport](public-transport.md). It is not a validated SFU and no
 real-client media exchange has been proven.
 
@@ -117,7 +117,7 @@ docker compose up -d backend
 docker compose logs backend
 ```
 
-With no `.env` or `.secrets/backend.env`, TCP 8080 and UDP 50000–50001 are
+With no `.env` or `.secrets/backend.env`, TCP 8080 and UDP 50000/50001 are
 published only on `127.0.0.1`; the UDP media listener is disabled. Inside the container the service
 binds to `0.0.0.0:8080`; other containers on the Compose network may reach it, so
 keep that network isolated. The runtime is non-root, read-only, has no Linux
@@ -232,7 +232,7 @@ new account-mode databases also provide the mandatory administrator setup page.
 | `DASS_RTC_BIND_IP`, `DASS_RTC_ADVERTISED_IP` | unset | Bind and advertised media addresses; same family, and the advertised address must be globally routable in the public mode |
 | `DASS_RTC_FIRST_PORT` | unset | First UDP media port; the transport binds two consecutive ports |
 | `DASS_RTC_AUTO_LAN_PEERS`, `DASS_RTC_ALLOWED_PEERS`, `DASS_RTC_TRUSTED_CLIENT_IPS` | unset | Local-mode test tools only; the public mode refuses them |
-| `DASS_MAX_MEDIA_SESSIONS` | 2 | 1–64 concurrent media-session admission permits; increasing it does not increase forwarding topology |
+| `DASS_MAX_MEDIA_SESSIONS` | 4 | 1–64 concurrent publisher uploads plus viewer subscriptions; independent of the fixed two-port UDP pair |
 | `DASS_MAX_PACKETS_PER_SECOND` | 2000 | 1–20000 UDP datagrams per media session |
 | `DASS_MAX_INGRESS_BYTES_PER_SECOND` | 2000000 | Media bytes per session per second |
 | `DASS_MAX_EGRESS_BYTES_PER_SECOND` | 4000000 | Forwarded bytes per session per second |
