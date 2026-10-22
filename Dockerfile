@@ -12,9 +12,11 @@ ENV DASS_RELEASE_VERSION=${DASS_RELEASE_VERSION}
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 COPY tests/plugin/fixtures/scaffold-capabilities.json ./tests/plugin/fixtures/scaffold-capabilities.json
-RUN cargo fmt --all -- --check
-RUN cargo clippy --workspace --all-targets --locked -- -D warnings
-RUN cargo test --workspace --locked
+ARG DASS_SKIP_CHECKS=false
+RUN case "$DASS_SKIP_CHECKS" in true|false) ;; *) echo 'DASS_SKIP_CHECKS must be true or false' >&2; exit 1 ;; esac
+RUN if [ "$DASS_SKIP_CHECKS" = false ]; then cargo fmt --all -- --check; fi
+RUN if [ "$DASS_SKIP_CHECKS" = false ]; then cargo clippy --workspace --all-targets --locked -- -D warnings; fi
+RUN if [ "$DASS_SKIP_CHECKS" = false ]; then cargo test --workspace --locked; fi
 RUN cargo build --locked --release -p dass-backend
 
 # Optional Wings image. Keep runtime last so existing unqualified builds are unchanged.

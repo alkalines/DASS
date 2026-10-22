@@ -11,10 +11,14 @@ After `.github/workflows/images.yml` is on the default branch:
 2. Select the source branch or tag to build.
 3. Choose `both`, `runtime` (normal Docker), or `pterodactyl`.
 4. Leave **publish** unchecked for downloadable images, or check it to push to GHCR.
+5. Optionally check **fast_build** for development images that skip formatting,
+   Clippy and tests to reduce build work. Full validation remains the default.
 
 The workflow uses the existing Dockerfile on GitHub's hosted runner. Each target
-checks formatting, Clippy with warnings denied, locked Rust tests and the locked
-release build inside Docker. Images are **linux/amd64 only**. No plugin bundle,
+checks formatting, Clippy with warnings denied and locked Rust tests unless
+**fast_build** is enabled. Both modes perform the locked release build inside
+Docker; fast builds are not validated images, and compilation can still take
+significant time. The summary flags skipped checks. Images are **linux/amd64 only**. No plugin bundle,
 Git tag, GitHub Release, deployment or client installation is created.
 
 ## Download without publishing (default)
@@ -46,8 +50,12 @@ For repository `OWNER/REPO`, tags use the lowercased repository path:
 | --- | --- |
 | Normal Docker | `ghcr.io/owner/repo:manual-RUN_ID-ATTEMPT` |
 | Pterodactyl | `ghcr.io/owner/repo:manual-RUN_ID-ATTEMPT-pterodactyl` |
+| Normal Docker development alias | `ghcr.io/owner/repo:manual-dev` |
+| Pterodactyl development alias | `ghcr.io/owner/repo:manual-dev-pterodactyl` |
 
 Every run attempt gets new tags; there is no user-supplied release tag to overwrite.
+Successful publishing builds also update the corresponding development alias,
+including fast builds. These aliases do not imply that validation passed.
 The summary includes the pull command and published digest. Published images have
 SBOM and maximum-level provenance attestations. The release aliases `latest`,
 `stable` and `pterodactyl`, and all versioned release tags, remain untouched.
