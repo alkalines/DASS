@@ -7,6 +7,34 @@ The workflow is `.github/workflows/release.yml` in this same repository.
 
 ## Publishing
 
+> [!WARNING]
+> Releases are experimental. Production use and unrestricted public deployment
+> are not recommended, even when E2EE and public hosting work in a tested setup.
+
+### Changelog and release notes
+
+Before publishing, update [the changelog](change-logs.md) with exactly one
+`## [VERSION] - YYYY-MM-DD` entry matching the intended release version (also for
+backend-only releases). Group entries under Added, Changed, Fixed, Validation or
+Pending / not released as appropriate. Explain the user-visible behavior and
+limitations; link implementation commits with short displayed IDs. Never invent
+IDs for uncommitted work or describe planned features as shipped. Move pending
+items to a future entry before publishing if they are not part of that release.
+
+The workflow rejects missing, empty or duplicate version entries before builds.
+`scripts/release-notes.mjs` copies that entry into GitHub Release notes and adds
+the experimental warning, full DASS/upstream revisions, immutable backend image
+digests and (for full releases) the ZIP SHA-256 from `SHA256SUMS`. Backend-only
+notes explicitly warn that source-level client changes are not included as assets.
+The title also says experimental; the existing stable distribution channel and
+manual-update eligibility are unchanged. No existing GitHub Release is rewritten.
+
+Record user-reported acceptance separately from automated checks, including date,
+tested scope and available revisions. E2EE/public-hosting functional success does
+not close independent security review, network/capacity or deployment gates.
+
+### Triggering publication
+
 Push a versioned branch after committing and testing the intended source:
 
 | Branch | Git tag | Contents |
@@ -94,8 +122,9 @@ structure. Fully quit the client before replacing an installed bundle.
   and `EQUICORD_DEV_INSTALL=1` to Equilotl's `--install` operation. See
   [plugin.md](plugin.md) for the existing source-install procedure. A portable
   prebuilt installation wrapper still needs platform testing; do not copy files
-  blindly into Discord's application directory. Desktop publishing has no
-  equivalent supported capture adapter yet.
+   blindly into Discord's application directory. Current source includes a native
+   Discord Desktop screen picker; validate capture/consent/cleanup on the exact
+   client build rather than treating packaging as runtime acceptance.
 
 Both viewers and broadcasters need compatible DASS clients. Neither successful
 packaging nor a version match establishes GUI/media compatibility. Ordinary

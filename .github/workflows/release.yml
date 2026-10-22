@@ -50,6 +50,10 @@ jobs:
         env:
           RELEASE_VERSION: ${{ inputs.version }}
           RELEASE_COMPONENT: ${{ inputs.component }}
+      - name: Require versioned changelog before building or publishing
+        run: node scripts/release-notes.mjs --check
+        env:
+          VERSION: ${{ steps.plan.outputs.version }}
       - name: Reject reused tags and backend versions
         env:
           TAG: ${{ steps.plan.outputs.tag }}
@@ -171,7 +175,7 @@ jobs:
             type=gha,scope=pterodactyl
             type=gha,scope=runtime
           cache-to: type=gha,scope=pterodactyl,mode=max
-      - name: Create immutable tag and stable GitHub Release
+      - name: Create immutable tag and experimental GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.plan.outputs.version }}
@@ -184,23 +188,8 @@ jobs:
           mkdir -p artifacts
           jq -n --arg version "$VERSION" --arg image "$IMAGE" --arg digest "$DIGEST" --arg revision "$GITHUB_SHA" '{version: $version, image: $image, digest: $digest, revision: $revision, platform: "linux/amd64"}' > artifacts/backend-image.json
           jq -n --arg version "$VERSION" --arg image "$IMAGE" --arg tag "$VERSION-pterodactyl" --arg digest "$PTERODACTYL_DIGEST" --arg revision "$GITHUB_SHA" '{version: $version, image: $image, tag: $tag, digest: $digest, revision: $revision, platform: "linux/amd64", target: "pterodactyl"}' > artifacts/pterodactyl-image.json
-          cat > release-notes.md <<EOF
-          Discord Alternative ScreenShare (DASS) $VERSION ($COMPONENT).
-
-          Experimental release. Build success is not runtime compatibility or production-readiness evidence.
-
-          Backend: \`$IMAGE:$VERSION\`
-          Immutable image: \`$IMAGE@$DIGEST\`
-          Pterodactyl: \`$IMAGE:$VERSION-pterodactyl\`
-          Immutable Pterodactyl image: \`$IMAGE@$PTERODACTYL_DIGEST\`
-          Image platform: linux/amd64. Backend updates are manual; preserve your configuration and database volume.
-
-          The Equicord ZIP, when present, contains the complete custom build, not a loose plugin.
-          Equibop publishing still requires the matching custom host capture bridge; stock Equibop and Discord Desktop publishing are not established by this artifact.
-
-          Installation and limitations: https://github.com/$GITHUB_REPOSITORY/blob/$GITHUB_SHA/docs/releasing.md
-          EOF
-          gh release create "$TAG" artifacts/* --target "$GITHUB_SHA" --title "DASS $VERSION ($COMPONENT)" --notes-file release-notes.md --latest
+          node scripts/release-notes.mjs
+          gh release create "$TAG" artifacts/* --target "$GITHUB_SHA" --title "DASS $VERSION ($COMPONENT, experimental)" --notes-file release-notes.md --latest
       - name: Advance stable backend aliases after publication
         env:
           IMAGE: ${{ needs.plan.outputs.image }}
