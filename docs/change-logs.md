@@ -8,6 +8,65 @@ Uncommitted work has no commit ID until it is committed.
 > [!WARNING]
 > DASS is experimental. Production use and unrestricted public deployment are not recommended. Functional tests are not an independent security audit.
 
+## [1.0.1] - 2026-10-23
+
+### Added
+
+- **Multi-client sharing:** experimental support for multiple publishers and viewers,
+  including publishing while watching another stream. Media sessions share two
+  backend UDP ports and remain resource-bounded; each client still watches one
+  remote stream at a time.
+  ([`4839b5b`](https://github.com/alkalines/DASS/commit/4839b5b))
+- **Stream discovery recovery:** reconnect dropped directory connections with
+  backoff and use `/dass_refresh` to refresh available streams without stopping
+  an active share or watch session. Active media still needs restarting after a
+  backend restart.
+  ([`b502340`](https://github.com/alkalines/DASS/commit/b502340))
+- **Manual Docker image builds:** build either backend image or both without
+  creating a release, with optional image publication and a fast-build option
+  that skips checks. Skipped checks are not validation.
+  ([`a4e213b`](https://github.com/alkalines/DASS/commit/a4e213b),
+  [`d48c4bc`](https://github.com/alkalines/DASS/commit/d48c4bc))
+
+### Changed
+
+- **Viewer approval:** automatic approval is now on by default for first-contact
+  and unchanged pinned identities; existing saved preferences are retained.
+  Disable it to require permission for each watch request. Changed keys still
+  require an explicit decision, and same-device rejoining rotates media keys
+  without silently replacing an admitted device.
+  ([`82de96f`](https://github.com/alkalines/DASS/commit/82de96f))
+
+### Fixed
+
+- **Windows-to-Linux video:** corrected encrypted VP8 frame headers and preserved
+  source RTP packet ordering and loss gaps during backend forwarding to address
+  corrupted playback. Added separate header-mismatch diagnostics to help
+  investigate remaining failures. This is a partial improvement, not a claim
+  that all Windows-to-Linux streaming issues are resolved.
+  ([`57f57b2`](https://github.com/alkalines/DASS/commit/57f57b2),
+  [`3972cdd`](https://github.com/alkalines/DASS/commit/3972cdd))
+- **Simultaneous sharing:** ending a watched stream no longer revokes independent
+  account access or stops the viewer's own share. Improved capacity-error reporting
+  and paced signaling requests for multiple viewers.
+  ([`f5e6c82`](https://github.com/alkalines/DASS/commit/f5e6c82))
+- **Backend builds:** corrected Rust build errors introduced during multi-client
+  transport work.
+  ([`2f0a760`](https://github.com/alkalines/DASS/commit/2f0a760),
+  [`68dca40`](https://github.com/alkalines/DASS/commit/68dca40))
+
+### Validation and upgrade notes
+
+- On 2026-10-23, the user reported partial improvement when streaming from a
+  Windows client to a Linux client. Exact client builds and tested revisions were
+  not supplied; full cross-platform runtime acceptance remains pending.
+- The VP8 framing change requires **both publisher and viewer** to rebuild and
+  restart; older video envelopes are rejected without a legacy or plaintext
+  fallback. The RTP forwarding correction also requires an updated backend.
+- Backend regression tests for packet reordering, loss gaps and rollover were
+  added, but the implementation notes record validation blocked by Docker socket
+  access. No new build or media validation is claimed by this changelog update.
+
 ## [1.0.0] - 2026-10-22
 
 ### Added
