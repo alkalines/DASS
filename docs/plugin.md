@@ -575,7 +575,7 @@ Scaffold tests do not typecheck the host-facing plugin or establish interoperabi
 
 Launching `vendor/Equibop` alone uses its default Equicord bundle, which does
 **not** contain DASS. You must build the plugin into a custom Equicord bundle and
-select it in Equibop. From the **DASS repository root**, with Bun 1.4.2, Node >=22
+select it in Equibop. From the **DASS repository root**, with Bun 1.4.3, Node >=22
 and Git available locally:
 
 ```sh
@@ -583,12 +583,22 @@ git submodule update --init --recursive
 bun scripts/build-plugin.mjs
 ```
 
-`vendor/Equicord` is the shared upstream source, pinned to the verified revision
-above. This clones a dedicated `build/Equicord` checkout from that submodule on
+The current build adapter targets Equicord
+`17068a94859be00cde5432dfe72823231347899b` (1.15.12.0), alongside the updated
+Equibop submodule `57406f627221bc6054deb9834c18fa9cd914d96a` (3.3.2).
+Lint, full typechecking, both bundle builds and 349 plugin/manifest tests passed
+with Bun 1.4.3 and Node 24.18.0 on Linux. GUI loading and capture on these updated
+revisions remain unverified; the earlier compatibility snapshot is historical.
+
+`vendor/Equicord` is the shared upstream source. The adapter clones a dedicated
+`build/Equicord` checkout from that submodule on
 first use, verifies both pins, adapts the local
 types dependency, stages `plugins/dass` under `src/userplugins/dass`, installs the
 locked dependencies, runs lint/typecheck, and builds both targets. It refuses
 unfamiliar manifest, lockfile and staged-source edits rather than overwriting them.
+When the build checkout has a different revision, it is preserved in
+`build/Equicord-backup-*/Equicord` before cloning the current pin, including any
+local changes and old bundles. Backups are not deleted automatically.
 Edit `plugins/dass`, not the staged copy, and rerun this command to rebuild.
 The upstream submodule stays unchanged. Both desktop and Equibop renderers are
 checked for DASS inclusion.

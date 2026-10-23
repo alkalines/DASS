@@ -53,6 +53,9 @@ async function setup(page, responses = {}) {
     const context = {
         TextEncoder,
         URL,
+        setTimeout: () => 1,
+        clearTimeout: () => {},
+        navigator: { clipboard: { writeText: async () => {} } },
         document,
         location: { pathname: `/admin/${page}` },
         confirm: () => true,
@@ -71,6 +74,33 @@ async function setup(page, responses = {}) {
 const EMPTY_METRICS = { events: [] };
 
 describe("DASS control panel", () => {
+    test("logs render JSON lines, filter client/server and copy only the selected source", async () => {
+        const entries = [
+            { source: "server", event: "backend listening", at_unix_ms: 1700000000000, received_at_unix_ms: 1700000000001 },
+            { source: "client", client_id: "client_a", event: "media stats", at_unix_ms: 1700000000002, received_at_unix_ms: 1700000000003 }
+        ];
+        const fixture = await setup("logs", { logs: { entries, capacity: 512 } });
+        expect(fixture.title.textContent).toBe("Logs");
+        expect(fixture.requests[0].url).toBe("/admin/api/logs");
+        const text = descendants(fixture.content).find(element => element.tag === "textarea");
+        expect(text.readOnly).toBe(true);
+        expect(text.value.split("\n").map(JSON.parse)).toHaveLength(2);
+        const source = descendants(fixture.content).find(element => element.tag === "select");
+        source.value = "client_a";
+        source.listeners.change();
+        const selected = JSON.parse(text.value);
+        expect(selected.client_id).toBe("client_a");
+        expect(selected.time).toBe("2023-11-14T22:13:20.002Z");
+        let copied;
+        fixture.context.navigator.clipboard.writeText = async value => { copied = value; };
+        const copy = descendants(fixture.content).find(element => element.textContent === "Copy JSON lines");
+        await copy.listeners.click();
+        expect(copied).toBe(text.value);
+        expect(fixture.message.textContent).toBe("Logs copied.");
+        const pause = descendants(fixture.content).find(element => element.textContent === "Pause");
+        await pause.listeners.click();
+        expect(pause.textContent).toBe("Resume");
+    });
     test("default administrator is shown only the required password-change form", async () => {
         const fixture = await setup("administrators", { administrators: {
             current_username: "admin", must_change_password: true,

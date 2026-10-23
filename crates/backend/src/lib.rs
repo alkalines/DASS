@@ -3,6 +3,7 @@ pub mod auth;
 pub mod certificate;
 pub mod config;
 pub mod database;
+pub mod diagnostics;
 pub mod forwarding;
 pub mod listener;
 pub mod metrics;

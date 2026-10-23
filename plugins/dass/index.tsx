@@ -74,11 +74,11 @@ async function watchGridShare(share: DassShare) {
         const access = session.getAccess();
         if (access.roomId !== share.roomId) return;
         const result = await watching.watchListedShare(settings.store.backendUrl, share, access);
-        if (!result.ok && pluginActive && epoch === gridWatchEpoch && currentCall() === share.roomId) showToast(result.message);
+        if (!result.ok && pluginActive && epoch === gridWatchEpoch && currentCall() === share.roomId) showToast({ text: result.message });
     } catch {
         if (pluginActive && epoch === gridWatchEpoch && currentCall() === share.roomId) {
             watching.reset("failed", "DASS watching failed. No Discord fallback.");
-            showToast(watching.getSnapshot().message);
+            showToast({ text: watching.getSnapshot().message });
         }
     }
 }
@@ -193,7 +193,7 @@ function startRuntime() {
     unsubscribeWatchStatus = watching.subscribeStatus(() => {
         releaseUnavailableFullscreen();
         if (watching.getSnapshot().phase === "unauthorized") {
-            showToast(watching.getSnapshot().message);
+            showToast({ text: watching.getSnapshot().message });
         }
         if (["loading", "ready", "watching"].includes(watching.getSnapshot().phase)) callDiscovery.sync();
         else queueMicrotask(() => callDiscovery.sync());
@@ -203,7 +203,7 @@ function startRuntime() {
     unsubscribePublishStatus = publisher.subscribe(() => {
         releaseUnavailableFullscreen();
         const { phase, message } = publisher.getSnapshot();
-        if (phase !== previousPhase && phase === "failed") showToast(message);
+        if (phase !== previousPhase && phase === "failed") showToast({ text: message });
         previousPhase = phase;
         if (!["idle", "failed"].includes(phase)) callDiscovery.sync();
         else queueMicrotask(() => callDiscovery.sync());
@@ -246,11 +246,11 @@ export default definePlugin({
         description: "Refresh DASS streams in your current call without stopping media.",
         inputType: ApplicationCommandInputType.BUILT_IN,
         execute() {
-            if (!session.getSnapshot().configured) showToast("Sign in to DASS in plugin settings first.");
-            else if (!currentCall()) showToast("Join a Discord call before refreshing DASS streams.");
+            if (!session.getSnapshot().configured) showToast({ text: "Sign in to DASS in plugin settings first." });
+            else if (!currentCall()) showToast({ text: "Join a Discord call before refreshing DASS streams." });
             else {
                 callDiscovery.retry();
-                showToast("Refreshing DASS streams.");
+                showToast({ text: "Refreshing DASS streams." });
             }
         }
     }],
@@ -346,16 +346,16 @@ export default definePlugin({
         if (!pluginActive) return nativeStart();
         if (!["idle", "failed"].includes(publisher.getSnapshot().phase)) return publisher.reset();
         const discordChannelId = currentCall();
-        if (!discordChannelId) return showToast("Join a Discord call before sharing.");
+        if (!discordChannelId) return showToast({ text: "Join a Discord call before sharing." });
         showShareTransportChooser(settings.store.defaultDass, () => pluginActive && currentCall() === discordChannelId,
             () => { logDiagnostic("transport selected", { transport: "discord" }); getCaptureBridge(); nativeStart(); },
             () => {
                 logDiagnostic("transport selected", { transport: "dass" });
-                if (!session.getSnapshot().configured) return showToast("Configure your DASS account in plugin settings before sharing.");
+                if (!session.getSnapshot().configured) return showToast({ text: "Configure your DASS account in plugin settings before sharing." });
                 stopSpikeTest();
                 localCapture.stop();
                 const bridge = getCaptureBridge();
-                if (!bridge) return showToast("DASS screen capture is unavailable in this client.");
+                if (!bridge) return showToast({ text: "DASS screen capture is unavailable in this client." });
                 void publisher.publish(settings.store.backendUrl, bridge);
             });
     },

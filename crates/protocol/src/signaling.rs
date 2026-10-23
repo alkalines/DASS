@@ -36,6 +36,11 @@ pub struct ClientMessage {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ClientOperation {
+    /// Best-effort diagnostics on an already authenticated connection; no reply.
+    Diagnostics {
+        client_id: String,
+        entries: Vec<DiagnosticEntry>,
+    },
     Login {
         credential: String,
     },
@@ -106,6 +111,16 @@ pub enum ClientOperation {
     Leave {
         session_id: String,
     },
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DiagnosticEntry {
+    pub at_unix_seconds: u32,
+    pub milliseconds: u16,
+    pub event: String,
+    pub failed: bool,
+    pub details: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -292,6 +307,20 @@ impl ClientMessage {
             return false;
         }
         match &self.operation {
+            ClientOperation::Diagnostics { client_id, entries } => {
+                client_id.strip_prefix("client_").is_some_and(|suffix| {
+                    suffix.len() == 32
+                        && suffix
+                            .bytes()
+                            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+                }) && !entries.is_empty()
+                    && entries.len() <= 8
+                    && entries.iter().all(|entry| {
+                        entry.milliseconds < 1000
+                            && valid_text(&entry.event, 96)
+                            && valid_text(&entry.details, 2048)
+                    })
+            }
             ClientOperation::Login { credential } => valid_text(credential, 512),
             ClientOperation::AccountLogin { username, password } => {
                 valid_id(username) && valid_text(password, MAX_LOGIN_PASSWORD_BYTES)
@@ -351,6 +380,33 @@ impl ClientMessage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn diagnostic_batches_are_bounded() {
+        let mut message = ClientMessage {
+            protocol_version: crate::PROTOCOL_VERSION,
+            request_id: "client_2".into(),
+            operation: ClientOperation::Diagnostics {
+                client_id: format!("client_{}", "a".repeat(32)),
+                entries: vec![DiagnosticEntry {
+                    at_unix_seconds: 123,
+                    milliseconds: 999,
+                    event: "media stats".into(),
+                    failed: false,
+                    details: "{}".into(),
+                }],
+            },
+        };
+        assert!(message.is_valid());
+        if let ClientOperation::Diagnostics { entries, .. } = &mut message.operation {
+            entries[0].milliseconds = 1000;
+        }
+        assert!(!message.is_valid());
+        if let ClientOperation::Diagnostics { entries, .. } = &mut message.operation {
+            entries.clear();
+        }
+        assert!(!message.is_valid());
+    }
 
     #[test]
     fn client_messages_reject_unknown_fields_and_versions() {

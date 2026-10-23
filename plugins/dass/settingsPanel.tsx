@@ -14,6 +14,7 @@ import { readRememberedAccount } from "./accountStorage";
 import { type LocalCaptureCheck } from "./capture";
 import { getCaptureBridge } from "./captureHost";
 import { type DiscoveryController } from "./controller";
+import { diagnosticClientId } from "../../clients/spike/diagnostics";
 import { trustPrompt } from "../../clients/spike/e2ee";
 import { type PublishController } from "./publishing";
 import { type DassSession } from "./session";
@@ -98,6 +99,7 @@ export function SettingsPanel({ session, publisher, watching, discovery, localCa
             <Button variant="secondary" aria-expanded={advanced} onClick={() => setAdvanced(!advanced)}>{advanced ? "Hide advanced options" : "Show advanced options"}</Button>
         </div>
         <Paragraph role="status" aria-live="polite">{message || account.message}</Paragraph>
+        <Paragraph>Admin log client: {diagnosticClientId()}. While connected, DASS sends bounded operational diagnostics to this backend. No raw console output, credentials or media payloads.</Paragraph>
         {advanced && <div className="vc-dass-advanced">
             <Paragraph>Advanced diagnostics only. The native watch tile/player hook is not implemented; this temporary test player is not the replacement UI.</Paragraph>
             <Paragraph role="status">{publishStatus.message}</Paragraph>

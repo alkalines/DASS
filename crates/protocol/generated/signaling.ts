@@ -17,11 +17,14 @@ export const MAX_KEY_RELAY_CHARS = 4096;
 
 export type ClientMessage = { protocol_version: number; request_id: string; operation: ClientOperation };
 
+export type DiagnosticEntry = { at_unix_seconds: number; milliseconds: number; event: string; failed: boolean; details: string };
+
 export type ServerMessage = { protocol_version: number; request_id: string; operation: ServerOperation };
 
 export type PublisherMetadata = { publisher_id: string; display_name: string };
 
 export type ClientOperation =
+    | { type: "diagnostics"; client_id: string; entries: Array<DiagnosticEntry> }
     | { type: "login"; credential: string }
     | { type: "account_login"; username: string; password: string }
     | { type: "join"; room_id: string; require_e2ee: boolean }

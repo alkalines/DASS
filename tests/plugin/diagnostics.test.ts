@@ -1,10 +1,32 @@
 import { memoryIdentityStore } from "./helpers/e2eeStore";
 import { expect, spyOn, test } from "bun:test";
-import { browserFailureCode, mediaDiagnostics } from "../../clients/spike/diagnostics";
+import { browserFailureCode, collectDiagnostics, diagnosticClientId, logDiagnostic, mediaDiagnostics } from "../../clients/spike/diagnostics";
 import { createEquibopCapture } from "../../plugins/dass/capture";
 import { PublishController } from "../../plugins/dass/publishing";
 import { DassSession } from "../../plugins/dass/session";
 import { SpikeSignalingError } from "../../clients/spike/signaling";
+
+test("diagnostic collection has one owner, bounded entries and a stable anonymous runtime label", () => {
+    const info = spyOn(console, "info").mockImplementation(() => {});
+    const first: unknown[] = [];
+    const second: unknown[] = [];
+    logDiagnostic("plugin started"); // No replay of pre-login history.
+    const stopFirst = collectDiagnostics(entry => first.push(entry));
+    const stopSecond = collectDiagnostics(entry => second.push(entry));
+    try {
+        logDiagnostic("media stats", { framesDecoded: 3 });
+        expect(first).toHaveLength(1);
+        expect(second).toHaveLength(0);
+        expect(first[0]).toMatchObject({ event: "media stats", details: '{"framesDecoded":3}', failed: false });
+        logDiagnostic("media stats", { invalid: "x".repeat(2049) });
+        expect(first).toHaveLength(1);
+        stopFirst();
+        logDiagnostic("viewer phase", { phase: "ready" });
+        expect(second).toHaveLength(1);
+        expect(diagnosticClientId()).toMatch(/^client_[a-f0-9]{32}$/);
+        expect(diagnosticClientId()).toBe(diagnosticClientId());
+    } finally { stopFirst(); stopSecond(); info.mockRestore(); }
+});
 
 test("media diagnostics join the active codec and expose only allowlisted counters", () => {
     const report = new Map([

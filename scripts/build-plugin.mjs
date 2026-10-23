@@ -87,6 +87,7 @@ try {
     }
     const clientSources = [
         ["diagnostics.ts", "clients/spike/diagnostics.ts", [
+            ['"../../crates/protocol/generated/signaling"', '"./protocolSignaling"'],
             ['/** Callers', 'import { Logger } from "@utils/Logger";\n\nconst logger = new Logger("DASS");\n\n/** Callers'],
             ['console.error', 'logger.error'], ['console.info', 'logger.info']
         ]],

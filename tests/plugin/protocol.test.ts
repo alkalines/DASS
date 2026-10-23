@@ -4,6 +4,15 @@ import { parseClientMessage, parseServerMessage } from "../../crates/protocol/ge
 const message = (operation: unknown, protocol_version = 1) => JSON.stringify({ protocol_version, request_id: "request_1", operation });
 
 describe("proposed signaling protocol", () => {
+    test("diagnostics reject oversized batches, invalid timestamps and unknown fields", () => {
+        const entry = { at_unix_seconds: 123, milliseconds: 999, event: "media stats", failed: false, details: "{}" };
+        const operation = { type: "diagnostics", client_id: `client_${"a".repeat(32)}`, entries: [entry] };
+        expect(parseClientMessage(message(operation)).operation).toEqual(operation);
+        for (const entries of [[], Array(9).fill(entry), [{ ...entry, milliseconds: 1000 }],
+            [{ ...entry, details: "x".repeat(2049) }], [{ ...entry, password: "secret" }]]) {
+            expect(() => parseClientMessage(message({ ...operation, entries }))).toThrow();
+        }
+    });
     test("accepts each client operation", () => {
         for (const operation of [
             { type: "login", credential: "separate-dass-credential" },

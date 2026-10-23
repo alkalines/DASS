@@ -4,10 +4,34 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
+import type { DiagnosticEntry } from "../../crates/protocol/generated/signaling";
+
+const collectors = new Set<(entry: DiagnosticEntry) => void>();
+let clientId: string | undefined;
+
+/** Random, process-local label, not an account/Discord/device identifier. */
+export function diagnosticClientId() {
+    return clientId ??= `client_${crypto.randomUUID().replaceAll("-", "")}`;
+}
+
+/** One authenticated socket owns collection; parallel watcher sockets do not duplicate it. */
+export function collectDiagnostics(collector: (entry: DiagnosticEntry) => void) {
+    collectors.add(collector);
+    return () => { collectors.delete(collector); };
+}
+
 /** Callers must supply fixed events and non-sensitive state only, never payloads or raw errors. */
 export function logDiagnostic(event: string, details: Record<string, string | number | boolean> = {}, failed = false) {
     if (failed) console.error(`[DASS] ${event}`, details);
     else console.info(`[DASS] ${event}`, details);
+    const collector = collectors.values().next().value;
+    if (collector) {
+        const now = Date.now();
+        const encoded = JSON.stringify(details);
+        if (event.length <= 96 && new TextEncoder().encode(encoded).byteLength <= 2048) {
+            collector({ at_unix_seconds: Math.floor(now / 1000), milliseconds: now % 1000, event, failed, details: encoded });
+        }
+    }
 }
 
 /** Browser messages/stacks may contain URLs, source names or secrets. Only known names are safe. */

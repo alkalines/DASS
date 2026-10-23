@@ -1,6 +1,7 @@
 import { expect, spyOn, test } from "bun:test";
 import { BrowserSocket, isAuthenticationRejected, signalingFailureMessage, signalingUrl, SpikeSignaling, SpikeSignalingError, type KeyRelay, type ViewerPresence } from "../../clients/spike/signaling";
 import { SESSION_LIFETIME_SECONDS } from "../../crates/protocol/generated/signaling";
+import { logDiagnostic } from "../../clients/spike/diagnostics";
 
 class Socket extends EventTarget implements BrowserSocket {
     protocol = "dass.v1";
@@ -24,6 +25,34 @@ async function connect(socket: Socket, signal = new AbortController().signal) {
     socket.reply({ type: "authenticated", expires_at_unix_seconds: Math.floor(Date.now() / 1000) + 60 });
     return pending;
 }
+
+test("diagnostics batch only after authentication, share request IDs and never consume a response slot", async () => {
+    const interval = spyOn(globalThis, "setInterval");
+    const socket = new Socket();
+    let connection: SpikeSignaling | undefined;
+    try {
+        connection = await connect(socket);
+        const flush = interval.mock.calls.at(-1)![0] as () => void;
+        for (let i = 0; i < 100; i++) logDiagnostic("media stats", { framesDecoded: i });
+        flush();
+        const diagnostics = JSON.parse(socket.messages.at(-1)!);
+        expect(diagnostics.operation.type).toBe("diagnostics");
+        expect(diagnostics.operation.entries).toHaveLength(4);
+        expect(diagnostics.operation.entries[0].details).toBe('{"framesDecoded":36}');
+        const pending = connection.request({ type: "directory", room_id: "room" }, "directory");
+        const count = socket.messages.length;
+        flush();
+        expect(socket.messages).toHaveLength(count); // Never interleave a pending request.
+        const requestId = JSON.parse(socket.messages.at(-1)!).request_id;
+        expect(requestId).toBe("client_3");
+        socket.reply({ type: "directory", room_id: "room", publisher_ids: [], publishers: [] }, requestId);
+        await pending;
+        connection.close();
+        const closedCount = socket.messages.length;
+        flush();
+        expect(socket.messages).toHaveLength(closedCount);
+    } finally { connection?.close(); interval.mockRestore(); }
+});
 
 test("long authenticated sessions are not locally truncated to the old ten-minute ceiling", async () => {
     const socket = new Socket();

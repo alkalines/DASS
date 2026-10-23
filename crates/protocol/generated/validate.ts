@@ -20,6 +20,12 @@ const displayName = (value: unknown) => typeof value === "string" && text(MAX_PU
 type Validator = (value: unknown) => boolean;
 type Shape = Record<string, Validator>;
 const clientShapes: Record<string, Shape> = {
+    diagnostics: { client_id: value => typeof value === "string" && /^client_[a-f0-9]{32}$/.test(value), entries: value => Array.isArray(value) && value.length > 0 && value.length <= 8
+        && value.every(entry => record(entry) && exact(entry, {
+            at_unix_seconds: seconds,
+            milliseconds: value => typeof value === "number" && Number.isInteger(value) && value >= 0 && value < 1000,
+            event: text(96), failed: boolean, details: text(2048)
+        })) },
     login: { credential: text(512) },
     account_login: { username: identifier, password: text(MAX_LOGIN_PASSWORD_BYTES) },
     join: { room_id: identifier, require_e2ee: boolean },

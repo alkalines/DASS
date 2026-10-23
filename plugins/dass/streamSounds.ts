@@ -43,7 +43,7 @@ export function startStreamSounds(publisher: PublishController, watching: WatchC
         } catch {
             unavailable = true;
             logDiagnostic("native stream sounds unavailable", undefined, true);
-            showToast("DASS sound cues are unavailable on this Discord build. Sharing is unaffected.");
+            showToast({ text: "DASS sound cues are unavailable on this Discord build. Sharing is unaffected." });
         }
     };
     const unsubscribePublisher = publisher.subscribe(sync);

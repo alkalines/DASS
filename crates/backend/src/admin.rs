@@ -155,6 +155,7 @@ pub fn router(state: AdminState) -> Router {
         .route("/admin/users", get(page))
         .route("/admin/rooms", get(page))
         .route("/admin/streams", get(page))
+        .route("/admin/logs", get(page))
         .route("/admin/settings", get(page))
         .route("/admin/administrators", get(page))
         .route("/admin/app.js", get(script))
@@ -166,6 +167,7 @@ pub fn router(state: AdminState) -> Router {
             axum::routing::put(save_user).delete(remove_user),
         )
         .route("/admin/api/status", get(status))
+        .route("/admin/api/logs", get(logs))
         .route("/admin/api/version", get(version))
         .route("/admin/api/settings", get(settings).put(save_settings))
         .route("/admin/api/administrators", get(administrators))
@@ -185,6 +187,10 @@ pub fn router(state: AdminState) -> Router {
 
 async fn page() -> Html<&'static str> {
     Html(include_str!("admin/index.html"))
+}
+
+async fn logs() -> Json<serde_json::Value> {
+    Json(crate::diagnostics::snapshot())
 }
 
 async fn script() -> impl IntoResponse {

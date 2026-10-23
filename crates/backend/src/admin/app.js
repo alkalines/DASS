@@ -388,9 +388,75 @@ async function loadAdministrators() {
     }
 }
 
-document.querySelector("#title").textContent = { users: "Users", rooms: "Rooms", streams: "Streams", settings: "Settings", administrators: "Administrators" }[page];
+let logPoll;
+let logsPaused = false;
+let logText;
+let logSource;
+let logEntries = [];
+
+function renderLogs() {
+    const selected = logEntries.filter(entry => !logSource.value || (entry.source === "server" ? "server" : entry.client_id) === logSource.value);
+    logText.value = selected.map(entry => JSON.stringify({
+        ...entry,
+        time: new Date(entry.at_unix_ms).toISOString(),
+        received_time: new Date(entry.received_at_unix_ms).toISOString()
+    })).join("\n");
+}
+
+async function loadLogs() {
+    scheduleLogPoll();
+    const result = await api("logs");
+    if (!logText) {
+        content.replaceChildren();
+        content.append(node("p", "Recent DASS diagnostics, oldest first (512 entries, memory only; cleared on backend restart). Client labels are random per client runtime, not account names. Client events are self-reported; compare received_time when clocks differ. Pre-login and disconnected client logs remain local.", "hint"));
+        logSource = node("select");
+        logSource.setAttribute("aria-label", "Log source");
+        logSource.addEventListener("change", renderLogs);
+        const pause = button("Pause", () => {
+            logsPaused = !logsPaused;
+            pause.textContent = logsPaused ? "Resume" : "Pause";
+            if (!logsPaused) return loadLogs();
+        });
+        content.append(logSource, pause, button("Copy JSON lines", async () => {
+            try {
+                await navigator.clipboard.writeText(logText.value);
+                message.textContent = "Logs copied.";
+            } catch {
+                logText.focus();
+                logText.select();
+                message.textContent = "Clipboard unavailable. Logs selected; press Ctrl+C to copy.";
+            }
+        }));
+        logText = node("textarea", undefined, "log-json");
+        logText.readOnly = true;
+        logText.setAttribute("aria-label", "Diagnostic JSON lines");
+        logText.spellcheck = false;
+        content.append(logText);
+    }
+    logEntries = result.entries;
+    const selected = logSource.value;
+    const sources = [...new Set(logEntries.map(entry => entry.source === "server" ? "server" : entry.client_id))];
+    logSource.replaceChildren();
+    for (const source of ["", ...sources]) {
+        const option = node("option", source || "All sources");
+        option.value = source;
+        logSource.append(option);
+    }
+    logSource.value = sources.includes(selected) ? selected : "";
+    renderLogs();
+}
+
+function scheduleLogPoll() {
+    clearTimeout(logPoll);
+    logPoll = setTimeout(() => {
+        if (!logsPaused && !document.hidden && !busy) run(loadLogs);
+        else scheduleLogPoll();
+    }, 3_000);
+}
+
+document.querySelector("#title").textContent = { users: "Users", rooms: "Rooms", streams: "Streams", logs: "Logs", settings: "Settings", administrators: "Administrators" }[page];
 document.querySelector(`a[href="/admin/${page}"]`)?.setAttribute("aria-current", "page");
-const load = { users: loadUsers, rooms: loadRooms, streams: loadStreams, settings: loadSettings, administrators: loadAdministrators }[page];
+const load = { users: loadUsers, rooms: loadRooms, streams: loadStreams, logs: loadLogs, settings: loadSettings, administrators: loadAdministrators }[page];
 const refresh = button("Refresh", load);
 document.querySelector("main").insertBefore(refresh, content);
 run(load);

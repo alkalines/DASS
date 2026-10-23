@@ -12,6 +12,9 @@ real-client media exchange has been proven.
 
 ## Prerequisites
 
+For the administrator's bounded, copyable server/client JSON timeline, see
+[administrator logs](diagnostics.md).
+
 - Docker Engine with Compose >= 2.30 and permission to use the daemon.
 - Network access to pull `rust:1.90.0-bookworm`, `debian:bookworm-slim` and crates.
 - No host Rust, Cargo, Bun, encoder or media helper is required for backend work.

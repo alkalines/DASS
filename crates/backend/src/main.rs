@@ -25,6 +25,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Third-party RTC logs can contain SDP/identifiers. Only our fixed messages
     // reach the sink; do not enable upstream PII/debug logging for the spike.
     tracing_subscriber::registry()
+        .with(dass_backend::diagnostics::DiagnosticLayer.with_filter(
+            tracing_subscriber::filter::filter_fn(|metadata| {
+                metadata.target().starts_with("dass_backend")
+            }),
+        ))
         .with(
             tracing_subscriber::fmt::layer()
                 .json()

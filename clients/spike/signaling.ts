@@ -4,8 +4,8 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
-import { logDiagnostic } from "./diagnostics";
-import { type ClientOperation, type CloseReason, type ErrorCode, LOGIN_DEADLINE_MS, MAX_MESSAGE_BYTES, PROTOCOL_VERSION, type ServerOperation, SESSION_LIFETIME_SECONDS } from "../../crates/protocol/generated/signaling";
+import { collectDiagnostics, diagnosticClientId, logDiagnostic } from "./diagnostics";
+import { type ClientOperation, type CloseReason, type DiagnosticEntry, type ErrorCode, LOGIN_DEADLINE_MS, MAX_MESSAGE_BYTES, PROTOCOL_VERSION, type ServerOperation, SESSION_LIFETIME_SECONDS } from "../../crates/protocol/generated/signaling";
 import { parseClientMessage, parseServerMessage } from "../../crates/protocol/generated/validate";
 
 export interface BrowserSocket extends EventTarget {
@@ -83,6 +83,9 @@ export class SpikeSignaling {
     private openWait?: Pending<void>;
     private pending?: Pending<ServerOperation> & { requestId: string; requestType: ClientOperation["type"]; expectedType: ServerOperation["type"]; };
     private expiryTimer?: ReturnType<typeof setTimeout>;
+    private diagnosticTimer?: ReturnType<typeof setInterval>;
+    private stopDiagnostics?: () => void;
+    private diagnosticEntries: DiagnosticEntry[] = [];
     private publisherPresence?: { sessionId: string; viewerCount: number; listener: (presence: ViewerPresence) => void; };
     private viewRequestListener?: { sessionId: string; listener: (request: ViewRequest) => void; };
     private viewRequestClosed = new Map<string, { sessionId: string; listener: () => void; }>();
@@ -128,6 +131,11 @@ export class SpikeSignaling {
             if (expiryMs <= 0) throw new Error("DASS credential has expired.");
             // Honor earlier server expiry, with the shared session ceiling as a bound.
             connection.expiryTimer = setTimeout(() => connection.close("expired"), Math.min(expiryMs, SESSION_LIFETIME_SECONDS * 1000));
+            connection.stopDiagnostics = collectDiagnostics(entry => {
+                if (connection.diagnosticEntries.length >= 64) connection.diagnosticEntries.shift();
+                connection.diagnosticEntries.push(entry);
+            });
+            connection.diagnosticTimer = setInterval(() => connection.flushDiagnostics(), 2_000);
             logDiagnostic("signaling authenticated");
             return connection;
         } catch (error) {
@@ -142,6 +150,22 @@ export class SpikeSignaling {
             if (!this.active || this.signal.aborted) this.close();
             else if (this.socket.readyState === 1) this.onOpen();
         });
+    }
+
+    /** Best-effort only: never block signaling, retry, or grow an outbound queue. */
+    private flushDiagnostics() {
+        if (performance.now() - this.requestWindowStartedMs >= 1_000) {
+            this.requestWindowStartedMs = performance.now();
+            this.requestsInWindow = 0;
+        }
+        if (!this.active || this.requestInFlight || this.socket.readyState !== 1 || !this.diagnosticEntries.length
+            || this.sequence >= Number.MAX_SAFE_INTEGER || this.requestsInWindow >= 16) return;
+        const operation: ClientOperation = { type: "diagnostics", client_id: diagnosticClientId(), entries: this.diagnosticEntries.splice(0, 4) };
+        const message = JSON.stringify({ protocol_version: PROTOCOL_VERSION, request_id: `client_${++this.sequence}`, operation });
+        const size = new TextEncoder().encode(message).byteLength;
+        if (size > MAX_MESSAGE_BYTES || this.socket.bufferedAmount + size > MAX_MESSAGE_BYTES * 2) return;
+        this.requestsInWindow++;
+        try { this.socket.send(message); } catch { /* Diagnostics must not interrupt media. */ }
     }
 
     private readonly onOpen = () => {
@@ -378,6 +402,11 @@ export class SpikeSignaling {
         if (this.openWait) { clearTimeout(this.openWait.timer); this.openWait.reject(error); this.openWait = undefined; }
         if (this.pending) { clearTimeout(this.pending.timer); this.pending.reject(error); this.pending = undefined; }
         if (!this.active) return;
+        this.flushDiagnostics();
+        this.stopDiagnostics?.();
+        this.stopDiagnostics = undefined;
+        clearInterval(this.diagnosticTimer);
+        this.diagnosticEntries = [];
         this.active = false;
         this.publisherPresence = undefined;
         this.viewRequestListener = undefined;

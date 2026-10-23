@@ -1505,6 +1505,7 @@ async fn upgrade(
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
     let maximum = state.maximum_message_bytes;
+    let diagnostic_connection = NEXT_CONNECTION.fetch_add(1, Ordering::Relaxed);
     upgrade
         .read_buffer_size(4096)
         .write_buffer_size(0)
@@ -1512,12 +1513,18 @@ async fn upgrade(
         .max_message_size(maximum)
         .max_frame_size(maximum)
         .on_upgrade(move |socket| {
-            run(socket, state, connection, unauthenticated, observed_ip).instrument(
-                tracing::info_span!(
-                    "signaling",
-                    connection = NEXT_CONNECTION.fetch_add(1, Ordering::Relaxed)
-                ),
+            run(
+                socket,
+                state,
+                connection,
+                unauthenticated,
+                observed_ip,
+                diagnostic_connection,
             )
+            .instrument(tracing::info_span!(
+                "signaling",
+                connection = diagnostic_connection
+            ))
         })
 }
 
@@ -1711,6 +1718,7 @@ async fn run(
     _connection: OwnedSemaphorePermit,
     unauthenticated: OwnedSemaphorePermit,
     observed_ip: Option<IpAddr>,
+    diagnostic_connection: u64,
 ) {
     tracing::info!("signaling socket opened");
     state.metrics.connection_opened();
@@ -1892,6 +1900,10 @@ async fn run(
                     close(&mut socket, session.as_ref(), CloseReason::Expired).await;
                     break;
                 }
+                if let ClientOperation::Diagnostics { client_id, entries } = &message.operation {
+                    crate::diagnostics::record_client(client_id, diagnostic_connection, entries);
+                    continue;
+                }
                 let media_response = media_operation(&state, &account,
                     &message.operation, &mut session).await;
                 let operation_type = operation_name(&message.operation);
@@ -1965,6 +1977,7 @@ fn error_code(code: &ErrorCode) -> &'static str {
 fn operation_name(operation: &ClientOperation) -> &'static str {
     match operation {
         ClientOperation::Login { .. } => "login",
+        ClientOperation::Diagnostics { .. } => "diagnostics",
         ClientOperation::AccountLogin { .. } => "account_login",
         ClientOperation::Directory { .. } => "directory",
         ClientOperation::Join { .. } => "join",
@@ -2184,9 +2197,9 @@ fn operate_for_peer(
     last_left: &mut Option<String>,
 ) -> ServerOperation {
     match operation {
-        ClientOperation::Login { .. } | ClientOperation::AccountLogin { .. } => {
-            rejected(ErrorCode::InvalidState)
-        }
+        ClientOperation::Diagnostics { .. }
+        | ClientOperation::Login { .. }
+        | ClientOperation::AccountLogin { .. } => rejected(ErrorCode::InvalidState),
         ClientOperation::Directory { room_id } => {
             let store = state.invites.borrow().clone();
             directory(state, &store, room_id, account)
