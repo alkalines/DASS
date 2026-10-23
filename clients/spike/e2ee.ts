@@ -387,7 +387,7 @@ async function transformFrame(event) {
     const role = transformer.options && transformer.options.role;
     const video = transformer.options && transformer.options.kind === "video";
     const vp8 = defineVp8Envelope();
-    const counters = { inputFrames: 0, outputFrames: 0, missingKeyFrames: 0, malformedFrames: 0, authenticationFailures: 0, replayDrops: 0, pipelineFailed: false };
+    const counters = { inputFrames: 0, outputFrames: 0, missingKeyFrames: 0, malformedFrames: 0, authenticationFailures: 0, headerMismatches: 0, replayDrops: 0, pipelineFailed: false };
     if (port) {
         port.onmessage = message => {
             const data = message.data || {};
@@ -460,7 +460,7 @@ async function transformFrame(event) {
                 if (!entry) { counters.missingKeyFrames++; return; } // unknown epoch: fail closed
                 try {
                     const result = await entry.cipher.decrypt(encrypted);
-                    if (video && !vp8.verify(prefix, result.frame)) { counters.authenticationFailures++; return; }
+                    if (video && !vp8.verify(prefix, result.frame)) { counters.headerMismatches++; return; }
                     if (!entry.replay.admit(result.counter)) { counters.replayDrops++; return; }
                     frame.data = result.frame;
                     controller.enqueue(frame);
@@ -515,7 +515,7 @@ export class E2eeTransforms {
             const { data } = event;
             if (data?.type === "stats") {
                 const details: Record<string, string | number | boolean> = { role: role === "encrypt" ? "publisher" : "viewer", kind };
-                for (const field of ["inputFrames", "outputFrames", "missingKeyFrames", "malformedFrames", "authenticationFailures", "replayDrops"]) {
+                for (const field of ["inputFrames", "outputFrames", "missingKeyFrames", "malformedFrames", "authenticationFailures", "headerMismatches", "replayDrops"]) {
                     if (Number.isSafeInteger(data[field]) && data[field] >= 0) details[field] = data[field];
                 }
                 details.pipelineFailed = data.pipelineFailed === true;

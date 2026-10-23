@@ -370,7 +370,7 @@ pub struct MediaPeer {
     received_rtp_packets: u64,
     route: PeerRoute,
     tracks: Vec<(Mid, MediaKind)>,
-    outgoing_sequences: [u64; 2],
+    outgoing_sequence_origins: [Option<u64>; 2],
     last_keyframe: Instant,
 }
 
@@ -447,7 +447,7 @@ impl MediaPeer {
             received_rtp_packets: 0,
             route: PeerRoute::Sink,
             tracks: Vec::with_capacity(2),
-            outgoing_sequences: [0; 2],
+            outgoing_sequence_origins: [None; 2],
             last_keyframe: now,
         };
         peer.rtc
@@ -792,8 +792,11 @@ impl MediaPeer {
             .find(|params| params.spec().codec == packet.codec)
             .ok_or(MediaFailure)?
             .pt();
-        let sequence = self.outgoing_sequences[index];
-        self.outgoing_sequences[index] = sequence.checked_add(1).ok_or(MediaFailure)?;
+        let Some(sequence) =
+            translated_sequence(packet.sequence, &mut self.outgoing_sequence_origins[index])
+        else {
+            return Ok(());
+        };
         let mut direct = self.rtc.direct_api();
         let stream = direct.stream_tx_by_mid(mid, None).ok_or(MediaFailure)?;
         // New SSRC/MID and PT come from the viewer negotiation. Preserve encoded
@@ -936,6 +939,7 @@ impl MediaPeer {
                             route
                                 .forward(ForwardPacket {
                                     codec,
+                                    sequence: *packet.seq_no,
                                     timestamp: packet.header.timestamp,
                                     marker: packet.header.marker,
                                     payload: packet.payload,
@@ -981,10 +985,45 @@ fn candidate_component_one(text: &str) -> bool {
         && fields.next() == Some("1")
 }
 
+// RTP mode emits arrival order, not sequence order. A fixed offset preserves
+// reordering and gaps so receivers cannot assemble damaged frames as complete.
+// Start below the first rollover with room for late packets from before joining.
+fn translated_sequence(source: u64, origin: &mut Option<u64>) -> Option<u64> {
+    let origin = *origin.get_or_insert_with(|| source.saturating_sub(32_768));
+    source.checked_sub(origin)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use tokio::net::UdpSocket;
+
+    #[test]
+    fn forwarding_preserves_sequence_reordering_loss_and_rollover() {
+        let mut origin = None;
+        let arrivals = [100, 102, 101, 105];
+        let translated: Vec<_> = arrivals
+            .into_iter()
+            .map(|source| translated_sequence(source, &mut origin).unwrap())
+            .collect();
+        assert_eq!(translated, arrivals);
+
+        let mut origin = None;
+        let first = 4 * 65_536 + 65_534;
+        assert_eq!(translated_sequence(first, &mut origin), Some(32_768));
+        assert_eq!(translated_sequence(first + 2, &mut origin), Some(32_770));
+        assert_eq!(translated_sequence(first + 1, &mut origin), Some(32_769));
+        assert_eq!(translated_sequence(first - 1, &mut origin), Some(32_767));
+        assert_eq!(translated_sequence(first - 32_769, &mut origin), None);
+        assert_eq!(
+            translated_sequence(first + 32_768, &mut origin),
+            Some(65_536)
+        );
+        // Audio and video use independent translation origins.
+        let mut audio_origin = None;
+        assert_eq!(translated_sequence(7, &mut audio_origin), Some(7));
+        assert_eq!(translated_sequence(first + 3, &mut origin), Some(32_771));
+    }
 
     struct TestClient {
         rtc: Rtc,

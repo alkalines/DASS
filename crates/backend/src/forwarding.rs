@@ -14,6 +14,7 @@ const MAX_PAYLOAD_BYTES: usize = 2_048;
 #[derive(Clone)]
 pub struct ForwardPacket {
     pub codec: Codec,
+    pub sequence: u64,
     pub timestamp: u32,
     pub marker: bool,
     pub payload: Arc<[u8]>,
@@ -299,6 +300,7 @@ mod tests {
 
     fn packet() -> ForwardPacket {
         ForwardPacket {
+            sequence: 0,
             codec: Codec::Opus,
             timestamp: 960,
             marker: false,

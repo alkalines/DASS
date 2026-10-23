@@ -4,7 +4,8 @@
 
 The VP8 framing fix requires **both publisher and viewer** to rebuild/restart.
 Older video envelopes are rejected, with no plaintext or legacy fallback. The
-backend remains a packet forwarder and needs no change for this fix. DASS now
+backend remains a packet forwarder; the header format alone needs no backend
+change, but the separate sequence-forwarding correction below does. DASS now
 preserves the 3-byte VP8 delta-frame header or 10-byte keyframe header ahead of a
 `DAS2` marker and the existing encrypted envelope. WebRTC's receive depacketizer
 reads frame type and keyframe dimensions before the decrypt transform; the old
@@ -15,6 +16,26 @@ not decoded screen pixels. Audio framing is unchanged. Synthetic-header and
 isolated-worker tests cover this behavior, not real VP8 playback or independent
 cryptographic review. Windows-to-Linux runtime acceptance remains pending.
 
+The subsequent backend correction preserves source RTP sequence ordering/gaps
+using a fixed per-viewer, per-media offset, rather than numbering arrival order.
+The pinned str0m RTP mode does not reorder packets before emitting them. The old
+mapping could make reordered fragments look sequential, or hide ingress packet
+loss from the viewer, leading to damaged encrypted frames despite viewer-side
+`packetsLost: 0`. The new mapping starts within the first SRTP rollover and drops
+packets older than its bounded translation origin. No media is decrypted by the
+backend. This is a concrete forwarding defect, not proof that it accounts for
+every reported authentication failure. Regression tests for reordering, gaps,
+rollover and independent media origins were added but have not run because Docker
+socket access is denied. Before runtime acceptance, run from the repository root:
+
+```sh
+docker compose build backend
+docker compose up -d backend
+```
+
+The build must pass formatting, Clippy and locked tests before restarting. This
+restart ends active media sessions; start sharing/watching again afterwards.
+
 After rebuilding with `bun scripts/build-plugin.mjs` from the repository root and
 fully restarting the client, open DevTools Console, enable Info-level messages,
 and filter for `DASS`. Both clients should use the updated custom build. Active
@@ -23,7 +44,9 @@ These contain allowlisted counters and the active RTP codec, not raw SDP,
 addresses, track identifiers, keys or media. Sampling stops with the peer.
 The same sampling requests `E2EE frame stats` for video/audio separately. These
 report input/output frame counts, missing-key drops, malformed-frame drops,
-authentication failures, replay drops and pipeline failure. `E2EE key installation`
+authentication failures, authenticated-header mismatches (`headerMismatches`),
+replay drops and pipeline failure. Earlier diagnostics counted header mismatches
+as authentication failures; these are now separate. `E2EE key installation`
 reports only installed/stale/rejected status, never keys or epoch identifiers.
 Increasing viewer E2EE output with zero decoded frames moves the investigation
 past authenticated decryption toward encoded-frame validity, codec metadata and

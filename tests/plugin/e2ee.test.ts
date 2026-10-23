@@ -217,7 +217,7 @@ describe("transform worker scope", () => {
         expect((await decryptA.sendFrame(afterConflict.value.data)).value.data).toEqual(FRAME);
         expect(await decryptA.stats()).toEqual({ type: "stats", id: 2,
             inputFrames: 6, outputFrames: 2, missingKeyFrames: 1, malformedFrames: 1,
-            authenticationFailures: 1, replayDrops: 1, pipelineFailed: false });
+            authenticationFailures: 1, headerMismatches: 0, replayDrops: 1, pipelineFailed: false });
         expect(await decryptA.install(11, key, false)).toBe("installed");
         decryptB.pushFrame(firstCiphertext);
         decryptB.pushFrame(secondEncrypted.value.data);
@@ -243,7 +243,8 @@ describe("transform worker scope", () => {
         const stats = await videoDecrypt.stats();
         expect(stats.inputFrames).toBe(4);
         expect(stats.outputFrames).toBe(2);
-        expect(stats.authenticationFailures).toBe(2);
+        expect(stats.authenticationFailures).toBe(0);
+        expect(stats.headerMismatches).toBe(2);
         expect(stats.pipelineFailed).toBe(false);
         for (const transform of [encryptA, encryptB, decryptA, decryptB, videoEncrypt, videoDecrypt]) await transform.close();
     });
