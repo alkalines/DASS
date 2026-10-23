@@ -5,6 +5,7 @@ import {
     E2EE_MAX_FRAME_BYTES,
     MediaFrameCipher,
     ReplayWindow,
+    defineVp8Envelope,
     evaluateIdentity,
     generateEpochKey,
     generateIdentity,
@@ -18,6 +19,33 @@ import {
 } from "../../clients/spike/e2ee";
 
 const FRAME = new TextEncoder().encode("encoded video frame payload").buffer;
+
+test("VP8 envelope preserves pre-decrypt key/delta classification and verifies the clear header", async () => {
+    const envelope = defineVp8Envelope();
+    const cipher = await MediaFrameCipher.create(generateEpochKey());
+    for (const header of [[0x10, 0, 0, 0x9d, 0x01, 0x2a, 0x80, 0x07, 0x38, 0x04], [0x11, 0, 0]]) {
+        const frame = new Uint8Array([...header, 99, 100, 101]).buffer;
+        const encrypted = await cipher.encrypt(1, BigInt(header[0]), frame);
+        // The old wire format exposes the epoch's first byte as VP8's P bit.
+        expect(new Uint8Array(encrypted)[0] & 1).toBe(0);
+        const wire = envelope.wrap(frame, encrypted);
+        expect(new Uint8Array(wire)[0] & 1).toBe(header[0] & 1);
+        const parsed = envelope.unwrap(wire);
+        const decrypted = await cipher.decrypt(parsed.encrypted);
+        expect(decrypted.frame).toEqual(frame);
+        expect(envelope.verify(parsed.prefix, decrypted.frame)).toBe(true);
+        for (let index = 0; index < parsed.prefix.length; index++) {
+            const changed = parsed.prefix.slice();
+            changed[index] ^= 0x80;
+            expect(envelope.verify(changed, decrypted.frame)).toBe(false);
+        }
+        expect(() => envelope.unwrap(encrypted)).toThrow();
+        const badMarker = wire.slice(0);
+        new Uint8Array(badMarker)[header.length] ^= 1;
+        expect(() => envelope.unwrap(badMarker)).toThrow();
+    }
+    expect(() => envelope.wrap(new ArrayBuffer(0), new ArrayBuffer(0))).toThrow();
+});
 
 describe("media frame cipher", () => {
     test("rejects integer truncation and oversized frames before encryption", async () => {
@@ -104,10 +132,10 @@ describe("transform worker scope", () => {
 
     test("preserves counters/replay across duplicates and orders conflicting and stale epoch controls", async () => {
         type EncodedFrame = { data: ArrayBuffer; };
-        type WorkerScope = { onrtctransform?: (event: { transformer: { options: { role: string; port: MessagePort; }; readable: ReadableStream<EncodedFrame>; writable: WritableStream<EncodedFrame>; }; }) => void; };
+        type WorkerScope = { onrtctransform?: (event: { transformer: { options: { role: string; kind?: string; port: MessagePort; }; readable: ReadableStream<EncodedFrame>; writable: WritableStream<EncodedFrame>; }; }) => void; };
         const scope: WorkerScope = {};
         new Function("self", `${transformWorkerSource()};`)(scope);
-        const makeTransform = (role: "encrypt" | "decrypt") => {
+        const makeTransform = (role: "encrypt" | "decrypt", kind?: string) => {
             const channel = new MessageChannel();
             let enqueue!: (frame: EncodedFrame) => void;
             let closeInput!: () => void;
@@ -122,8 +150,8 @@ describe("transform worker scope", () => {
             let nextId = 0;
             const acknowledgements = new Map<number, (event: MessageEvent) => void>();
             channel.port1.onmessage = event => acknowledgements.get(event.data.id)?.(event);
-            scope.onrtctransform!({ transformer: { options: { role, port: channel.port2 }, readable, writable } });
-            const control = (type: "epoch" | "dropBelow", epoch: number, keyBytes?: Uint8Array, send = false) => new Promise<MessageEvent>(resolve => {
+            scope.onrtctransform!({ transformer: { options: { role, kind, port: channel.port2 }, readable, writable } });
+            const control = (type: "epoch" | "dropBelow" | "stats", epoch: number, keyBytes?: Uint8Array, send = false) => new Promise<MessageEvent>(resolve => {
                 const id = ++nextId;
                 acknowledgements.set(id, event => { acknowledgements.delete(id); resolve(event); });
                 channel.port1.postMessage({ type, id, epoch, keyBytes: keyBytes?.slice().buffer, send });
@@ -133,6 +161,7 @@ describe("transform worker scope", () => {
                     return (await control("epoch", epoch, keyBytes, send)).data.status as string;
                 },
                 async retire(epoch: number) { await control("dropBelow", epoch); },
+                async stats() { return (await control("stats", 0)).data; },
                 async sendFrame(data: ArrayBuffer) {
                     const result = reader.read();
                     enqueue({ data });
@@ -177,6 +206,18 @@ describe("transform worker scope", () => {
         expect(await decryptA.install(11, key, false)).toBe("installed");
         expect(await decryptB.install(11, key, false)).toBe("installed");
         expect((await decryptA.sendFrame(firstCiphertext)).value.data).toEqual(FRAME);
+        decryptA.pushFrame(new ArrayBuffer(1));
+        const tampered = firstCiphertext.slice(0);
+        new Uint8Array(tampered)[tampered.byteLength - 1] ^= 1;
+        decryptA.pushFrame(tampered);
+        const unknownEpoch = firstCiphertext.slice(0);
+        new DataView(unknownEpoch).setUint32(0, 99);
+        decryptA.pushFrame(unknownEpoch);
+        decryptA.pushFrame(firstCiphertext);
+        expect((await decryptA.sendFrame(afterConflict.value.data)).value.data).toEqual(FRAME);
+        expect(await decryptA.stats()).toEqual({ type: "stats", id: 2,
+            inputFrames: 6, outputFrames: 2, missingKeyFrames: 1, malformedFrames: 1,
+            authenticationFailures: 1, replayDrops: 1, pipelineFailed: false });
         expect(await decryptA.install(11, key, false)).toBe("installed");
         decryptB.pushFrame(firstCiphertext);
         decryptB.pushFrame(secondEncrypted.value.data);
@@ -186,7 +227,25 @@ describe("transform worker scope", () => {
         const staleInstall = decryptA.install(11, key, false);
         await retirement;
         expect(await staleInstall).toBe("stale");
-        for (const transform of [encryptA, encryptB, decryptA, decryptB]) await transform.close();
+        const videoEncrypt = makeTransform("encrypt", "video");
+        const videoDecrypt = makeTransform("decrypt", "video");
+        expect(await videoEncrypt.install(12, rekey, true)).toBe("installed");
+        expect(await videoDecrypt.install(12, rekey, false)).toBe("installed");
+        for (const header of [[0x10, 0, 0, 0x9d, 1, 0x2a, 0x80, 7, 0x38, 4], [0x11, 0, 0]]) {
+            const original = new Uint8Array([...header, 99, 100, 101]).buffer;
+            const wire = (await videoEncrypt.sendFrame(original)).value.data;
+            expect(new Uint8Array(wire)[0]).toBe(header[0]);
+            const changed = wire.slice(0);
+            new Uint8Array(changed)[1] ^= 1;
+            videoDecrypt.pushFrame(changed);
+            expect((await videoDecrypt.sendFrame(wire)).value.data).toEqual(original);
+        }
+        const stats = await videoDecrypt.stats();
+        expect(stats.inputFrames).toBe(4);
+        expect(stats.outputFrames).toBe(2);
+        expect(stats.authenticationFailures).toBe(2);
+        expect(stats.pipelineFailed).toBe(false);
+        for (const transform of [encryptA, encryptB, decryptA, decryptB, videoEncrypt, videoDecrypt]) await transform.close();
     });
 });
 

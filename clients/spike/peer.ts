@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
-import { logDiagnostic } from "./diagnostics";
+import { logDiagnostic, mediaDiagnostics } from "./diagnostics";
 import { E2eeTransforms } from "./e2ee";
 import type { CaptureLease } from "../../plugins/dass/routing";
 import { type DassAuthentication, SpikeSignaling, SpikeSignalingError, type ViewDecision } from "./signaling";
@@ -109,6 +109,7 @@ export class SpikePeer {
     private closeDiagnostic?: string;
     private offer?: string;
     private timer?: ReturnType<typeof setTimeout>;
+    private statsTimer?: ReturnType<typeof setTimeout>;
     private gatheringFailure?: () => void;
     private readonly stopController = new AbortController();
     private e2eeTransforms?: E2eeTransforms;
@@ -153,13 +154,13 @@ export class SpikePeer {
                 for (const track of [...video, ...audio]) {
                     const transceiver = peer.addTransceiver(track, { direction: "sendonly", streams: [options.capture.stream] });
                     connection.configure(transceiver, track.kind);
-                    connection.e2eeTransforms?.attach(transceiver.sender, "encrypt");
+                    connection.e2eeTransforms?.attach(transceiver.sender, "encrypt", track.kind);
                 }
             } else {
                 for (const kind of ["video", "audio"]) {
                     const transceiver = peer.addTransceiver(kind, { direction: "recvonly" });
                     connection.configure(transceiver, kind);
-                    connection.e2eeTransforms?.attach(transceiver.receiver, "decrypt");
+                    connection.e2eeTransforms?.attach(transceiver.receiver, "decrypt", kind);
                 }
             }
             stage = "offer";
@@ -299,6 +300,7 @@ export class SpikePeer {
             await this.peer.setRemoteDescription({ type: "answer", sdp: answer.sdp });
             this.checkActive();
             this.activationStage = "connection";
+            void this.sampleMedia();
             this.onState();
             return joined.session_id;
         } catch (error) {
@@ -308,6 +310,21 @@ export class SpikePeer {
     }
 
     private checkActive() { if (!this.active || this.signal.aborted) throw new Error("DASS peer is closed."); }
+
+    private async sampleMedia() {
+        try {
+            this.e2eeTransforms?.sampleDiagnostics();
+            const report = await this.peer.getStats();
+            if (!this.active) return;
+            const rows = mediaDiagnostics(report, !!this.capture);
+            if (!rows.length) logDiagnostic("media stats pending", { role: this.capture ? "publisher" : "viewer" });
+            for (const row of rows) logDiagnostic("media stats", row);
+        } catch {
+            if (this.active) logDiagnostic("media stats unavailable", { role: this.capture ? "publisher" : "viewer" });
+        }
+        // Schedule after completion, so slow getStats calls cannot overlap.
+        if (this.active) this.statsTimer = setTimeout(() => void this.sampleMedia(), 5_000);
+    }
 
     get closeMessage(): string {
         if (this.closeDiagnostic) return this.closeDiagnostic;
@@ -353,6 +370,7 @@ export class SpikePeer {
         if (!this.active) return;
         this.active = false;
         clearTimeout(this.timer);
+        clearTimeout(this.statsTimer);
         this.gatheringFailure?.();
         this.signal.removeEventListener("abort", this.close);
         this.peer.removeEventListener("connectionstatechange", this.onState);

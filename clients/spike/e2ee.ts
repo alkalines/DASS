@@ -16,6 +16,10 @@
 // This is not RFC 9605 SFrame: there is no SFrame key id, no SFrame
 // interoperability and no published test vector. Independent cryptographic
 // review and interop test vectors remain release gates, not completed steps.
+// VP8 additionally carries its original 3-byte delta / 10-byte keyframe header
+// followed by a DAS2 marker before this encrypted envelope. WebRTC parses that
+// header before decryption. The complete original frame remains encrypted inside;
+// the clear duplicate must match the authenticated plaintext before delivery.
 //
 // Media epoch keys reach approved viewers as E2EE-wrapped blobs relayed over
 // signaling (`key_relay`): AES-256-GCM under a key derived from static ECDH
@@ -24,6 +28,8 @@
 // number); a hostile server cannot substitute keys that have already been
 // pinned, and cannot add an invisible recipient without the publisher's client
 // distributing an epoch key to it.
+
+import { logDiagnostic } from "./diagnostics";
 
 export const E2EE_FRAME_OVERHEAD_BYTES = 28; // epoch(4) + counter(8) + tag(16)
 export const E2EE_MAX_FRAME_BYTES = 262_144;
@@ -221,6 +227,37 @@ export function defineReplayWindow(constants: FrameConstants) {
 
 export const ReplayWindow = defineReplayWindow(FRAME_CONSTANTS);
 
+/** VP8 depacketization precedes the receive transform and needs the original frame header. */
+export function defineVp8Envelope() {
+    const marker = new Uint8Array([0x44, 0x41, 0x53, 0x32]); // DAS2, no legacy video downgrade
+    const prefixLength = (bytes: Uint8Array) => (bytes[0] & 1) === 0 ? 10 : 3;
+    return {
+        wrap(frame: ArrayBuffer, encrypted: ArrayBuffer): ArrayBuffer {
+            const bytes = new Uint8Array(frame);
+            const length = prefixLength(bytes);
+            if (bytes.length < length) throw new Error("Truncated VP8 header.");
+            const wire = new Uint8Array(length + marker.length + encrypted.byteLength);
+            wire.set(bytes.subarray(0, length));
+            wire.set(marker, length);
+            wire.set(new Uint8Array(encrypted), length + marker.length);
+            return wire.buffer;
+        },
+        unwrap(wire: ArrayBuffer): { prefix: Uint8Array; encrypted: ArrayBuffer; } {
+            const bytes = new Uint8Array(wire);
+            const length = prefixLength(bytes);
+            if (bytes.length < length + marker.length || marker.some((byte, index) => bytes[length + index] !== byte)) {
+                throw new Error("Unsupported VP8 envelope.");
+            }
+            return { prefix: bytes.slice(0, length), encrypted: wire.slice(length + marker.length) };
+        },
+        verify(prefix: Uint8Array, frame: ArrayBuffer): boolean {
+            const bytes = new Uint8Array(frame);
+            return bytes.length >= prefix.length && prefix.length === prefixLength(bytes)
+                && prefix.every((byte, index) => bytes[index] === byte);
+        }
+    };
+}
+
 /** Fresh random 256-bit media epoch key. */
 export function generateEpochKey(): Uint8Array {
     const key = new Uint8Array(E2EE_KEY_BYTES);
@@ -348,10 +385,15 @@ async function transformFrame(event) {
     const transformer = event.transformer;
     const port = transformer.options && transformer.options.port;
     const role = transformer.options && transformer.options.role;
+    const video = transformer.options && transformer.options.kind === "video";
+    const vp8 = defineVp8Envelope();
+    const counters = { inputFrames: 0, outputFrames: 0, missingKeyFrames: 0, malformedFrames: 0, authenticationFailures: 0, replayDrops: 0, pipelineFailed: false };
     if (port) {
         port.onmessage = message => {
             const data = message.data || {};
-            if (data.type === "epoch") {
+            if (data.type === "stats") {
+                port.postMessage({ type: "stats", id: data.id, ...counters });
+            } else if (data.type === "epoch") {
                 // MessagePorts for audio/video share this worker. Serialize imports and
                 // treat byte-identical duplicate installs as no-ops, preserving counters
                 // and replay windows across every transform attached to the peer.
@@ -375,10 +417,9 @@ async function transformFrame(event) {
                         sendCounter = 0n;
                     }
                     port.postMessage({ type: "epochResult", id: data.id, epoch: data.epoch, status: "installed" });
-                }).catch(error => {
+                }).catch(() => {
                     // Fail closed and visibly: without a cipher every frame is
                     // dropped instead of leaving this peer in plaintext.
-                    console.error("DASS E2EE epoch installation failed.", error);
                     port.postMessage({ type: "epochResult", id: data.id, epoch: data.epoch, status: "rejected" });
                 });
             } else if (data.type === "dropBelow") {
@@ -386,8 +427,7 @@ async function transformFrame(event) {
                     if (Number.isInteger(data.epoch) && data.epoch >= 0) retiredBelow = Math.max(retiredBelow, data.epoch);
                     for (const epoch of codecs.keys()) if (epoch < data.epoch) codecs.delete(epoch);
                     port.postMessage({ type: "retirementResult", id: data.id, epoch: data.epoch });
-                }).catch(error => {
-                    console.error("DASS E2EE epoch retirement failed.", error);
+                }).catch(() => {
                     port.postMessage({ type: "retirementResult", id: data.id, epoch: data.epoch, status: "rejected" });
                 });
             }
@@ -396,30 +436,41 @@ async function transformFrame(event) {
     }
     transformer.readable.pipeThrough(new TransformStream({
         transform: async (frame, controller) => {
+            counters.inputFrames++;
             if (role === "encrypt") {
                 const entry = codecs.get(sendEpoch);
-                if (!entry) return; // fail closed: drop until an epoch key exists
+                if (!entry) { counters.missingKeyFrames++; return; } // fail closed
                 const counter = sendCounter++;
                 const encrypted = await entry.cipher.encrypt(sendEpoch, counter, frame.data);
-                frame.data = encrypted;
+                frame.data = video ? vp8.wrap(frame.data, encrypted) : encrypted;
                 controller.enqueue(frame);
+                counters.outputFrames++;
             } else {
-                const bytes = new Uint8Array(frame.data);
-                if (bytes.byteLength < ${FRAME_CONSTANTS.headerBytes + FRAME_CONSTANTS.tagBytes}) return;
-                const epoch = new DataView(frame.data, 0, ${FRAME_CONSTANTS.headerBytes}).getUint32(0, false);
+                let encrypted = frame.data;
+                let prefix;
+                if (video) {
+                    if (frame.data.byteLength > ${FRAME_CONSTANTS.maxFrameBytes + FRAME_CONSTANTS.frameOverheadBytes + 14}) { counters.malformedFrames++; return; }
+                    try { const envelope = vp8.unwrap(frame.data); prefix = envelope.prefix; encrypted = envelope.encrypted; }
+                    catch { counters.malformedFrames++; return; }
+                }
+                const bytes = new Uint8Array(encrypted);
+                if (bytes.byteLength < ${FRAME_CONSTANTS.headerBytes + FRAME_CONSTANTS.tagBytes}) { counters.malformedFrames++; return; }
+                const epoch = new DataView(encrypted, 0, ${FRAME_CONSTANTS.headerBytes}).getUint32(0, false);
                 const entry = codecs.get(epoch);
-                if (!entry) return; // unknown epoch: drop rather than emit plaintext
+                if (!entry) { counters.missingKeyFrames++; return; } // unknown epoch: fail closed
                 try {
-                    const result = await entry.cipher.decrypt(frame.data);
-                    if (!entry.replay.admit(result.counter)) return; // replayed frame
+                    const result = await entry.cipher.decrypt(encrypted);
+                    if (video && !vp8.verify(prefix, result.frame)) { counters.authenticationFailures++; return; }
+                    if (!entry.replay.admit(result.counter)) { counters.replayDrops++; return; }
                     frame.data = result.frame;
                     controller.enqueue(frame);
+                    counters.outputFrames++;
                 } catch {
-                    // Authentication failure or malformed frame: drop silently.
+                    counters.authenticationFailures++;
                 }
             }
         }
-    })).pipeTo(transformer.writable).catch(() => {});
+    })).pipeTo(transformer.writable).catch(() => { counters.pipelineFailed = true; });
 }
 
 self.onrtctransform = event => {
@@ -435,6 +486,7 @@ export function transformWorkerSource(): string {
         `const hkdfSha256 = (${hkdfSha256.toString()});`,
         `const MediaFrameCipher = (${defineMediaFrameCipher.toString()})(FRAME_CONSTANTS, hkdfSha256, concatBytes);`,
         `const ReplayWindow = (${defineReplayWindow.toString()})(FRAME_CONSTANTS);`,
+        `const defineVp8Envelope = (${defineVp8Envelope.toString()});`,
         workerBootstrap,
     ].join("\n");
 }
@@ -456,10 +508,28 @@ export class E2eeTransforms {
         this.worker = new Worker(URL.createObjectURL(new Blob([source], { type: "text/javascript" })));
     }
 
-    attach(target: RTCRtpSender | RTCRtpReceiver, role: "encrypt" | "decrypt") {
+    attach(target: RTCRtpSender | RTCRtpReceiver, role: "encrypt" | "decrypt", kind: string) {
         const channel = new MessageChannel();
         this.ports.push(channel.port1);
-        target.transform = new RTCRtpScriptTransform(this.worker, { role, port: channel.port2 }, [channel.port2]);
+        channel.port1.onmessage = event => {
+            const { data } = event;
+            if (data?.type === "stats") {
+                const details: Record<string, string | number | boolean> = { role: role === "encrypt" ? "publisher" : "viewer", kind };
+                for (const field of ["inputFrames", "outputFrames", "missingKeyFrames", "malformedFrames", "authenticationFailures", "replayDrops"]) {
+                    if (Number.isSafeInteger(data[field]) && data[field] >= 0) details[field] = data[field];
+                }
+                details.pipelineFailed = data.pipelineFailed === true;
+                logDiagnostic("E2EE frame stats", details, data.pipelineFailed === true);
+            } else if (data?.type === "epochResult") {
+                const status = ["installed", "stale", "rejected"].includes(data.status) ? data.status : "unknown";
+                logDiagnostic("E2EE key installation", { role: role === "encrypt" ? "publisher" : "viewer", kind, status }, status === "rejected");
+            }
+        };
+        target.transform = new RTCRtpScriptTransform(this.worker, { role, kind, port: channel.port2 }, [channel.port2]);
+    }
+
+    sampleDiagnostics() {
+        for (const port of this.ports) port.postMessage({ type: "stats" });
     }
 
     /** Distribute a fresh epoch to every attached transform. */
@@ -475,7 +545,7 @@ export class E2eeTransforms {
     }
 
     close() {
-        for (const port of this.ports) port.close();
+        for (const port of this.ports) { port.onmessage = null; port.close(); }
         this.ports.length = 0;
         this.worker.terminate();
     }

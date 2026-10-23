@@ -1,10 +1,35 @@
 import { memoryIdentityStore } from "./helpers/e2eeStore";
 import { expect, spyOn, test } from "bun:test";
-import { browserFailureCode } from "../../clients/spike/diagnostics";
+import { browserFailureCode, mediaDiagnostics } from "../../clients/spike/diagnostics";
 import { createEquibopCapture } from "../../plugins/dass/capture";
 import { PublishController } from "../../plugins/dass/publishing";
 import { DassSession } from "../../plugins/dass/session";
 import { SpikeSignalingError } from "../../clients/spike/signaling";
+
+test("media diagnostics join the active codec and expose only allowlisted counters", () => {
+    const report = new Map([
+        ["codec", { type: "codec", mimeType: "video/VP8", payloadType: 96, clockRate: 90000, sdpFmtpLine: "private-key" }],
+        ["video", { type: "inbound-rtp", kind: "video", codecId: "codec", bytesReceived: 12000, packetsReceived: 20,
+            framesDecoded: 0, packetsLost: -1, decoderImplementation: "private-source", trackIdentifier: "private-track", frameWidth: NaN }],
+        ["pair", { type: "candidate-pair", address: "private-address" }],
+        ["out", { type: "outbound-rtp", kind: "video", codecId: "codec", framesEncoded: 30 }]
+    ]) as unknown as RTCStatsReport;
+    expect(mediaDiagnostics(report, false)).toEqual([{
+        role: "viewer", kind: "video", codec: "video/vp8", payloadType: 96, clockRate: 90000,
+        bytesReceived: 12000, packetsReceived: 20, framesDecoded: 0, packetsLost: -1, decoderImplementation: "other"
+    }]);
+    expect(mediaDiagnostics(report, true)).toEqual([{
+        role: "publisher", kind: "video", codec: "video/vp8", payloadType: 96, clockRate: 90000, framesEncoded: 30
+    }]);
+    expect(JSON.stringify(mediaDiagnostics(report, false))).not.toContain("private");
+});
+
+test("media diagnostics bound rows and tolerate missing or unexpected codec data", () => {
+    const report = new Map(Array.from({ length: 10 }, (_, index) => [String(index), {
+        type: "inbound-rtp", mediaType: "video", codecId: "missing", framesDecoded: Infinity
+    }])) as unknown as RTCStatsReport;
+    expect(mediaDiagnostics(report, false)).toEqual(Array.from({ length: 4 }, () => ({ role: "viewer", kind: "video", codec: "unknown" })));
+});
 
 test("capture diagnostics omit raw browser error messages and stacks", async () => {
     const info = spyOn(console, "info").mockImplementation(() => {});

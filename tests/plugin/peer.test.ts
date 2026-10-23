@@ -73,6 +73,8 @@ class Peer extends EventTarget {
     localDescription?: { type: string; sdp: string; };
     remoteDescription?: { type: string; sdp: string; };
     closes = 0;
+    statsCalls = 0;
+    stats: () => Promise<RTCStatsReport> = async () => new Map() as unknown as RTCStatsReport;
     transceivers: Array<{ kind: string; direction: string; codecs: Array<{ mimeType: string; }>; }> = [];
     constructor(readonly configuration: unknown) { super(); Peer.instances.push(this); }
     addTransceiver(track: Track | string, options: { direction: string; }) {
@@ -84,6 +86,7 @@ class Peer extends EventTarget {
     async createOffer() { return Peer.offer ? Peer.offer() : { type: "offer", sdp: offerSdp }; }
     async setLocalDescription(description: { type: string; sdp: string; }) { this.localDescription = description; }
     async setRemoteDescription(description: { type: string; sdp: string; }) { this.remoteDescription = description; }
+    getStats() { this.statsCalls++; return this.stats(); }
     close() { this.closes++; this.connectionState = "closed"; }
     receive(track: Track) {
         const event = new Event("track");
@@ -204,6 +207,65 @@ test("viewer reuses directory authentication without a second credential login",
         connection.close();
         expect(Socket.instances[0].closes).toBe(1);
     } finally { connection.close(); signaling.close(); }
+}));
+
+test("media sampling logs viewer counters and clears its timer on close", async () => withBrowserDoubles(async () => {
+    const connection = await SpikePeer.prepare({ experimental: true, signal: new AbortController().signal });
+    const schedule = spyOn(globalThis, "setTimeout");
+    const clear = spyOn(globalThis, "clearTimeout");
+    const info = spyOn(console, "info").mockImplementation(() => {});
+    Peer.instances[0].stats = async () => new Map([["video", { type: "inbound-rtp", kind: "video", framesDecoded: 0 }]]) as unknown as RTCStatsReport;
+    try {
+        await connection.activate({ backendUrl: "https://dass.example", credential: "secret", roomId: "room", publisherId: "source", e2ee: TEST_E2EE });
+        expect(info).toHaveBeenCalledWith("[DASS] media stats", { role: "viewer", kind: "video", codec: "unknown", framesDecoded: 0 });
+        const index = schedule.mock.calls.findIndex(call => call[1] === 5_000);
+        expect(index).toBeGreaterThanOrEqual(0);
+        const timer = schedule.mock.results[index].value;
+        connection.close();
+        expect(clear).toHaveBeenCalledWith(timer);
+    } finally { connection.close(); schedule.mockRestore(); clear.mockRestore(); info.mockRestore(); }
+}));
+
+test("late media stats do not log or reschedule after teardown", async () => withBrowserDoubles(async () => {
+    const connection = await SpikePeer.prepare({ experimental: true, signal: new AbortController().signal });
+    let finish!: (report: RTCStatsReport) => void;
+    Peer.instances[0].stats = () => new Promise(resolve => { finish = resolve; });
+    const schedule = spyOn(globalThis, "setTimeout");
+    const info = spyOn(console, "info").mockImplementation(() => {});
+    try {
+        await connection.activate({ backendUrl: "https://dass.example", credential: "secret", roomId: "room", publisherId: "source", e2ee: TEST_E2EE });
+        connection.close();
+        info.mockClear();
+        schedule.mockClear();
+        finish(new Map() as unknown as RTCStatsReport);
+        await Promise.resolve();
+        expect(info).not.toHaveBeenCalled();
+        expect(schedule.mock.calls.some(call => call[1] === 5_000)).toBe(false);
+    } finally { connection.close(); schedule.mockRestore(); info.mockRestore(); }
+}));
+
+test("simultaneous publishing and watching own separate peers, streams and teardown", async () => withBrowserDoubles(async () => {
+    const source = capture();
+    const publisher = await SpikePeer.prepare({ experimental: true, signal: new AbortController().signal, capture: source.lease });
+    const viewer = await SpikePeer.prepare({ experimental: true, signal: new AbortController().signal });
+    try {
+        await Promise.all([
+            publisher.activate({ backendUrl: "https://dass.example", credential: "secret", roomId: "room", e2ee: TEST_E2EE }),
+            viewer.activate({ backendUrl: "https://dass.example", credential: "secret", roomId: "room", publisherId: "source", e2ee: TEST_E2EE })
+        ]);
+        const remoteVideo = new Track("video");
+        Peer.instances[1].receive(remoteVideo);
+        expect(viewer.receivedStream.getVideoTracks()).toEqual([remoteVideo]);
+        expect(publisher.receivedStream.getTracks()).toHaveLength(0);
+        expect(source.tracks[0].stops).toBe(0);
+        publisher.close();
+        expect(source.releases).toBe(1);
+        expect(viewer.closed.aborted).toBe(false);
+        expect(remoteVideo.stops).toBe(0);
+        expect(Peer.instances[1].closes).toBe(0);
+        viewer.close();
+        expect(remoteVideo.stops).toBe(1);
+    } finally { publisher.close(); viewer.close(); }
 }));
 
 test("an epoch key relayed before the approval reaches the viewer", async () => withBrowserDoubles(async () => {

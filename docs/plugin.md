@@ -1,5 +1,64 @@
 # DASS plugin
 
+## Black-video diagnostics
+
+The VP8 framing fix requires **both publisher and viewer** to rebuild/restart.
+Older video envelopes are rejected, with no plaintext or legacy fallback. The
+backend remains a packet forwarder and needs no change for this fix. DASS now
+preserves the 3-byte VP8 delta-frame header or 10-byte keyframe header ahead of a
+`DAS2` marker and the existing encrypted envelope. WebRTC's receive depacketizer
+reads frame type and keyframe dimensions before the decrypt transform; the old
+epoch-first layout let it mistake delta frames for keyframes. The clear header
+is compared against the fully authenticated decrypted original before emitting a
+frame. These header bytes expose codec metadata (including keyframe dimensions),
+not decoded screen pixels. Audio framing is unchanged. Synthetic-header and
+isolated-worker tests cover this behavior, not real VP8 playback or independent
+cryptographic review. Windows-to-Linux runtime acceptance remains pending.
+
+After rebuilding with `bun scripts/build-plugin.mjs` from the repository root and
+fully restarting the client, open DevTools Console, enable Info-level messages,
+and filter for `DASS`. Both clients should use the updated custom build. Active
+DASS peers log `media stats` every five seconds, labeled `publisher` or `viewer`.
+These contain allowlisted counters and the active RTP codec, not raw SDP,
+addresses, track identifiers, keys or media. Sampling stops with the peer.
+The same sampling requests `E2EE frame stats` for video/audio separately. These
+report input/output frame counts, missing-key drops, malformed-frame drops,
+authentication failures, replay drops and pipeline failure. `E2EE key installation`
+reports only installed/stale/rejected status, never keys or epoch identifiers.
+Increasing viewer E2EE output with zero decoded frames moves the investigation
+past authenticated decryption toward encoded-frame validity, codec metadata and
+decoding. Increasing authentication failures or missing-key drops points back to
+the encrypted framing/key path. RTP packets with zero transform input instead
+point toward depacketization or transform attachment; missing E2EE logs alone
+cannot establish whether the worker is running. No encryption fallback is added.
+Video preferences currently restrict DASS to VP8; audio uses Opus. These are not
+Discord's native stream codec settings.
+
+For black video, compare two successive samples on both clients:
+
+- Publisher `framesEncoded`/`bytesSent` not increasing: investigate capture,
+  encoder and encryption/key setup. Counters alone do not prove frames left the transform.
+- Viewer `bytesReceived`/`packetsReceived` not increasing: investigate the
+  publisher, backend forwarding and UDP path, even if ICE is connected.
+- Viewer receives packets but `framesDecoded` stays zero: investigate incomplete
+  frames/keyframes, E2EE/key delivery and decoder failures. This is not proof of
+  an unsupported codec. `pliCount`, `nackCount`, `packetsLost` and `framesReceived`
+  provide additional clues when the browser exposes them.
+- Viewer `framesDecoded` increases with valid dimensions but playback is black:
+  inspect the publisher's local preview and the receiving video element/rendering.
+  Decoding does not prove the captured content is non-black.
+
+`unknown` codec or absent counters mean the browser has not exposed that data;
+they are not zero values. Report two samples from each side, whether stopping
+local publishing changes remote playback, and the exact OS/client/build versions.
+Do not share raw WebRTC dumps without reviewing them for private data. These
+diagnostics have unit coverage; Windows-to-Linux simultaneous playback still
+requires real-client investigation. The simultaneous publisher/viewer unit test
+checks separate peer/stream ownership and teardown with browser doubles; it does
+not exercise real encoding, E2EE, backend forwarding or rendering.
+
+## Integration status
+
 For native screenshare UI continuation and the pipeline investigation, see
 [native-screenshare-handoff.md](native-screenshare-handoff.md).
 The follow-up [native presentation audit](native-presentation-audit.md) maps the
