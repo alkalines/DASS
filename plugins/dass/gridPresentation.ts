@@ -24,6 +24,10 @@ export function gridShares(channelId: string, currentChannelId: string | undefin
         seen.add(share.shareId);
         const ended = closed?.shareId === share.shareId && watching.closedShare?.roomId === channelId && watching.closedShare.shareId === share.shareId
             && directory.phase === "ready" && directory.directoryRoomId === channelId
+            // A cached empty directory from before watching is not evidence
+            // that the publisher ended when this viewer lost its connection.
+            && directory.directoryRequestedAtMs !== undefined && watching.disconnectedAtMs !== undefined
+            && directory.directoryRequestedAtMs > watching.disconnectedAtMs
             && !directory.shares.some(listed => listed.roomId === channelId && listed.shareId === share.shareId);
         result.push({ key: `dass-remote:${channelId}:${share.shareId}`, kind: "remote", share, ...(ended ? { ended: true } : {}) });
     }

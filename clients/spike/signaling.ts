@@ -5,7 +5,7 @@
  */
 
 import { logDiagnostic } from "./diagnostics";
-import { type ClientOperation, type CloseReason, type ErrorCode, LOGIN_DEADLINE_MS, MAX_MESSAGE_BYTES, PROTOCOL_VERSION, type ServerOperation } from "../../crates/protocol/generated/signaling";
+import { type ClientOperation, type CloseReason, type ErrorCode, LOGIN_DEADLINE_MS, MAX_MESSAGE_BYTES, PROTOCOL_VERSION, type ServerOperation, SESSION_LIFETIME_SECONDS } from "../../crates/protocol/generated/signaling";
 import { parseClientMessage, parseServerMessage } from "../../crates/protocol/generated/validate";
 
 export interface BrowserSocket extends EventTarget {
@@ -126,8 +126,8 @@ export class SpikeSignaling {
             if (authenticated.type !== "authenticated") throw new Error("DASS authentication failed.");
             const expiryMs = authenticated.expires_at_unix_seconds * 1000 - Date.now();
             if (expiryMs <= 0) throw new Error("DASS credential has expired.");
-            // The backend also enforces expiry and the ten-minute connection ceiling.
-            connection.expiryTimer = setTimeout(() => connection.close("expired"), Math.min(expiryMs, 600_000));
+            // Honor earlier server expiry, with the shared session ceiling as a bound.
+            connection.expiryTimer = setTimeout(() => connection.close("expired"), Math.min(expiryMs, SESSION_LIFETIME_SECONDS * 1000));
             logDiagnostic("signaling authenticated");
             return connection;
         } catch (error) {

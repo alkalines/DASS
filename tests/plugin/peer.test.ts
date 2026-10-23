@@ -191,6 +191,84 @@ function capture(audioSelected = false, audioPresent = audioSelected) {
     } };
 }
 
+test("a transient disconnect keeps capture alive and recovery cancels the non-renewable grace timer", async () => withBrowserDoubles(async () => {
+    const source = capture(true);
+    const connection = await SpikePeer.prepare({ experimental: true, signal: new AbortController().signal, capture: source.lease });
+    const schedule = spyOn(globalThis, "setTimeout");
+    const clear = spyOn(globalThis, "clearTimeout");
+    const peer = Peer.instances[0];
+    const state = (value: string) => { peer.connectionState = value; peer.dispatchEvent(new Event("connectionstatechange")); };
+    try {
+        state("connected");
+        state("disconnected");
+        state("disconnected");
+        expect(connection.closed.aborted).toBe(false);
+        expect(source.tracks.every(track => track.stops === 0)).toBe(true);
+        const timers = schedule.mock.calls.map((call, index) => ({ call, timer: schedule.mock.results[index].value }))
+            .filter(({ call }) => call[1] === 15_000);
+        expect(timers).toHaveLength(1);
+        state("connecting");
+        state("connected");
+        expect(clear).toHaveBeenCalledWith(timers[0].timer);
+        (timers[0].call[0] as () => void)();
+        expect(connection.closed.aborted).toBe(false);
+    } finally { connection.close(); schedule.mockRestore(); clear.mockRestore(); }
+}));
+
+test("a disconnect that never recovers closes after the grace period, even while checking again", async () => withBrowserDoubles(async () => {
+    const connection = await SpikePeer.prepare({ experimental: true, signal: new AbortController().signal });
+    const schedule = spyOn(globalThis, "setTimeout");
+    const peer = Peer.instances[0];
+    try {
+        peer.connectionState = "disconnected";
+        peer.dispatchEvent(new Event("connectionstatechange"));
+        const timer = schedule.mock.calls.find(call => call[1] === 15_000)!;
+        peer.connectionState = "connecting";
+        (timer[0] as () => void)();
+        expect(connection.closed.aborted).toBe(true);
+        expect(connection.closeMessage).toContain("disconnected_timeout");
+        expect(peer.closes).toBe(1);
+    } finally { connection.close(); schedule.mockRestore(); }
+}));
+
+test("terminal failure and explicit teardown do not wait for transient recovery", async () => withBrowserDoubles(async () => {
+    const connection = await SpikePeer.prepare({ experimental: true, signal: new AbortController().signal });
+    const schedule = spyOn(globalThis, "setTimeout");
+    const clear = spyOn(globalThis, "clearTimeout");
+    const peer = Peer.instances[0];
+    try {
+        peer.connectionState = "disconnected";
+        peer.dispatchEvent(new Event("connectionstatechange"));
+        const index = schedule.mock.calls.findIndex(call => call[1] === 15_000);
+        peer.connectionState = "failed";
+        peer.dispatchEvent(new Event("connectionstatechange"));
+        expect(connection.closed.aborted).toBe(true);
+        expect(connection.closeMessage).toContain("connection:failed");
+        expect(clear).toHaveBeenCalledWith(schedule.mock.results[index].value);
+        (schedule.mock.calls[index][0] as () => void)();
+        expect(peer.closes).toBe(1);
+    } finally { connection.close(); schedule.mockRestore(); clear.mockRestore(); }
+}));
+
+test("stop during a transient disconnect clears the timer and prevents late teardown", async () => withBrowserDoubles(async () => {
+    const abort = new AbortController();
+    const connection = await SpikePeer.prepare({ experimental: true, signal: abort.signal });
+    const schedule = spyOn(globalThis, "setTimeout");
+    const clear = spyOn(globalThis, "clearTimeout");
+    const peer = Peer.instances[0];
+    try {
+        peer.connectionState = "disconnected";
+        peer.dispatchEvent(new Event("connectionstatechange"));
+        const index = schedule.mock.calls.findIndex(call => call[1] === 15_000);
+        abort.abort();
+        expect(clear).toHaveBeenCalledWith(schedule.mock.results[index].value);
+        (schedule.mock.calls[index][0] as () => void)();
+        expect(connection.closed.aborted).toBe(true);
+        expect(connection.closeMessage).not.toContain("disconnected_timeout");
+        expect(peer.closes).toBe(1);
+    } finally { connection.close(); schedule.mockRestore(); clear.mockRestore(); }
+}));
+
 test("viewer reuses directory authentication without a second credential login", async () => withBrowserDoubles(async () => {
     const abort = new AbortController();
     const signaling = await SpikeSignaling.connect({ experimental: true, backendUrl: "https://dass.example", credential: "separate_secret", signal: abort.signal });

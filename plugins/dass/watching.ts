@@ -31,6 +31,9 @@ export interface WatchStatus {
     closedShare?: DassShare;
     failedShare?: DassShare;
     directoryRoomId?: string;
+    /** Start of the successful directory query, not when its response arrived. */
+    directoryRequestedAtMs?: number;
+    disconnectedAtMs?: number;
     /** E2EE trust state of the publisher this viewer is watching. */
     publisherTrust?: string;
     /** Safety number both participants compare over an independent channel. */
@@ -111,7 +114,8 @@ export class WatchController implements ScreenshareTransport {
         // The pinned identity is a long-lived local anchor and survives the
         // stream; only the stream-scoped trust label is cleared.
         this.publisherTrust = undefined;
-        this.update({ phase, message, shares: [], candidates: [], closedShare, failedShare });
+        this.update({ phase, message, shares: [], candidates: [], closedShare, failedShare,
+            disconnectedAtMs: closedShare || failedShare ? Date.now() : undefined });
     }
 
     stop() {
@@ -183,13 +187,14 @@ export class WatchController implements ScreenshareTransport {
         if (!this.current(epoch) || !this.roomId || !this.signaling || this.busy || this.status.stream) return;
         clearTimeout(this.poll);
         this.busy = true;
+        const directoryRequestedAtMs = Date.now();
         const result = await this.routing.detect(this.roomId);
         if (!this.current(epoch)) return;
         this.busy = false;
         if (!result.ok) { this.unexpectedClose("failed", result.message); return; }
         this.update({ ...this.status, phase: "ready", message: "Authorized DASS shares only. Media follows the backend's LAN admission policy; no Discord fallback.",
-            directoryRoomId: this.roomId, shares: result.value });
-        // At most 120 directory requests in the transport's ten-minute lifetime.
+            directoryRoomId: this.roomId, directoryRequestedAtMs, shares: result.value });
+        // Pace directory requests independently of the session lifetime.
         this.poll = setTimeout(() => void this.refresh(), 5_000);
     }
 

@@ -110,6 +110,7 @@ export class SpikePeer {
     private offer?: string;
     private timer?: ReturnType<typeof setTimeout>;
     private statsTimer?: ReturnType<typeof setTimeout>;
+    private disconnectTimer?: ReturnType<typeof setTimeout>;
     private gatheringFailure?: () => void;
     private readonly stopController = new AbortController();
     private e2eeTransforms?: E2eeTransforms;
@@ -349,9 +350,21 @@ export class SpikePeer {
     private readonly onSignalingClosed = () => this.closeWithDiagnostic(this.activationFailure(this.signaling?.closed.reason));
 
     private readonly onState = () => {
+        if (!this.active) return;
         logDiagnostic("peer connection state", { connection: this.peer.connectionState, ice: this.peer.iceConnectionState, stage: this.activationStage });
-        if (this.peer.connectionState === "connected") clearTimeout(this.timer);
-        else if (["failed", "closed", "disconnected"].includes(this.peer.connectionState)) {
+        if (this.peer.connectionState === "connected") {
+            clearTimeout(this.timer);
+            clearTimeout(this.disconnectTimer);
+            this.disconnectTimer = undefined;
+        } else if (this.peer.connectionState === "disconnected") {
+            // ICE can recover without renegotiation. Repeated state events must
+            // not extend the grace period, and setup retains its own deadline.
+            this.disconnectTimer ??= setTimeout(() => {
+                if (this.active && this.peer.connectionState !== "connected") {
+                    this.closeWithDiagnostic("Media stopped [connection:disconnected_timeout]. The UDP connection did not recover within 15 seconds. Try watching again.");
+                }
+            }, 15_000);
+        } else if (["failed", "closed"].includes(this.peer.connectionState)) {
             this.closeWithDiagnostic(`Media stopped [connection:${this.peer.connectionState}]. Check the UDP path and peer lifecycle.`);
         }
     };
@@ -371,6 +384,7 @@ export class SpikePeer {
         this.active = false;
         clearTimeout(this.timer);
         clearTimeout(this.statsTimer);
+        clearTimeout(this.disconnectTimer);
         this.gatheringFailure?.();
         this.signal.removeEventListener("abort", this.close);
         this.peer.removeEventListener("connectionstatechange", this.onState);

@@ -13,12 +13,12 @@ import type { WatchStatus } from "../../plugins/dass/watching";
 
 test("ended view preserves focused selection until Close Stream removes the retained tile", () => {
     const share = { roomId: "call", shareId: "publisher", displayName: "Publisher" };
-    const empty: WatchStatus = { phase: "ready", message: "", shares: [], candidates: [], directoryRoomId: "call" };
+    const empty: WatchStatus = { phase: "ready", message: "", shares: [], candidates: [], directoryRoomId: "call", directoryRequestedAtMs: 101 };
     const watching: WatchStatus = { ...empty, phase: "watching", watchingShare: share };
     const presentation = new CallPresentation();
     const live = projectParticipants(gridShares("call", "call", true, false, empty, watching));
     presentation.select("call", live[0], live);
-    const ended = projectParticipants(gridShares("call", "call", true, false, empty, { ...empty, phase: "disconnected", closedShare: share }));
+    const ended = projectParticipants(gridShares("call", "call", true, false, empty, { ...empty, phase: "disconnected", closedShare: share, disconnectedAtMs: 100 }));
     presentation.reconcile("call", ended);
     expect(presentation.getSelected("call", ended)?.id).toBe(live[0].id);
     expect(ended[0].dassShare).toHaveProperty("ended", true);

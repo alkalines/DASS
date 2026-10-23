@@ -55,7 +55,7 @@ The intended connection sequence is:
    with a separate DASS credential in the body, never in the URL. Authentication
    is service-wide: there are no room grants, roles, scheduled expirations,
    revocation flags or login IP allowlists. Sessions last at most
-   `SESSION_LIFETIME_SECONDS` (600 s) from authentication; account removal or
+   `SESSION_LIFETIME_SECONDS` (86,400 s / 24 hours) from authentication; account removal or
    password reset is the only containment, and any policy reload closes all
    sessions.
 2. After `authenticated`, request `join` with an opaque room ID and explicit

@@ -44,7 +44,8 @@ const MAX_DATAGRAM_BYTES: usize = 2_048;
 const MAX_PENDING_DATAGRAMS: usize = 32;
 const MAX_BUDGET_DROPS: usize = 64;
 const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
-const MAX_LIFETIME: Duration = Duration::from_secs(600);
+const MAX_LIFETIME: Duration =
+    Duration::from_secs(dass_protocol::signaling::SESSION_LIFETIME_SECONDS as u64);
 
 /// Bounded media budgets. One account or one source cannot monopolize the
 /// service: every media session has its own packet, byte and queue limits and
@@ -287,7 +288,7 @@ impl MediaSetupFailure {
     }
 }
 
-/// One second of byte budget for a single media session.
+/// One second of budget (bytes or dropped packets) for a single media session.
 #[derive(Debug)]
 struct ByteWindow {
     start: Instant,
@@ -363,7 +364,7 @@ pub struct MediaPeer {
     ingress: ByteWindow,
     egress: ByteWindow,
     counters: MediaCounters,
-    budget_drops: usize,
+    budget_drops: ByteWindow,
     candidates: usize,
     offered: bool,
     connected: bool,
@@ -440,7 +441,7 @@ impl MediaPeer {
             ingress: ByteWindow::new(),
             egress: ByteWindow::new(),
             counters: MediaCounters::new(),
-            budget_drops: 0,
+            budget_drops: ByteWindow::new(),
             candidates: 0,
             offered: false,
             connected: false,
@@ -777,8 +778,8 @@ impl MediaPeer {
             packet.payload.len(),
             self.limits.max_egress_bytes_per_second,
         ) {
-            self.budget_drops += 1;
-            if self.budget_drops > MAX_BUDGET_DROPS {
+            if !self.budget_drops.charge(1, MAX_BUDGET_DROPS) {
+                tracing::warn!(code = "egress_budget", "media transport failed");
                 return Err(MediaFailure);
             }
             return Ok(());
@@ -849,8 +850,8 @@ impl MediaPeer {
             .ingress
             .charge(bytes.len(), self.limits.max_ingress_bytes_per_second)
         {
-            self.budget_drops += 1;
-            if self.budget_drops > MAX_BUDGET_DROPS {
+            if !self.budget_drops.charge(1, MAX_BUDGET_DROPS) {
+                tracing::warn!(code = "ingress_budget", "media transport failed");
                 return Err(MediaFailure);
             }
             return Ok(());
@@ -997,6 +998,23 @@ fn translated_sequence(source: u64, origin: &mut Option<u64>) -> Option<u64> {
 mod tests {
     use super::*;
     use tokio::net::UdpSocket;
+
+    #[test]
+    fn isolated_budget_drops_do_not_accumulate_for_the_entire_session() {
+        let mut drops = ByteWindow::new();
+        for _ in 0..3 {
+            for _ in 0..MAX_BUDGET_DROPS {
+                assert!(drops.charge(1, MAX_BUDGET_DROPS));
+            }
+            assert!(!drops.charge(1, MAX_BUDGET_DROPS));
+            drops.start = Instant::now() - Duration::from_secs(2);
+        }
+    }
+
+    #[test]
+    fn media_lifetime_matches_the_shared_long_session_limit() {
+        assert_eq!(MAX_LIFETIME, Duration::from_secs(86_400));
+    }
 
     #[test]
     fn forwarding_preserves_sequence_reordering_loss_and_rollover() {

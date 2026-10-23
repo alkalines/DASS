@@ -49,13 +49,15 @@ test("leftmost stream tiles do not shift native participant keys", () => {
 });
 
 test("a previously watched share ends only after matching authenticated directory confirmation", () => {
-    const closed: WatchStatus = { ...idle, phase: "disconnected", closedShare: share };
-    const confirmed: WatchStatus = { ...directory, directoryRoomId: "call", shares: [] };
+    const closed: WatchStatus = { ...idle, phase: "disconnected", closedShare: share, disconnectedAtMs: 100 };
+    const confirmed: WatchStatus = { ...directory, directoryRoomId: "call", shares: [], directoryRequestedAtMs: 101 };
     const expected = [{ key: "dass-remote:call:publisher", kind: "remote", share, ended: true }];
     expect(gridShares("call", "call", true, false, confirmed, closed)).toEqual(expected);
     for (const unconfirmed of [idle, { ...confirmed, phase: "failed" as const },
         { ...confirmed, phase: "unauthorized" as const }, { ...confirmed, directoryRoomId: "other" },
-        { ...confirmed, directoryRoomId: undefined }, { ...confirmed, shares: [share] }]) {
+        { ...confirmed, directoryRoomId: undefined }, { ...confirmed, shares: [share] },
+        { ...confirmed, directoryRequestedAtMs: undefined }, { ...confirmed, directoryRequestedAtMs: 99 },
+        { ...confirmed, directoryRequestedAtMs: 100 }]) {
         const tiles = gridShares("call", "call", true, false, unconfirmed, closed);
         expect(tiles).toHaveLength(1);
         expect(tiles[0]).not.toHaveProperty("ended");

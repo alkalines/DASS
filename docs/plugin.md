@@ -1,5 +1,34 @@
 # DASS plugin
 
+## Unexpected stream disconnects
+
+Discord Alternative ScreenShare (DASS) now uses a shared 24-hour authenticated
+session limit instead of the experimental ten-minute limit. RTC uses the same
+ceiling; TCP allows an additional 60 seconds for authentication and graceful
+closure. This is still a bounded session, not indefinite sharing. A publisher
+with no viewers is not stopped for that reason alone. Setup deadlines, the
+30-second backend accepted-packet inactivity timeout, capacity limits and
+policy-reload revocation remain enforced.
+
+The client now gives transient WebRTC `disconnected` states 15 seconds to recover
+without discarding capture, the receiver or E2EE state. Recovery cancels that
+timer. Terminal failure, signaling closure, explicit stop and context exit still
+tear down immediately; this does not reconnect a failed WSS session or restart
+ICE. Backend byte-budget drops are counted per second rather than accumulated
+over the entire stream; repeated overload within a window still closes media.
+The ended screen requires a successful directory query started after the viewing
+connection closed, so a stale empty directory cannot mislabel a dropped viewer
+connection as an ended publisher.
+
+Rebuild both clients with `bun scripts/build-plugin.mjs` from the repository root
+and restart them. The lifetime and media-budget fixes also require a rebuilt
+backend. `docker compose build backend` runs formatting, Clippy and locked Rust
+tests; only after those pass, restart with `docker compose up -d backend`. That
+restart ends existing shares. Client unit tests and the Equicord build passed;
+Rust validation is blocked by Docker socket permissions in the current workspace.
+Real-client sharing beyond ten minutes, brief network loss/recovery, no-viewer
+publishing and sustained-overload cleanup still require runtime acceptance.
+
 ## Black-video diagnostics
 
 The VP8 framing fix requires **both publisher and viewer** to rebuild/restart.

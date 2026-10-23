@@ -30,7 +30,9 @@ use tokio_rustls::{TlsAcceptor, server::TlsStream};
 pub const MAX_TCP_CONNECTIONS: usize = 128;
 const MAX_PENDING_HANDSHAKES: usize = 16;
 const INITIAL_IO_TIMEOUT: Duration = Duration::from_secs(5);
-const MAX_CONNECTION_LIFETIME: Duration = Duration::from_secs(600);
+// Allow authentication and a graceful signaling close before the socket ceiling.
+const MAX_CONNECTION_LIFETIME: Duration =
+    Duration::from_secs(dass_protocol::signaling::SESSION_LIFETIME_SECONDS as u64 + 60);
 /// A certificate that expires within this window is reported at startup so the
 /// operator can renew it before it breaks the deployment.
 const CERTIFICATE_RENEWAL_WINDOW: Duration = Duration::from_secs(14 * 24 * 60 * 60);
@@ -284,6 +286,11 @@ mod tests {
     use super::*;
     use axum::{Router, extract::ConnectInfo, routing::get};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[test]
+    fn socket_ceiling_allows_a_full_authenticated_session_and_close() {
+        assert_eq!(MAX_CONNECTION_LIFETIME, Duration::from_secs(86_460));
+    }
 
     #[tokio::test]
     async fn connect_info_uses_tcp_peer_not_forwarding_headers() {

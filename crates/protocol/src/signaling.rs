@@ -17,7 +17,8 @@ pub const MAX_LOGIN_PASSWORD_BYTES: usize = 512;
 /// Pending view requests expire without a publisher decision; offline or silent
 /// publishers never admit a viewer.
 pub const VIEW_REQUEST_TIMEOUT_SECONDS: u32 = 60;
-pub const SESSION_LIFETIME_SECONDS: u32 = 600;
+// Keep sessions bounded without interrupting ordinary long-running shares.
+pub const SESSION_LIFETIME_SECONDS: u32 = 86_400;
 /// ECDH P-256 public identity keys and wrapped media-epoch keys cross the wire
 /// as base64url text; the backend treats them as opaque bounded fields.
 pub const MAX_IDENTITY_KEY_CHARS: usize = 256;

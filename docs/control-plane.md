@@ -243,7 +243,7 @@ No GUI login/capture flow is wired to this server yet.
   publisher, 4 per viewer account, 16 unused approvals per publisher, 60 s
   request lifetime, 30 s deny cooldown).
 - TLS handshake and initial HTTP I/O deadlines are five seconds each. An entire
-  connection I/O has a ten-minute maximum lifetime after TLS/plaintext acceptance
+  connection I/O has a 24-hour-plus-60-second maximum lifetime after TLS/plaintext acceptance
   (in addition to the bounded TLS handshake). HTTP handler
   timeouts/body limits also wrap upgrade requests. Subsequent keepalive header
   reads share the lifetime ceiling, not a separate per-header five-second timer.

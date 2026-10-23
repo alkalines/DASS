@@ -1,5 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
 import { BrowserSocket, isAuthenticationRejected, signalingFailureMessage, signalingUrl, SpikeSignaling, SpikeSignalingError, type KeyRelay, type ViewerPresence } from "../../clients/spike/signaling";
+import { SESSION_LIFETIME_SECONDS } from "../../crates/protocol/generated/signaling";
 
 class Socket extends EventTarget implements BrowserSocket {
     protocol = "dass.v1";
@@ -23,6 +24,41 @@ async function connect(socket: Socket, signal = new AbortController().signal) {
     socket.reply({ type: "authenticated", expires_at_unix_seconds: Math.floor(Date.now() / 1000) + 60 });
     return pending;
 }
+
+test("long authenticated sessions are not locally truncated to the old ten-minute ceiling", async () => {
+    const socket = new Socket();
+    const schedule = spyOn(globalThis, "setTimeout");
+    let connection: SpikeSignaling | undefined;
+    try {
+        const pending = SpikeSignaling.connect({ experimental: true, backendUrl: "https://dass.example", credential: "test-dass-only",
+            signal: new AbortController().signal, createSocket: () => socket });
+        socket.open();
+        await Promise.resolve();
+        socket.reply({ type: "authenticated", expires_at_unix_seconds: Math.floor(Date.now() / 1000) + SESSION_LIFETIME_SECONDS });
+        connection = await pending;
+        expect(SESSION_LIFETIME_SECONDS).toBe(86_400);
+        const expiry = schedule.mock.calls.at(-1)!;
+        expect(expiry[1]).toBeGreaterThan(86_398_000);
+        expect(expiry[1]).toBeLessThanOrEqual(86_400_000);
+        expect(connection.closed.aborted).toBe(false);
+    } finally { connection?.close(); schedule.mockRestore(); }
+});
+
+test("an earlier server expiry is still enforced and releases the socket", async () => {
+    const schedule = spyOn(globalThis, "setTimeout");
+    const socket = new Socket();
+    let connection: SpikeSignaling | undefined;
+    try {
+        connection = await connect(socket);
+        const expiry = schedule.mock.calls.at(-1)!;
+        expect(expiry[1]).toBeGreaterThan(58_000);
+        expect(expiry[1]).toBeLessThanOrEqual(60_000);
+        (expiry[0] as () => void)();
+        expect(connection.closed.aborted).toBe(true);
+        expect(connection.closed.reason.code).toBe("expired");
+        expect(socket.closeCount).toBe(1);
+    } finally { connection?.close(); schedule.mockRestore(); }
+});
 
 test("signaling origin supports separate machines without URL secrets or insecure transport", () => {
     expect(signalingUrl("https://192.168.1.5:8080")).toBe("wss://192.168.1.5:8080/v1/ws");

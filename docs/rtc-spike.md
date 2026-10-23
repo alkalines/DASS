@@ -167,7 +167,7 @@ actual candidates and arrange exact allowlisting without logging full SDP.
 - Small explicit send/reordering buffers; RTP mode avoids encoded-frame
   reassembly. No application media cache, decoding, transcoding or recording.
 - 15-second room-to-DTLS setup deadline; 30-second accepted-input inactivity
-  timeout; ten-minute maximum RTC lifetime, plus the 600-second session lifetime
+  timeout; 24-hour maximum RTC lifetime, plus the shared 24-hour session lifetime
   and policy-reload containment.
 - Drop-owned socket/RTC/admission cleanup on leave, WSS close, auth failure,
   shutdown/reload, setup failure and overload. No additional client processes.
