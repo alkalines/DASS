@@ -1,12 +1,12 @@
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { adaptEquicordManifest } from "./equicordManifest.mjs";
 import { parseVersion } from "./release-plan.mjs";
 
-const EQUICORD_REVISION = "e0e85c8d4f6dc73aac9368cf3f4b2200eac4d4b4";
+const EQUICORD_REVISION = "17068a94859be00cde5432dfe72823231347899b";
 const rootDirectory = fileURLToPath(new URL("../", import.meta.url));
 const vendorDirectory = join(rootDirectory, "vendor/Equicord");
 const checkoutDirectory = join(rootDirectory, "build/Equicord");
@@ -27,8 +27,6 @@ function digest(contents) {
 }
 
 try {
-    //const bunVersion = run("bun", ["--version"], rootDirectory, true);
-    //if (bunVersion !== "1.4.2") throw new Error(`This build is validated with Bun 1.4.2, not ${bunVersion}.`);
     if (Number(run("node", ["--version"], rootDirectory, true).slice(1).split(".")[0]) < 22) {
         throw new Error("Equicord requires Node >=22 for its build script.");
     }
@@ -39,13 +37,15 @@ try {
     if (run("git", ["rev-parse", "HEAD"], vendorDirectory, true) !== EQUICORD_REVISION) {
         throw new Error("vendor/Equicord has a different revision. The build requires the reviewed Equicord pin.");
     }
+    if (existsSync(checkoutDirectory) && run("git", ["rev-parse", "HEAD"], checkoutDirectory, true) !== EQUICORD_REVISION) {
+        const backupDirectory = join(mkdtempSync(join(rootDirectory, "build/Equicord-backup-")), "Equicord");
+        renameSync(checkoutDirectory, backupDirectory);
+        console.log(`Preserved the previous Equicord checkout in ${backupDirectory}`);
+    }
     if (!existsSync(checkoutDirectory)) {
         mkdirSync(join(rootDirectory, "build"), { recursive: true });
         run("git", ["clone", "--no-hardlinks", "--no-checkout", vendorDirectory, checkoutDirectory], rootDirectory);
         run("git", ["switch", "--detach", EQUICORD_REVISION]);
-    }
-    if (run("git", ["rev-parse", "HEAD"], checkoutDirectory, true) !== EQUICORD_REVISION) {
-        throw new Error("build/Equicord has a different revision. Use a dedicated pinned checkout; no files were reset.");
     }
     const changedFiles = run("git", ["diff", "--name-only", "HEAD"], checkoutDirectory, true);
     if (changedFiles.split("\n").some(path => path && path !== "package.json")) {

@@ -7,6 +7,12 @@ import { adaptEquicordManifest } from "../../scripts/equicordManifest.mjs";
 const pinnedManifest = await readFile(new URL("../../vendor/Equicord/package.json", import.meta.url), "utf8");
 
 describe("Equicord adapter manifest", () => {
+    it("builds the checked-out upstream revision", () => {
+        const revision = execFileSync("git", ["-C", "vendor/Equicord", "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+        const buildAdapter = readFileSync(new URL("../../scripts/build-plugin.mjs", import.meta.url), "utf8");
+        expect(buildAdapter).toContain(`const EQUICORD_REVISION = "${revision}";`);
+    });
+
     it("keeps only target-build dependencies and patched advisory versions", () => {
         const manifest = JSON.parse(adaptEquicordManifest(pinnedManifest));
 
