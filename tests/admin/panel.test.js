@@ -101,6 +101,28 @@ describe("DASS control panel", () => {
         await pause.listeners.click();
         expect(pause.textContent).toBe("Resume");
     });
+    test("copy last 3 minutes takes at most 100 recent entries of the selected source", async () => {
+        const now = Date.now();
+        const entries = [
+            { source: "client", client_id: "client_a", event: "stale", at_unix_ms: now - 200_000, received_at_unix_ms: now - 200_000 },
+            ...Array.from({ length: 105 }, (_, index) => ({ source: "client", client_id: "client_a", event: `recent_${index}`,
+                at_unix_ms: now - 10_000 + index, received_at_unix_ms: now - 10_000 + index })),
+            { source: "server", event: "backend recent", at_unix_ms: now, received_at_unix_ms: now }
+        ];
+        const fixture = await setup("logs", { logs: { entries, capacity: 512 } });
+        const source = descendants(fixture.content).find(element => element.tag === "select");
+        source.value = "client_a";
+        source.listeners.change();
+        let copied;
+        fixture.context.navigator.clipboard.writeText = async value => { copied = value; };
+        const copy = descendants(fixture.content).find(element => element.textContent === "Copy last 3 minutes (max 100)");
+        await copy.listeners.click();
+        const events = copied.split("\n").map(line => JSON.parse(line).event);
+        expect(events).toHaveLength(100);
+        expect(events[0]).toBe("recent_5");
+        expect(events.at(-1)).toBe("recent_104");
+        expect(fixture.message.textContent).toBe("Copied 100 log entries from the last 3 minutes.");
+    });
     test("default administrator is shown only the required password-change form", async () => {
         const fixture = await setup("administrators", { administrators: {
             current_username: "admin", must_change_password: true,

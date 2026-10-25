@@ -3,8 +3,17 @@
 Discord Alternative ScreenShare (DASS) provides a small **Logs** page at
 `/admin/logs`, protected by the existing administrator login. It shows JSON lines
 from the Rust backend and connected DASS clients. Filter by server/client, pause
-refreshing while investigating, then use **Copy JSON lines** to share the selected
-entries. Clipboard failures select the text for manual copying.
+refreshing while investigating, then use **Copy last 3 minutes (max 100)** to copy
+the newest entries of the selected source received in the last three minutes, or
+**Copy JSON lines** to copy everything shown. The window compares backend receipt
+time (not client clocks) with this browser's clock. Clipboard failures select the text for manual
+copying; the three-minute copy also pauses refreshing so the selection stays.
+
+Clients keep their own copy: **Copy recent DASS logs** in the DASS plugin settings
+copies up to 100 local events from the last three minutes as JSON lines. It
+includes events that never reached the backend (pre-login failures, dropped
+connections, reconnect attempts) and the local failure text, still without
+credentials, keys, SDP, addresses or media. The local buffer is memory only.
 
 - The latest 512 entries are held in memory, oldest first. Restarting the backend
   clears them; there is no database history or file-log ingestion.

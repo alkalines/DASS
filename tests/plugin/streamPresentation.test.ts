@@ -58,7 +58,6 @@ test("hiding or unfocusing pauses local playback only when the selected preferen
     expect(source).toContain("paused || previewPaused ? undefined : stream");
     expect(source).not.toContain("track.enabled");
     expect(source).not.toContain("track.stop()");
-    expect(source).toContain("stop={local ? runtime.stopPublishing : receiving || closed ? runtime.stopWatching : undefined}");
 });
 
 test("publisher name uses the current display name without changing remote DASS identities", () => {

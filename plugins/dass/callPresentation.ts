@@ -31,10 +31,11 @@ export function sliderPlaybackVolume(sliderPercent: number) {
     return (Math.max(0, Math.min(100, sliderPercent)) / 100) ** 2.8;
 }
 
-export function isFocusedDassWatch(participant: unknown, status: WatchStatus, channelId: string) {
-    return isDassParticipant(participant) && participant.dassShare.kind === "remote"
-        && participant.dassShare.share.roomId === channelId && status.phase === "watching" && !!status.stream
-        && status.watchingShare?.roomId === channelId && status.watchingShare.shareId === participant.dassShare.share.shareId;
+export function isFocusedDassWatch(participant: unknown, watches: readonly WatchStatus[], channelId: string) {
+    if (!isDassParticipant(participant) || participant.dassShare.kind !== "remote" || participant.dassShare.share.roomId !== channelId) return false;
+    const { shareId } = participant.dassShare.share;
+    return watches.some(status => status.phase === "watching" && !!status.stream
+        && status.watchingShare?.roomId === channelId && status.watchingShare.shareId === shareId);
 }
 
 export class CallPresentation {

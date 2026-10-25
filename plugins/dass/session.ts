@@ -28,6 +28,9 @@ export class DassSession {
     private idleConnection?: SpikeSignaling;
     private leasedConnections = new Set<SpikeSignaling>();
     private lastReleaseAtMs = -Infinity;
+    /** Tail of this client's login chain and its length; see `authenticateAfterRelease`. */
+    private loginQueue: Promise<void> = Promise.resolve();
+    private pendingLogins = 0;
     private epoch = 0;
     private active = false;
     private phase: "idle" | "loading" | "ready" | "failed" = "idle";
@@ -180,6 +183,23 @@ export class DassSession {
     }
 
     private async authenticateAfterRelease(options: Parameters<typeof SpikeSignaling.connect>[0]) {
+        // One login at a time per client: the backend verifies passwords in a
+        // small bounded pool with per-source throttles, so several watches
+        // opening together must queue instead of racing into `overloaded`.
+        const previous = this.pendingLogins ? this.loginQueue : undefined;
+        const { promise, resolve } = Promise.withResolvers<void>();
+        this.loginQueue = promise;
+        this.pendingLogins++;
+        try {
+            if (previous) await previous;
+            return await this.authenticateWithReplayRetry(options);
+        } finally {
+            this.pendingLogins--;
+            resolve();
+        }
+    }
+
+    private async authenticateWithReplayRetry(options: Parameters<typeof SpikeSignaling.connect>[0]) {
         // A local close is synchronous, but the backend releases its bounded
         // account connection slot asynchronously. Retry only this scoped race,
         // never bad credentials, network failures or arbitrary replay denials.

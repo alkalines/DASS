@@ -51,17 +51,24 @@ audio/video. There is no source switching, simulcast, renegotiation or ICE resta
 
 ## Bounds and failure behavior
 
-- A 32-packet queue with a 2048-byte payload cap; no packets are enqueued until
-  the subscriber's server-side DTLS connection is ready.
-- Queue overflow removes the slow subscriber route. Its owner closes on the
-  next tick rather than delaying the publisher or growing the queue.
+- A 512-packet per-viewer queue with a 2048-byte payload cap; no packets are
+  enqueued until the subscriber's server-side DTLS connection is ready. The size
+  absorbs one screen-share keyframe burst.
+- A full queue drops that packet for the slow viewer only and coalesces a
+  keyframe request to the publisher; the viewer keeps its route. A closed queue
+  removes the route. The publisher is never delayed and no queue grows.
 - Publisher teardown invalidates the route and queued packets; subscriber
   teardown removes its sender. Both socket and RTC admission remain drop-owned.
-- Subscriber forwarding processes at most 32 packets per owner tick, stopping
-  the batch after 50 ms; an individual drain has a 50-ms UDP-send deadline.
+- Subscriber forwarding drains up to one full queue per owner tick, stopping the
+  batch after 50 ms. Outgoing datagrams are written in batches of 32, each batch
+  with a 50-ms UDP-send deadline; a larger burst is several batches, not a failure.
 - A capacity-one feedback queue coalesces keyframe requests. Publisher PLI is
-  limited to one per 500 ms, with a one-second periodic request while a ready
-  viewer exists. This is a feasibility mechanism, not a production feedback loop.
+  limited to one per 500 ms (a request inside that window stays pending), with a
+  three-second safety-net request while a ready viewer exists. This is a
+  feasibility mechanism, not a production feedback loop.
+- Packet and byte budgets drop excess media with at most one warning per second;
+  they never end a session, and ICE checks are exempt. ICE `Disconnected` ends the
+  session only after 15 seconds without recovery.
 - Audio/video send buffers are explicitly limited to 32 packets each. This
   increment does not implement application retransmission caches or NACK repair;
   forwarded writes are marked non-nackable. Library pacing is retained, not a
@@ -85,7 +92,7 @@ transport tests below passed. The agent records the user's container evidence;
 it did not run host Cargo or independently run Docker.
 
 - Hub tests cover exact room/publisher binding, exclusive roles, bounded queues,
-  keyframe coalescing, slow-viewer removal, replacement and source teardown.
+  keyframe coalescing, slow-viewer isolation, replacement and source teardown.
 - `two_dtls_peers_forward_opus_and_vp8_payloads_without_transcoding` negotiates
   independent publisher/subscriber UDP DTLS transports, sends opaque audio/video
   payloads, verifies fidelity/timestamp/marker and different negotiated payload

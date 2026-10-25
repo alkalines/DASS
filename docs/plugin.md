@@ -10,24 +10,53 @@ with no viewers is not stopped for that reason alone. Setup deadlines, the
 30-second backend accepted-packet inactivity timeout, capacity limits and
 policy-reload revocation remain enforced.
 
-The client now gives transient WebRTC `disconnected` states 15 seconds to recover
+The client gives transient WebRTC `disconnected` states 15 seconds to recover
 without discarding capture, the receiver or E2EE state. Recovery cancels that
-timer. Terminal failure, signaling closure, explicit stop and context exit still
-tear down immediately; this does not reconnect a failed WSS session or restart
-ICE. Backend byte-budget drops are counted per second rather than accumulated
-over the entire stream; repeated overload within a window still closes media.
+timer. The backend now applies the same 15-second grace to ICE `Disconnected`
+instead of ending the session on the first lost consent check.
+
+A watched stream that drops for a transient reason (media/UDP loss, server-side
+`transport_failed`, setup timeout, socket loss, overload or a lingering previous
+session) is re-watched automatically: the tile keeps the stream, shows the cause
+with its code, and retries after 1, 2, 4, 8 and 15 seconds. A watch that stayed up
+for 30 seconds starts a fresh retry budget. A stream that ended or removed you
+(`server:left`), denial, an approval timeout, revoked access, rejected
+credentials, a changed publisher identity, Stop/Close or leaving the call never
+retry. A retry still needs publisher admission: the publisher re-admits the same
+account and **same device key** it already approved for this stream without a
+new prompt; removal, denial or blocking clears that, and a different device key
+is always prompted. Each admission still rotates the media epoch. The publisher
+now relays a new epoch to every approved viewer before encrypting with it, and
+viewers keep one previous epoch, so a viewer joining or reconnecting no longer
+blanks the stream for others. The publisher's own share is not reconnected.
+
+Backend media budgets (packets per second, ingress and egress bytes per second)
+drop excess packets with at most one warning per second instead of closing the
+session; ICE checks are never dropped by these budgets. A viewer whose forwarding
+queue fills drops packets for itself only and requests a keyframe instead of
+losing its route. Per-viewer forwarding and per-session UDP ingress queues hold
+512 packets, so one screen-share keyframe burst no longer overflows them. The
+periodic safety-net keyframe request moved from every second to every three
+seconds; viewer loss still requests a keyframe at most every 500 ms, and a request
+that arrives inside that interval is kept rather than discarded.
+
+Re-selecting the current voice channel no longer stops sharing or watching; only
+an actual channel change does. Error messages now explain each code in plain
+language and keep the bracketed code for support.
+
 The ended screen requires a successful directory query started after the viewing
 connection closed, so a stale empty directory cannot mislabel a dropped viewer
 connection as an ended publisher.
 
 Rebuild both clients with `bun scripts/build-plugin.mjs` from the repository root
-and restart them. The lifetime and media-budget fixes also require a rebuilt
-backend. `docker compose build backend` runs formatting, Clippy and locked Rust
-tests; only after those pass, restart with `docker compose up -d backend`. That
-restart ends existing shares. Client unit tests and the Equicord build passed;
-Rust validation is blocked by Docker socket permissions in the current workspace.
-Real-client sharing beyond ten minutes, brief network loss/recovery, no-viewer
-publishing and sustained-overload cleanup still require runtime acceptance.
+and restart them. The media-path fixes require a rebuilt backend:
+`docker compose build backend` runs formatting, Clippy and locked Rust tests; only
+after those pass, restart with `docker compose up -d backend`. That restart ends
+existing shares. Client unit tests and the Equicord build passed; on 2026-10-25
+the user reported that the Docker backend build (formatting, Clippy, locked
+tests) succeeded and the backend is running. Automatic reconnection, burst
+handling, publish-while-watching and multi-stream watching still require
+real-client runtime acceptance.
 
 ## Black-video diagnostics
 

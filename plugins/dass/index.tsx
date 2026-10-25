@@ -40,12 +40,17 @@ import { StreamSidebarBody } from "./streamUi";
 import { startUpdateNotifications } from "./updateNotifications";
 import { startViewerApprovalPrompts } from "./viewerApproval";
 import { WatchController } from "./watching";
+import { WatchSet } from "./watchSet";
 
 const currentCall = () => SelectedChannelStore.getVoiceChannelId();
 const discovery = new DiscoveryController();
 const session = new DassSession({ read: readRememberedAccount, write: writeRememberedAccount, forget: forgetRememberedAccount }, undefined, currentCall);
-const watching = new WatchController(currentCall, { connect: options => session.connect(options), prepare: SpikePeer.prepare, identityStore: defaultIdentityStore });
-const directory = new WatchController(currentCall, { connect: options => session.connect(options), prepare: SpikePeer.prepare, identityStore: defaultIdentityStore });
+const viewer = () => new WatchController(currentCall, { connect: options => session.connect(options), prepare: SpikePeer.prepare, identityStore: defaultIdentityStore });
+/** One independent viewer per watched stream; any number of streams up to MAX_WATCHED_STREAMS. */
+const watches = new WatchSet(viewer, message => showToast({ text: message }));
+/** The advanced settings test viewer; separate from call watching. */
+const testViewer = viewer();
+const directory = viewer();
 const publisher = new PublishController(session, currentCall, { connect: options => session.connect(options), prepare: SpikePeer.prepare, identityStore: defaultIdentityStore,
     requireVerifiedViewers: () => settings.store.requireVerifiedViewers, autoApproveViewers: () => settings.store.autoApproveViewers });
 const callDiscovery = createCallDiscovery(session, directory, () => settings.store.backendUrl);
@@ -59,36 +64,51 @@ let unsubscribeDirectoryStatus: (() => void) | undefined;
 let stopStreamSounds: (() => void) | undefined;
 let stopUpdateNotifications: (() => void) | undefined;
 let stopViewerPrompts: (() => void) | undefined;
-let gridWatchEpoch = 0;
+/** Per-share request generation, so a stopped or replaced watch cannot toast late. */
+const watchRequests = new Map<string, number>();
+let watchRequest = 0;
+/** Last voice channel seen by VOICE_CHANNEL_SELECT; re-selecting it keeps media running. */
+let selectedVoiceChannelId: string | undefined;
+
+const shareKey = (share: DassShare) => `${share.roomId}:${share.shareId}`;
 
 function stopGridWatching() {
-    ++gridWatchEpoch;
-    watching.reset();
+    watchRequests.clear();
+    watches.stopAll();
     callPresentation.reset();
+}
+
+function stopWatchingShare(share: DassShare) {
+    watchRequests.delete(shareKey(share));
+    watches.stopWatching(share);
+    if (!watches.getSnapshot().length) callPresentation.reset();
+    else if (callPresentation.getSelected(share.roomId, currentParticipants(share.roomId))?.id === `dass-remote:${share.roomId}:${share.shareId}`) {
+        callPresentation.clearSelection();
+    }
 }
 
 async function watchGridShare(share: DassShare) {
     if (!pluginActive || currentCall() !== share.roomId || !directory.getSnapshot().shares.some(listed => listed.roomId === share.roomId && listed.shareId === share.shareId)) return;
-    const epoch = ++gridWatchEpoch;
+    const key = shareKey(share);
+    const request = ++watchRequest;
+    watchRequests.set(key, request);
+    const current = () => pluginActive && watchRequests.get(key) === request && currentCall() === share.roomId;
     try {
         const access = session.getAccess();
         if (access.roomId !== share.roomId) return;
-        const result = await watching.watchListedShare(settings.store.backendUrl, share, access);
-        if (!result.ok && pluginActive && epoch === gridWatchEpoch && currentCall() === share.roomId) showToast({ text: result.message });
+        const result = await watches.watch(settings.store.backendUrl, share, access);
+        if (!result.ok && current()) showToast({ text: result.message });
     } catch {
-        if (pluginActive && epoch === gridWatchEpoch && currentCall() === share.roomId) {
-            watching.reset("failed", "DASS watching failed. No Discord fallback.");
-            showToast({ text: watching.getSnapshot().message });
-        }
+        if (current()) showToast({ text: "DASS watching failed. No Discord fallback." });
     }
 }
 
-const gridRuntime: GridRuntime = { publisher, directory, watching, currentCall, isActive: () => pluginActive,
+const gridRuntime: GridRuntime = { publisher, directory, watches, currentCall, isActive: () => pluginActive,
     localDisplayName: () => { const user = UserStore.getCurrentUser(); return user?.globalName ?? user?.username; },
-    watch: share => { void watchGridShare(share); }, stopWatching: stopGridWatching, stopPublishing: () => publisher.reset() };
+    watch: share => { void watchGridShare(share); }, stopWatching: stopWatchingShare, stopPublishing: () => publisher.reset() };
 
 function currentParticipants(channelId: string) {
-    return projectParticipants(gridShares(channelId, currentCall(), pluginActive, !!publisher.getPreviewStream(), directory.getSnapshot(), watching.getSnapshot()));
+    return projectParticipants(gridShares(channelId, currentCall(), pluginActive, !!publisher.getPreviewStream(), directory.getSnapshot(), watches.getSnapshot()));
 }
 
 const DassSidebarBody = ErrorBoundary.wrap(StreamSidebarBody, { message: "DASS stream card failed." });
@@ -106,6 +126,7 @@ function stopMedia() {
     callPresentation.exitFullscreen();
     publisher.reset();
     stopGridWatching();
+    testViewer.reset();
     stopSpikeTest();
     localCapture.stop();
 }
@@ -118,7 +139,7 @@ function resetConfiguration() {
 }
 
 function AccountConfiguration() {
-    return <SettingsPanel session={session} publisher={publisher} watching={watching} discovery={discovery} localCapture={localCapture}
+    return <SettingsPanel session={session} publisher={publisher} watching={testViewer} discovery={discovery} localCapture={localCapture}
         backendUrl={settings.store.backendUrl} beforeAction={stopMedia} allowInsecureLocalDevelopment={settings.store.allowInsecureLocalDevelopment} />;
 }
 
@@ -171,6 +192,7 @@ const settings = definePluginSettings({
 function startRuntime() {
     if (pluginActive) return;
     pluginActive = true;
+    selectedVoiceChannelId = currentCall() ?? undefined;
     if (settings.store.checkUpdates) stopUpdateNotifications = startUpdateNotifications();
     const buildWarning = getDiscordBuildWarning(Number(window.GLOBAL_ENV.BUILD_NUMBER));
     if (buildWarning && !buildWarningShown) {
@@ -181,22 +203,19 @@ function startRuntime() {
     configureIdentityBackend(DataStore);
     getCaptureBridge();
     discovery.start();
-    watching.start();
+    watches.start();
+    testViewer.start();
     publisher.start();
-    stopStreamSounds = startStreamSounds(publisher, watching, currentCall);
+    stopStreamSounds = startStreamSounds(publisher, watches, currentCall);
     stopViewerPrompts = startViewerApprovalPrompts(publisher);
     callDiscovery.start();
     unsubscribeAccountStatus = session.subscribe(() => {
         if (!session.getSnapshot().configured) stopMedia();
     });
     void session.start(settings.store.backendUrl);
-    unsubscribeWatchStatus = watching.subscribeStatus(() => {
+    unsubscribeWatchStatus = watches.subscribeStatus(() => {
         releaseUnavailableFullscreen();
-        if (watching.getSnapshot().phase === "unauthorized") {
-            showToast({ text: watching.getSnapshot().message });
-        }
-        if (["loading", "ready", "watching"].includes(watching.getSnapshot().phase)) callDiscovery.sync();
-        else queueMicrotask(() => callDiscovery.sync());
+        queueMicrotask(() => callDiscovery.sync());
     });
     unsubscribeDirectoryStatus = directory.subscribeStatus(releaseUnavailableFullscreen);
     let previousPhase = publisher.getSnapshot().phase;
@@ -230,7 +249,8 @@ function stopRuntime() {
     callDiscovery.stop();
     stopCaptureHost();
     publisher.stop();
-    watching.stop();
+    watches.stop();
+    testViewer.stop();
     session.stop();
     discovery.stop();
 }
@@ -306,8 +326,8 @@ export default definePlugin({
     selectCallParticipant(channelId: string, participant: unknown) {
         const handled = callPresentation.select(channelId, participant, currentParticipants(channelId));
         if (handled && isDassParticipant(participant) && participant.dassShare.kind === "remote") {
-            const status = watching.getSnapshot();
-            if (!status.stream && status.phase !== "loading") gridRuntime.watch(participant.dassShare.share);
+            const status = watches.statusFor(participant.dassShare.share);
+            if (!status?.stream && status?.phase !== "loading") gridRuntime.watch(participant.dassShare.share);
         }
         return handled;
     },
@@ -322,8 +342,8 @@ export default definePlugin({
         return useFocusedWatchingState(gridRuntime, channelId);
     },
     stopFocusedWatching(channelId: string) {
-        if (pluginActive && currentCall() === channelId
-            && isFocusedDassWatch(callPresentation.getSelected(channelId, currentParticipants(channelId)), watching.getSnapshot(), channelId)) stopGridWatching();
+        const selected = pluginActive && currentCall() === channelId ? callPresentation.getSelected(channelId, currentParticipants(channelId)) : undefined;
+        if (selected?.dassShare.kind === "remote" && isFocusedDassWatch(selected, watches.getSnapshot(), channelId)) stopWatchingShare(selected.dassShare.share);
     },
     useNativeSidebarProps<T extends Record<string, unknown>>(props: T) {
         const status = usePublisherStatus(publisher);
@@ -368,21 +388,28 @@ export default definePlugin({
         stopGridWatching();
     },
     routePublish(intent: PublishIntent) {
-        return routePublish(watching.routing, intent);
+        return routePublish(testViewer.routing, intent);
     },
     routeWatch(intent: WatchIntent) {
-        if (intent.transport === "discord") return routeWatch(watching.routing, intent);
-        return { handled: true, completion: watching.watch(intent.share) };
+        if (intent.transport === "discord") return routeWatch(testViewer.routing, intent);
+        return { handled: true, completion: (async () => {
+            try { return await watches.watch(settings.store.backendUrl, intent.share, session.getAccess()); }
+            catch { return { ok: false as const, message: "Sign in to DASS and join the call before watching. No Discord fallback." }; }
+        })() };
     },
     detectShares(roomId: string) {
-        return watching.routing.detect(roomId);
+        return testViewer.routing.detect(roomId);
     },
     start: startRuntime,
     stop: stopRuntime,
     flux: {
         CONNECTION_OPEN: startRuntime,
-        VOICE_CHANNEL_SELECT() {
-            stopMedia();
+        VOICE_CHANNEL_SELECT({ channelId }: { channelId?: string | null; }) {
+            // Re-selecting the current call must not tear down sharing or
+            // watching; controllers also reset on a real context change.
+            const changed = (channelId ?? undefined) !== selectedVoiceChannelId;
+            selectedVoiceChannelId = channelId ?? undefined;
+            if (changed) stopMedia();
             queueMicrotask(() => callDiscovery.sync());
         },
         LOGOUT: stopRuntime

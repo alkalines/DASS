@@ -1,9 +1,9 @@
 import { memoryIdentityStore } from "./helpers/e2eeStore";
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import { type E2eeIdentity, generateEpochKey, generateIdentity, wrapEpochKey } from "../../clients/spike/e2ee";
 import { SpikePeer } from "../../clients/spike/peer";
 import { BrowserSocket, SpikeSignaling, SpikeSignalingError } from "../../clients/spike/signaling";
-import { WatchController } from "../../plugins/dass/watching";
+import { RECONNECT_DELAYS_MS, WatchController, type WatchStatus } from "../../plugins/dass/watching";
 
 class Socket extends EventTarget implements BrowserSocket {
     protocol = "dass.v1";
@@ -348,4 +348,97 @@ test("a changed publisher identity fails closed until it is explicitly accepted"
         await f.controller.acceptPublisherIdentity();
         expect(f.controller.getSnapshot().publisherIdentityChanged).toBe(false);
     } finally { f.controller.stop(); }
+});
+
+/** Fresh fake peer per preparation, so a retry gets new media like the real client. */
+function reconnectFixture() {
+    const sockets: Socket[] = [];
+    const peers: Array<{ drop(code: string): void; }> = [];
+    const controller = new WatchController(() => "voice_context", {
+        connect: async options => {
+            const socket = new Socket();
+            sockets.push(socket);
+            return SpikeSignaling.connect({ ...options, createSocket: () => socket });
+        },
+        prepare: async options => {
+            const closed = new AbortController();
+            const track = new EventTarget() as MediaStreamTrack;
+            Object.assign(track, { kind: "video", readyState: "live", stop: () => { Object.assign(track, { readyState: "ended" }); } });
+            let tracks: MediaStreamTrack[] = [];
+            const stream = new EventTarget() as MediaStream;
+            Object.assign(stream, { getTracks: () => tracks, getVideoTracks: () => tracks });
+            const peer = { receivedStream: stream, tracksChanged: new EventTarget(), closed: closed.signal, closeMessage: "Media stopped.", closeCode: "closed",
+                candidates: ["candidate:1 1 UDP 1 192.168.1.2 50000 typ host"], setReceiveEpoch: () => {}, retireEpochsBelow: () => {},
+                close: () => { if (!closed.signal.aborted) { closed.abort(); tracks.forEach(track => track.stop()); } },
+                activate: async () => { tracks = [track]; return "viewer_session"; } };
+            options.signal.addEventListener("abort", peer.close, { once: true });
+            peers.push({ drop: code => { peer.closeCode = code; peer.close(); } });
+            return peer as unknown as SpikePeer;
+        },
+        identityStore: async () => memoryIdentityStore()
+    });
+    controller.start();
+    // Capture only the first reconnect backoff; every other timer runs normally.
+    const backoffs: Array<() => void> = [];
+    const realSetTimeout = globalThis.setTimeout;
+    const schedule = spyOn(globalThis, "setTimeout").mockImplementation(((callback: () => void, delay?: number) => {
+        if (delay !== RECONNECT_DELAYS_MS[0]) return realSetTimeout(callback, delay);
+        backoffs.push(callback);
+        return backoffs.length as unknown as ReturnType<typeof setTimeout>;
+    }) as typeof setTimeout);
+    const share = { roomId: "room", shareId: "real_source", displayName: "Workstation" };
+    const watch = () => controller.watchListedShare("https://dass.example", share, "secret");
+    const watching = () => {
+        const { promise, resolve } = Promise.withResolvers<WatchStatus>();
+        const unsubscribe = controller.subscribeStatus(() => {
+            if (controller.getSnapshot().phase !== "watching") return;
+            unsubscribe();
+            resolve(controller.getSnapshot());
+        });
+        return promise;
+    };
+    const stop = () => { controller.stop(); schedule.mockRestore(); };
+    return { controller, sockets, peers, backoffs, watch, watching, stop };
+}
+
+test("a transient media drop re-watches the same share after a backoff", async () => {
+    const f = reconnectFixture();
+    try {
+        expect((await f.watch()).ok).toBe(true);
+        f.peers[0].drop("connection:failed");
+        const reconnecting = f.controller.getSnapshot();
+        expect(reconnecting.phase).toBe("loading");
+        expect(reconnecting.watchingShare?.shareId).toBe("real_source");
+        expect(reconnecting.closedShare).toBeUndefined();
+        expect(reconnecting.message).toContain("[connection:failed]");
+        expect(reconnecting.message).toContain("attempt 1 of 5");
+        expect(f.backoffs).toHaveLength(1);
+        const restored = f.watching();
+        f.backoffs[0]();
+        expect((await restored).stream).toBeDefined();
+        expect(f.controller.getSnapshot().watchingShare?.shareId).toBe("real_source");
+        expect(f.peers).toHaveLength(2);
+        expect(f.sockets).toHaveLength(2);
+    } finally { f.stop(); }
+});
+
+test("a stream that ended, or a viewer that stopped watching, is not reconnected", async () => {
+    const ended = reconnectFixture();
+    try {
+        expect((await ended.watch()).ok).toBe(true);
+        ended.sockets[0].dispatchEvent(new MessageEvent("message", { data: JSON.stringify({ protocol_version: 1, request_id: "server_close",
+            operation: { type: "closed", session_id: "viewer_session", reason: "left" } }) }));
+        expect(ended.controller.getSnapshot().phase).toBe("disconnected");
+        expect(ended.controller.getSnapshot().closedShare?.shareId).toBe("real_source");
+        expect(ended.backoffs).toHaveLength(0);
+    } finally { ended.stop(); }
+    const stopped = reconnectFixture();
+    try {
+        expect((await stopped.watch()).ok).toBe(true);
+        stopped.peers[0].drop("connection:failed");
+        stopped.controller.reset();
+        stopped.backoffs[0]();
+        expect(stopped.peers).toHaveLength(1);
+        expect(stopped.controller.getSnapshot().watchingShare).toBeUndefined();
+    } finally { stopped.stop(); }
 });

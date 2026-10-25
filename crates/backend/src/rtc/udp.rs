@@ -18,7 +18,10 @@ use tokio::{
     task::JoinHandle,
 };
 
-const INGRESS_QUEUE_PACKETS: usize = 32;
+/// Per-session ingress queue. A publisher's screen-share keyframe arrives as a
+/// burst of hundreds of datagrams; dropping part of it here corrupts every
+/// viewer's picture and can starve the session's ICE consent checks.
+const INGRESS_QUEUE_PACKETS: usize = 512;
 
 pub(super) struct SharedUdp {
     sockets: [Arc<UdpSocket>; 2],

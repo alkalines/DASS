@@ -5,26 +5,32 @@ multi-viewer packet forwarding. Publisher and viewer counts do not need to be
 equal: one publisher can have several viewers, several publishers can coexist,
 and a person can publish while watching someone else.
 
-This removes the fixed two-person topology, not resource limits. The plugin
-still plays **one remote stream per client**; displaying several remote streams
-in a single client is a separate feature. This is not a production-readiness or
-unlimited-capacity claim.
+This removes the fixed two-person topology, not resource limits. A client can
+watch up to **16 remote streams at once**, each in its own grid tile with its own
+viewer, connection, reconnect state and audio (all following the call's mute and
+volume). Stopping one stream leaves the others running. This is not a
+production-readiness or unlimited-capacity claim.
 
 ## Limits and security
 
-- Each viewer has an independent bounded 32-packet queue. The router admits a
+- Each viewer has an independent bounded 512-packet queue. The router admits a
   configurable total number of publisher/subscriber endpoints, rather than a
   fixed number of either role. Routes remain scoped to the exact room, publisher
-  and registration. Slow or closed queues remove only that viewer's route.
+  and registration. A full queue drops packets for that viewer only (and asks the
+  publisher for a keyframe); a closed queue removes only that viewer's route.
 - The media data path uses a per-publisher lock, not the global publisher registry.
   Fan-out clones `Arc` payload handles rather than copying each encoded payload.
   Chromium still encodes once per publishing peer; the backend neither decodes
   nor transcodes. Outgoing RTP/SRTP work and bandwidth still scale with viewers.
-- Account login permits up to three authenticated connections per account for
-  directory discovery, publishing and watching. Each connection verifies the
-  password and is subject to the existing global admission and login throttles.
-  Slots are shared across devices, not three slots per device. Use separate
-  accounts for the two people. Legacy invite credentials remain single-connection.
+- An account is meant for one client at a time. That client may hold up to 20
+  authenticated connections: directory discovery, publishing, one per watched
+  stream (16) and two for connections still closing during a reconnect. The
+  backend cannot tell clients apart, so the cap is per account, not per device;
+  use separate accounts for different people. Each connection verifies the
+  password and is subject to the global admission and login throttles; the
+  plugin logs in one connection at a time so several watches opening together do
+  not trip the backend's bounded password-verification pool. Legacy invite
+  credentials remain single-connection.
 - Directory results exclude the caller's own published streams. Publishing does
   not stop watching, and discovery remains active while either media role runs.
 - TLS/WSS, DTLS-SRTP, publisher approval, identity checks and the existing required
@@ -44,15 +50,17 @@ unlimited-capacity claim.
   **P + V**, where P is active
   publisher uploads and V is active viewer subscriptions, not unique accounts.
   For example, one publisher and nine viewers need ten; four people each sharing
-  and watching one stream need eight. Idle directory sockets do not use a media
-  slot but do consume signaling/TCP budgets.
+  and watching one stream need eight; four people each sharing and watching all
+  three others need 4 + 12 = 16. Each watched stream is a separate viewer
+  subscription. Idle directory sockets do not use a media slot but do consume
+  signaling/TCP budgets (`DASS_MAX_SESSIONS`).
 - The UDP dispatcher uses the session's server-generated ICE username fragment
   and AWS-LC-backed STUN integrity verification before installing an endpoint
   route. The existing observed-WSS-peer/LAN policy must also admit the source.
   Non-request traffic needs that established `(listening port, source endpoint)`
   route. It is never broadcast to every RTC or routed by IP alone. A different
   session cannot overwrite an existing tuple; ambiguous tuple reuse fails closed.
-  Each session has at most 16 observed endpoints and a 32-datagram ingress queue;
+  Each session has at most 16 observed endpoints and a 512-datagram ingress queue;
   a full queue drops input without blocking another owner. Each shared port also
   bounds aggregate input parsing work using the configured session/packet budget.
   This shedding limit is not per-source fairness or DDoS protection.
@@ -185,7 +193,7 @@ listener. Earlier user-confirmed hosting tests do not validate this new dispatch
 For capacity measurements, record hardware, stream resolutions/FPS/bitrates,
 P/V distribution, total ingress/egress, CPU, memory, drops, join/rekey latency and
 slow-client behavior. Approximate egress is the sum of each stream's bitrate times
-its viewer count; queue metadata is O(V × 32). No throughput or maximum-client
+its viewer count; queue capacity is O(V × 512) packets. No throughput or maximum-client
 claim has been measured for this change.
 
 ## Validation status

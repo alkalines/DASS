@@ -16,16 +16,19 @@ const participant = projectParticipants([{ key: "dass-remote:call:publisher", ki
 const watching: WatchStatus = { phase: "watching", message: "", shares: [], candidates: [], watchingShare: share, stream: {} as MediaStream };
 
 test("only the focused, actually received remote share owns Stop Watching", () => {
-    expect(isFocusedDassWatch(participant, watching, "call")).toBe(true);
+    expect(isFocusedDassWatch(participant, [watching], "call")).toBe(true);
     for (const selected of [undefined, { type: "user" }, projectParticipants([{ key: "local", kind: "local" }])[0]]) {
-        expect(isFocusedDassWatch(selected, watching, "call")).toBe(false);
+        expect(isFocusedDassWatch(selected, [watching], "call")).toBe(false);
     }
-    expect(isFocusedDassWatch(participant, watching, "other")).toBe(false);
-    expect(isFocusedDassWatch(participant, { ...watching, stream: undefined }, "call")).toBe(false);
-    expect(isFocusedDassWatch(participant, { ...watching, watchingShare: { ...share, shareId: "other" } }, "call")).toBe(false);
+    expect(isFocusedDassWatch(participant, [watching], "other")).toBe(false);
+    expect(isFocusedDassWatch(participant, [{ ...watching, stream: undefined }], "call")).toBe(false);
+    expect(isFocusedDassWatch(participant, [{ ...watching, watchingShare: { ...share, shareId: "other" } }], "call")).toBe(false);
     for (const phase of ["loading", "ready", "failed", "disconnected", "unauthorized"] as const) {
-        expect(isFocusedDassWatch(participant, { ...watching, phase }, "call")).toBe(false);
+        expect(isFocusedDassWatch(participant, [{ ...watching, phase }], "call")).toBe(false);
     }
+    // Another live watch elsewhere does not make an unwatched selection focused.
+    expect(isFocusedDassWatch(participant, [{ ...watching, watchingShare: { ...share, shareId: "other" } }, { ...watching, phase: "loading" }], "call")).toBe(false);
+    expect(isFocusedDassWatch(participant, [{ ...watching, watchingShare: { ...share, shareId: "other" } }, watching], "call")).toBe(true);
 });
 
 const controlSource = `function control(e){let{currentUser:n,onDisconnectCall:t,channel:s,connectedEmbeddedActivity:a}=e,o=e.nativeParticipant,j=e.nativeWatching,y=false,O=null,E=e.nativeStream,N=e.nativeStreams,r=null,M=l.useCallback(()=>o?.type===ep.lp.ACTIVITY&&o.applicationId===a?.applicationId?"ACTIVITY":j||y?"STREAM":null!=O?"EVENT":"CALL",[o,a?.applicationId,j,y,O]),[D,V]=l.useState(M()),w=l.useCallback(()=>{if(null!=E)(0,C.vN)((0,L._z)(E));else for(let e of N)(0,C.vN)((0,L._z)(e))},[N,E]);return(0,i.jsx)(A.Y,{targetElementRef:r,renderPopout:()=>null,children:D==="STREAM"?(0,i.jsx)(ee.h,{onClick:()=>w(),onPopoutClick:N.length>1?nativePopover:null,isSelfStream:!1}):D==="CALL"?(0,i.jsx)(J.A,{onClick:()=>t?.()}):{component:D}})}`;

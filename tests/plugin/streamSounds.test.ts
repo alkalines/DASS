@@ -26,7 +26,7 @@ function harness(matches = 1) {
         `${compiled}\nreturn startStreamSounds;`)(() => Array(matches).fill(player), { byCode: () => () => true },
         { isSoundDisabled: (sound: StreamSound) => disabled.has(sound) }, (text: string) => toasts.push(text), () => {}, streamSoundState, streamSoundEvents);
     const stop = create({ subscribe, getSnapshot: () => ({ phase, viewerCount }), getPreviewStream: () => phase === "publishing" ? {} : undefined },
-        { subscribeStatus: subscribe, getSnapshot: () => ({ phase: "idle" }) }, () => "call");
+        { subscribeStatus: subscribe, getSnapshot: () => [] }, () => "call");
     return { played, stopped, disabled, toasts, listeners, stop,
         update(next: string, count = 0) { phase = next; viewerCount = count; for (const listener of listeners) listener(); } };
 }

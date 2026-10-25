@@ -65,6 +65,13 @@ const DENY_COOLDOWN: Duration = Duration::from_secs(30);
 const MAX_LOGIN_SOURCES: usize = 1_024;
 const PER_SOURCE_LOGINS_PER_SECOND: usize = 4;
 const VIEW_REQUEST_LIFETIME: Duration = Duration::from_secs(VIEW_REQUEST_TIMEOUT_SECONDS as u64);
+/// Streams one client may watch at once; each watched stream is its own
+/// connection and media session. Keep in step with the plugin's
+/// `MAX_WATCHED_STREAMS`.
+const MAX_WATCHED_STREAMS: usize = 16;
+/// One client per account: directory, publisher, one connection per watched
+/// stream and two slots for connections still closing during a reconnect.
+const MAX_ACCOUNT_CONNECTIONS: usize = 2 + MAX_WATCHED_STREAMS + 2;
 
 /// Server-pushed events for one authenticated connection. Queues stay bounded;
 /// a connection that cannot drain its events is closed rather than silently
@@ -455,10 +462,15 @@ impl SignalingState {
             .active_accounts
             .lock()
             .map_err(|_| ErrorCode::Overloaded)?;
-        // Account clients own independent directory, publisher and viewer sockets.
-        // Legacy bearer invites remain exclusive. Password verification, global
-        // admission and per-source login throttles apply to every connection.
-        let maximum = if account_login { 3 } else { 1 };
+        // An account client owns a directory socket, a publisher socket and one
+        // viewer socket per watched stream. Legacy bearer invites remain
+        // exclusive. Password verification, global admission and per-source
+        // login throttles apply to every connection.
+        let maximum = if account_login {
+            MAX_ACCOUNT_CONNECTIONS
+        } else {
+            1
+        };
         let count = active.entry(account.clone()).or_default();
         if *count >= maximum {
             return Err(ErrorCode::Replay);
@@ -3055,10 +3067,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn account_clients_have_three_independent_bounded_connection_leases() {
+    async fn account_clients_have_bounded_independent_connection_leases() {
         let (_sender, receiver) = watch::channel(Arc::new(InviteStore::default()));
         let state = SignalingState::new(receiver);
-        let mut leases: Vec<_> = (0..3)
+        let mut leases: Vec<_> = (0..MAX_ACCOUNT_CONNECTIONS)
             .map(|_| {
                 state
                     .claim_account("alice".into(), true)
@@ -3473,6 +3485,14 @@ mod network_tests {
         )
         .unwrap();
         server.invites.send_replace(Arc::new(store));
+        // Stand in for the client's other watching connections; three real
+        // logins then fill the account's last slots.
+        server
+            .state
+            .active_accounts
+            .lock()
+            .unwrap()
+            .insert("alice".into(), MAX_ACCOUNT_CONNECTIONS - 3);
         let mut clients = Vec::new();
         for index in 0..3 {
             let mut client = connect(&server, "https://discord.com", "").await.unwrap();
@@ -3514,7 +3534,7 @@ mod network_tests {
         assert_eq!(denied["operation"]["code"], "unauthorized");
         assert_eq!(
             server.state.active_accounts.lock().unwrap().get("alice"),
-            Some(&3)
+            Some(&MAX_ACCOUNT_CONNECTIONS)
         );
         server
             .invites

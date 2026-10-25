@@ -8,7 +8,10 @@ use std::{
 use str0m::format::Codec;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 
-pub const PACKET_QUEUE_CAPACITY: usize = 32;
+/// Per-viewer forwarding queue. A screen-share keyframe can arrive as a burst of
+/// several hundred RTP packets; the queue must absorb that burst until the
+/// viewer's owner loop drains it on its next tick.
+pub const PACKET_QUEUE_CAPACITY: usize = 512;
 const MAX_PAYLOAD_BYTES: usize = 2_048;
 
 #[derive(Clone)]
@@ -197,11 +200,28 @@ impl PublisherEndpoint {
             return Err(RouteFailure);
         }
         // Only Arc-backed payload handles are cloned. Never wait for a viewer:
-        // a full/closed queue removes that viewer, not the other recipients.
+        // a full queue drops this packet for that viewer only and asks the
+        // publisher for a keyframe so its decoder recovers; the viewer keeps its
+        // route. A closed queue (owner gone) removes the viewer.
         // No registry/global media lock is held while fanning out a packet.
-        state
-            .viewers
-            .retain(|_, viewer| !viewer.ready || viewer.packets.try_send(packet.clone()).is_ok());
+        let mut overflowed = false;
+        state.viewers.retain(|_, viewer| {
+            if !viewer.ready {
+                return true;
+            }
+            match viewer.packets.try_send(packet.clone()) {
+                Ok(()) => true,
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    overflowed = true;
+                    true
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => false,
+            }
+        });
+        drop(state);
+        if overflowed {
+            let _ = self.publisher.keyframes.try_send(());
+        }
         Ok(())
     }
 
@@ -356,13 +376,14 @@ mod tests {
     #[test]
     fn fanout_shares_payloads_and_isolates_slow_unready_and_removed_viewers() {
         let hub = Arc::new(MediaHub::new(8));
-        let publisher = hub.publish("room", "source").unwrap();
+        let mut publisher = hub.publish("room", "source").unwrap();
         let mut fast = hub.subscribe("room", "source", "fast").unwrap();
         let mut slow = hub.subscribe("room", "source", "slow").unwrap();
         let mut unready = hub.subscribe("room", "source", "unready").unwrap();
         fast.set_ready().unwrap();
         slow.set_ready().unwrap();
-        for _ in 0..=PACKET_QUEUE_CAPACITY {
+        assert!(publisher.take_keyframe_request());
+        for _ in 0..PACKET_QUEUE_CAPACITY {
             let input = packet();
             publisher.forward(input.clone()).unwrap();
             assert!(Arc::ptr_eq(
@@ -370,7 +391,16 @@ mod tests {
                 &fast.try_packet().unwrap().unwrap().payload
             ));
         }
-        assert!(slow.try_packet().is_err());
+        assert!(!publisher.take_keyframe_request());
+        // A full queue drops the packet for the slow viewer only. It keeps its
+        // route and its queued burst, and the publisher is asked for a keyframe.
+        publisher.forward(packet()).unwrap();
+        assert!(fast.try_packet().unwrap().is_some());
+        assert!(publisher.take_keyframe_request());
+        for _ in 0..PACKET_QUEUE_CAPACITY {
+            assert!(slow.try_packet().unwrap().is_some());
+        }
+        assert!(slow.try_packet().unwrap().is_none());
         assert!(unready.try_packet().unwrap().is_none());
         unready.set_ready().unwrap();
         publisher.forward(packet()).unwrap();
@@ -430,11 +460,13 @@ mod tests {
         assert!(alice_watching.try_packet().unwrap().is_some());
         assert!(bob_watching.try_packet().unwrap().is_none());
 
-        // A full queue invalidates only its own viewer.
+        // A full queue drops packets for its own viewer only; the route stays.
         for _ in 0..=PACKET_QUEUE_CAPACITY {
             alice.forward(packet()).unwrap();
         }
-        assert!(bob_watching.try_packet().is_err());
+        assert!(alice.take_keyframe_request());
+        assert!(!bob.take_keyframe_request());
+        assert!(bob_watching.try_packet().unwrap().is_some());
         bob.forward(packet()).unwrap();
         assert!(alice_watching.try_packet().unwrap().is_some());
         hub.close_publisher("alice_stream");
@@ -467,7 +499,8 @@ mod tests {
             publisher.forward(packet()).unwrap();
         }
         publisher.forward(packet()).unwrap();
-        assert!(viewer.try_packet().is_err());
+        assert!(publisher.take_keyframe_request());
+        assert!(viewer.try_packet().unwrap().is_some());
         drop(viewer);
         let mut replacement = hub.subscribe("room", "source", "replacement").unwrap();
         replacement.set_ready().unwrap();

@@ -56,6 +56,8 @@ const CLIENT_EVENTS: &[&str] = &[
     "E2EE key installation",
     "viewer phase",
     "viewer setup failed",
+    "viewer reconnect scheduled",
+    "viewer reconnect stopped",
     "epoch key unwrap failed",
     "publisher phase",
     "publisher signaling closed",
@@ -119,6 +121,7 @@ fn safe_details(text: &str) -> Value {
                 | "authenticationFailures"
                 | "headerMismatches"
                 | "replayDrops"
+                | "attempt"
         );
         let flag = matches!(
             key.as_str(),
@@ -246,6 +249,22 @@ fn safe_details(text: &str) -> Value {
                     | "server:expired"
                     | "server:transport_failed"
                     | "server:setup_timeout"
+                    | "server:left"
+                    | "server:overloaded"
+                    | "rejected:invalid_state"
+                    | "rejected:invalid_message"
+                    | "rejected:denied"
+                    | "rejected:e2ee_unavailable"
+                    | "rejected:transport_unavailable"
+                    | "preparation"
+                    | "signaling"
+                    | "viewer_presence"
+                    | "approval_timeout"
+                    | "denied"
+                    | "disconnected_timeout"
+                    | "connection:failed"
+                    | "connection:closed"
+                    | "connection:disconnected_timeout"
             );
             safe.insert(key, json!(if allowed { label } else { "other" }));
         }

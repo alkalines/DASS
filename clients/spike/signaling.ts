@@ -56,11 +56,37 @@ export function isAuthenticationRejected(error: unknown): boolean {
     return error instanceof SpikeSignalingError && error.code === "rejected:unauthorized";
 }
 
+/** One plain sentence per failure code. The bracketed code stays in messages for support. */
+const FAILURE_REASONS: Record<string, string> = {
+    closed: "The DASS connection was closed.",
+    socket: "The connection to the DASS backend dropped (network change, sleep or backend restart).",
+    protocol: "The DASS backend sent an unexpected message; the plugin and backend versions may differ.",
+    timeout: "The DASS backend did not answer in time.",
+    expired: "The DASS session reached its maximum lifetime.",
+    cancelled: "The DASS request was cancelled.",
+    overloaded: "Too many DASS messages were waiting to be sent.",
+    "rejected:invalid_message": "The DASS backend rejected a malformed request; the plugin and backend versions may differ.",
+    "rejected:unsupported_version": "The plugin and backend use different DASS protocol versions.",
+    "rejected:e2ee_unavailable": "End-to-end encryption could not be established; the streamer's identity may have changed.",
+    "rejected:invalid_state": "The DASS backend refused the request in the current state; a previous connection for this stream may still be closing.",
+    "rejected:denied": "The streamer denied the request.",
+    "rejected:transport_unavailable": "The DASS backend's media transport is unavailable.",
+    "server:left": "The stream ended or the streamer removed you.",
+    "server:expired": "The DASS session reached its maximum lifetime.",
+    "server:setup_timeout": "Media did not connect in time; the backend's UDP media ports may be unreachable.",
+    "server:overloaded": "The DASS backend closed the connection because it was overloaded.",
+    "server:transport_failed": "The DASS backend lost the media connection (UDP was interrupted or the server hit a media error).",
+};
+
+export function signalingFailureReason(code: string): string {
+    return FAILURE_REASONS[code] ?? "The DASS connection failed.";
+}
+
 export function signalingFailureMessage(error: unknown): string {
     if (isAuthenticationRejected(error)) return "The DASS backend rejected your access. Check your DASS credentials and permissions. No Discord fallback.";
     if (error instanceof SpikeSignalingError && error.code === "server:revoked") return "The backend closed this DASS session. Your credentials were kept. Retry manually if access is still permitted.";
     if (error instanceof SpikeSignalingError && error.code === "rejected:replay") {
-        return "The DASS backend rejected a duplicate login or request [rejected:replay]. This account may already have an active connection. Your credentials were kept; no Discord fallback.";
+        return "You already have an active connection in every DASS slot for this account (directory, sharing and up to 16 watched streams) [rejected:replay]. An account is meant for one client: close DASS in any other client using it, or wait a few seconds for old connections to close. Your credentials were kept; no Discord fallback.";
     }
     if (error instanceof SpikeSignalingError && error.code === "rejected:overloaded") {
         return "The DASS backend is at capacity or rate-limiting requests [rejected:overloaded]. Each publisher and viewer uses a separate media slot; ask the administrator to check DASS_MAX_MEDIA_SESSIONS, including saved database settings. Retry later; your credentials were kept. No Discord fallback.";
@@ -68,8 +94,8 @@ export function signalingFailureMessage(error: unknown): string {
     if (error instanceof SpikeSignalingError && (error.code === "expired" || error.code === "server:expired")) {
         return "DASS connection expired. Retry to authenticate again; your credentials were kept. No Discord fallback.";
     }
-    const code = error instanceof SpikeSignalingError ? ` [${error.code}]` : "";
-    return `Could not connect to the DASS backend or complete signaling${code}. Check backend availability, TLS and your network; your credentials were kept. No Discord fallback.`;
+    if (error instanceof SpikeSignalingError) return `${signalingFailureReason(error.code)} [${error.code}] Your credentials were kept; no Discord fallback.`;
+    return "Could not connect to the DASS backend. Check backend availability, TLS and your network; your credentials were kept. No Discord fallback.";
 }
 
 /** Experimental control transport, staged into the plugin's manual test panel. */

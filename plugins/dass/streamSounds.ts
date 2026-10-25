@@ -10,12 +10,12 @@ import { NotificationSettingsStore, showToast } from "@webpack/common";
 import { logDiagnostic } from "../../clients/spike/diagnostics";
 import type { PublishController } from "./publishing";
 import { type StreamSound, streamSoundEvents, streamSoundState } from "./soundEvents";
-import type { WatchController } from "./watching";
+import type { WatchSet } from "./watchSet";
 
 interface NativeSound { stop(): void; }
 type PlaySound = (sound: StreamSound, volume: number) => NativeSound | undefined;
 
-export function startStreamSounds(publisher: PublishController, watching: WatchController, currentContext: () => string | undefined) {
+export function startStreamSounds(publisher: PublishController, watching: Pick<WatchSet, "getSnapshot" | "subscribeStatus">, currentContext: () => string | undefined) {
     const snapshot = () => {
         const state = streamSoundState(currentContext(), publisher.getSnapshot(), watching.getSnapshot());
         state.publishing &&= !!publisher.getPreviewStream();

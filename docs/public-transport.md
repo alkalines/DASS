@@ -189,7 +189,7 @@ cannot prevent upstream link saturation; hosting-provider DDoS protection and
 the residual availability risk stay with the operator.
 
 The experimental router supports multiple publishers and multiple viewers per
-stream, each viewer with an independent 32-packet queue. Publisher and viewer
+stream, each viewer with an independent 512-packet queue. Publisher and viewer
 counts may be unequal. The total number of RTC owners is bounded by
 `DASS_MAX_MEDIA_SESSIONS` (currently 1–64), not a fixed role topology. Four slots
 are needed for two people sharing and watching each other. See [simultaneous-sharing.md](simultaneous-sharing.md)

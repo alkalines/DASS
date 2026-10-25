@@ -12,15 +12,19 @@ export type StreamSound = "stream_started" | "stream_ended" | "stream_user_joine
 export interface StreamSoundState {
     contextId?: string;
     publishing: boolean;
-    watchingKey?: string;
-    closed: boolean;
+    /** Live received shares as `room:share`. */
+    watchingKeys: readonly string[];
+    /** Shares whose watch closed unexpectedly and is retained as ended/failed. */
+    closedKeys: readonly string[];
     viewerCount?: number;
 }
 
-export function streamSoundState(contextId: string | undefined, publisher: PublishStatus, viewer: WatchStatus): StreamSoundState {
-    const share = viewer.phase === "watching" && viewer.stream && viewer.watchingShare?.roomId === contextId ? viewer.watchingShare : undefined;
+const key = (share: { roomId: string; shareId: string; }) => `${share.roomId}:${share.shareId}`;
+
+export function streamSoundState(contextId: string | undefined, publisher: PublishStatus, viewers: readonly WatchStatus[]): StreamSoundState {
     return { contextId, publishing: publisher.phase === "publishing", viewerCount: publisher.viewerCount,
-        watchingKey: share ? `${share.roomId}:${share.shareId}` : undefined, closed: !!viewer.closedShare };
+        watchingKeys: viewers.flatMap(({ phase, stream, watchingShare }) => phase === "watching" && stream && watchingShare && watchingShare.roomId === contextId ? [key(watchingShare)] : []),
+        closedKeys: viewers.flatMap(viewer => viewer.closedShare ? [key(viewer.closedShare)] : []) };
 }
 
 export function streamSoundEvents(previous: StreamSoundState, next: StreamSoundState): StreamSound[] {
@@ -33,9 +37,9 @@ export function streamSoundEvents(previous: StreamSoundState, next: StreamSoundS
         if (nextCount > previousCount) sounds.push("stream_user_joined");
         else if (nextCount < previousCount) sounds.push("stream_user_left");
     }
-    if (previous.watchingKey !== next.watchingKey) {
-        if (previous.watchingKey) sounds.push(next.closed ? "stream_ended" : "stream_user_left");
-        if (next.watchingKey) sounds.push("stream_user_joined");
+    for (const left of previous.watchingKeys.filter(watched => !next.watchingKeys.includes(watched))) {
+        sounds.push(next.closedKeys.includes(left) ? "stream_ended" : "stream_user_left");
     }
+    if (next.watchingKeys.some(watched => !previous.watchingKeys.includes(watched))) sounds.push("stream_user_joined");
     return [...new Set(sounds)];
 }

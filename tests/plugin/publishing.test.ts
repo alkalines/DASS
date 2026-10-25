@@ -431,6 +431,30 @@ for (const autoApproveViewers of [false, true]) {
     });
 }
 
+test("an approved device that reconnects is re-admitted without a prompt until it is removed", async () => {
+    const f = fixture();
+    const alice = await generateIdentity();
+    const otherDevice = await generateIdentity();
+    const settle = async (decisions: number) => { for (let i = 0; i < 50 && f.decisions.length < decisions; i++) await Promise.resolve(); };
+    try {
+        await f.controller.publish("https://dass.example", f.bridge);
+        f.request({ request_id: "first", viewer_id: "alice", viewer_display_name: "Alice", viewer_key: alice.publicKey });
+        await Promise.resolve(); await Promise.resolve();
+        await f.controller.decideView("first", "approve");
+        f.request({ request_id: "reconnect", viewer_id: "alice", viewer_display_name: "Alice", viewer_key: alice.publicKey });
+        await settle(2);
+        expect(f.decisions).toEqual([{ requestId: "first", decision: "approve" }, { requestId: "reconnect", decision: "approve" }]);
+        f.request({ request_id: "other_device", viewer_id: "alice", viewer_display_name: "Alice", viewer_key: otherDevice.publicKey });
+        await settle(3);
+        expect(f.decisions).toHaveLength(2);
+        await f.controller.removeViewer("alice");
+        f.request({ request_id: "after_removal", viewer_id: "alice", viewer_display_name: "Alice", viewer_key: alice.publicKey });
+        await settle(3);
+        expect(f.decisions).toHaveLength(2);
+        expect(f.controller.getSnapshot().pendingViewers.map(viewer => viewer.requestId)).toContain("after_removal");
+    } finally { f.controller.stop(); }
+});
+
 test("repeated denials do not prevent a later same-device approval", async () => {
     const f = fixture();
     const alice = await generateIdentity();

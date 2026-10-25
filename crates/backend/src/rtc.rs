@@ -23,7 +23,7 @@ use std::{
     time::{Duration, Instant},
 };
 use str0m::{
-    Candidate, Event, IceConnectionState, Input, Output, Rtc,
+    Candidate, Event, Input, Output, Rtc,
     change::SdpOffer,
     crypto::dtls::DtlsVersion,
     format::Codec,
@@ -39,11 +39,24 @@ const MAX_TRUSTED_CLIENT_IPS: usize = 16;
 /// An IPv6 address is at most 39 characters; keep the configured list bounded.
 const MAX_TRUSTED_CLIENT_IPS_CONFIG_BYTES: usize =
     MAX_TRUSTED_CLIENT_IPS * 40 + (MAX_TRUSTED_CLIENT_IPS - 1);
-const MAX_OUTPUTS_PER_MUTATION: usize = 256;
+/// Outputs polled per mutation. Transmits are flushed in batches, so this only
+/// bounds a runaway state machine, not an ordinary keyframe burst.
+const MAX_OUTPUTS_PER_MUTATION: usize = 1_024;
 const MAX_DATAGRAM_BYTES: usize = 2_048;
+/// Datagrams are written in batches of this size; a larger burst is flushed in
+/// several batches rather than treated as a failure.
 const MAX_PENDING_DATAGRAMS: usize = 32;
-const MAX_BUDGET_DROPS: usize = 64;
 const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+/// ICE `Disconnected` can resolve by itself (lost consent checks during a
+/// burst or a brief network stall). Only a disconnection that outlasts this
+/// grace period ends the session; it matches the client's own grace period.
+const ICE_DISCONNECT_GRACE: Duration = Duration::from_secs(15);
+/// Minimum spacing of keyframe requests sent to a publisher. Requests that
+/// arrive inside this window stay pending instead of being discarded.
+const KEYFRAME_MIN_INTERVAL: Duration = Duration::from_millis(500);
+/// Safety-net keyframe cadence while viewers are attached. Viewers request
+/// keyframes on loss themselves; forcing one every second inflated bursts.
+const KEYFRAME_FALLBACK_INTERVAL: Duration = Duration::from_secs(3);
 const MAX_LIFETIME: Duration =
     Duration::from_secs(dass_protocol::signaling::SESSION_LIFETIME_SECONDS as u64);
 
@@ -364,7 +377,8 @@ pub struct MediaPeer {
     ingress: ByteWindow,
     egress: ByteWindow,
     counters: MediaCounters,
-    budget_drops: ByteWindow,
+    /// Rate-limits budget warnings to one per second; dropping is never fatal.
+    budget_warning: ByteWindow,
     candidates: usize,
     offered: bool,
     connected: bool,
@@ -373,6 +387,7 @@ pub struct MediaPeer {
     tracks: Vec<(Mid, MediaKind)>,
     outgoing_sequence_origins: [Option<u64>; 2],
     last_keyframe: Instant,
+    ice_disconnected_since: Option<Instant>,
 }
 
 enum PeerRoute {
@@ -441,7 +456,7 @@ impl MediaPeer {
             ingress: ByteWindow::new(),
             egress: ByteWindow::new(),
             counters: MediaCounters::new(),
-            budget_drops: ByteWindow::new(),
+            budget_warning: ByteWindow::new(),
             candidates: 0,
             offered: false,
             connected: false,
@@ -450,6 +465,7 @@ impl MediaPeer {
             tracks: Vec::with_capacity(2),
             outgoing_sequence_origins: [None; 2],
             last_keyframe: now,
+            ice_disconnected_since: None,
         };
         peer.rtc
             .add_local_candidate(Candidate::host(advertised, "udp").map_err(|_| MediaFailure)?);
@@ -710,6 +726,13 @@ impl MediaPeer {
         if self.expired() {
             return Err(MediaFailure);
         }
+        if self
+            .ice_disconnected_since
+            .is_some_and(|since| since.elapsed() >= ICE_DISCONNECT_GRACE)
+        {
+            tracing::warn!(code = "ice_disconnected", "media transport failed");
+            return Err(MediaFailure);
+        }
         if Instant::now() >= self.next_timeout {
             self.rtc
                 .handle_input(Input::Timeout(Instant::now()))
@@ -733,15 +756,18 @@ impl MediaPeer {
                 self.forward_packet(packet).await?;
             }
         }
+        // A request that arrives inside the minimum interval stays queued for a
+        // later tick instead of being consumed and lost.
+        let since_keyframe = self.last_keyframe.elapsed();
         let request_keyframe = match &mut self.route {
-            PeerRoute::Publisher(route) => {
+            PeerRoute::Publisher(route) if since_keyframe >= KEYFRAME_MIN_INTERVAL => {
                 route.has_ready_viewer()
                     && (route.take_keyframe_request()
-                        || self.last_keyframe.elapsed() >= Duration::from_secs(1))
+                        || since_keyframe >= KEYFRAME_FALLBACK_INTERVAL)
             }
             _ => false,
         };
-        if request_keyframe && self.last_keyframe.elapsed() >= Duration::from_millis(500) {
+        if request_keyframe {
             let video_mid = self
                 .tracks
                 .iter()
@@ -773,15 +799,12 @@ impl MediaPeer {
             return Ok(()); // A viewer may explicitly omit audio or video.
         };
         // Egress budget: one session cannot use more than its share of the
-        // server's outbound capacity.
+        // server's outbound capacity. Excess packets are dropped, not fatal.
         if !self.egress.charge(
             packet.payload.len(),
             self.limits.max_egress_bytes_per_second,
         ) {
-            if !self.budget_drops.charge(1, MAX_BUDGET_DROPS) {
-                tracing::warn!(code = "egress_budget", "media transport failed");
-                return Err(MediaFailure);
-            }
+            self.warn_budget("egress_budget");
             return Ok(());
         }
         self.counters.add_egress(packet.payload.len() as u64);
@@ -837,23 +860,23 @@ impl MediaPeer {
         }
         // Charge only datagrams admitted to this media session. Otherwise an
         // unrelated spoofed source can consume the observed peer's packet
-        // budget and make the owner close a healthy session.
+        // budget. Over-budget media is dropped rather than ending the session;
+        // ICE checks are never dropped so a burst cannot break consent.
         if now.duration_since(self.rate_started) >= Duration::from_secs(1) {
             self.rate_started = now;
             self.packets_in_window = 0;
         }
+        let stun = bytes.first().is_some_and(|byte| *byte < 2);
         self.packets_in_window += 1;
-        if self.packets_in_window > self.limits.max_packets_per_second {
-            return Err(MediaFailure);
+        if !stun && self.packets_in_window > self.limits.max_packets_per_second {
+            self.warn_budget("packet_budget");
+            return Ok(());
         }
-        if !self
+        let within_ingress = self
             .ingress
-            .charge(bytes.len(), self.limits.max_ingress_bytes_per_second)
-        {
-            if !self.budget_drops.charge(1, MAX_BUDGET_DROPS) {
-                tracing::warn!(code = "ingress_budget", "media transport failed");
-                return Err(MediaFailure);
-            }
+            .charge(bytes.len(), self.limits.max_ingress_bytes_per_second);
+        if !stun && !within_ingress {
+            self.warn_budget("ingress_budget");
             return Ok(());
         }
         self.counters.add_ingress(bytes.len() as u64);
@@ -877,16 +900,22 @@ impl MediaPeer {
         self.drain().await
     }
 
+    /// Over-budget packets are dropped, never fatal: a burst must not end a
+    /// healthy session. At most one warning per second keeps the log bounded.
+    fn warn_budget(&mut self, code: &'static str) {
+        if self.budget_warning.charge(1, 1) {
+            tracing::warn!(code, "media budget exceeded; dropping packets");
+        }
+    }
+
     async fn drain(&mut self) -> Result<(), MediaFailure> {
-        // Drain into a bounded temporary batch before awaiting any socket I/O.
+        // Drain into bounded batches; a full batch is written before polling on.
         let mut datagrams = Vec::with_capacity(MAX_PENDING_DATAGRAMS);
-        let mut drained = false;
         for _ in 0..MAX_OUTPUTS_PER_MUTATION {
             match self.rtc.poll_output().map_err(|_| MediaFailure)? {
                 Output::Timeout(deadline) => {
                     self.next_timeout = deadline;
-                    drained = true;
-                    break;
+                    return self.transmit(&mut datagrams).await;
                 }
                 Output::Transmit(transmit) => {
                     if self
@@ -894,11 +923,13 @@ impl MediaPeer {
                         .source_verdict(transmit.destination, &self.session_peers)
                         .is_err()
                         || transmit.contents.len() > MAX_DATAGRAM_BYTES
-                        || datagrams.len() >= MAX_PENDING_DATAGRAMS
                     {
                         return Err(MediaFailure);
                     }
                     datagrams.push((transmit.destination, transmit.contents.to_vec()));
+                    if datagrams.len() >= MAX_PENDING_DATAGRAMS {
+                        self.transmit(&mut datagrams).await?;
+                    }
                 }
                 Output::Event(Event::Connected) => {
                     tracing::info!(
@@ -950,22 +981,38 @@ impl MediaPeer {
                         PeerRoute::Sink => {}
                     }
                 }
-                Output::Event(Event::IceConnectionStateChange(
-                    IceConnectionState::Disconnected,
-                )) => {
-                    tracing::warn!(code = "ice_disconnected", "media transport failed");
-                    return Err(MediaFailure);
+                // `Disconnected` may recover; `timeout` ends the session only
+                // after ICE_DISCONNECT_GRACE without recovery.
+                Output::Event(Event::IceConnectionStateChange(state)) => {
+                    if state.is_disconnected() {
+                        if self.ice_disconnected_since.is_none() {
+                            tracing::warn!(
+                                code = "ice_disconnected",
+                                "media transport interrupted"
+                            );
+                            self.ice_disconnected_since = Some(Instant::now());
+                        }
+                    } else if state.is_connected() {
+                        let recovered = self.ice_disconnected_since.take().is_some();
+                        if recovered {
+                            tracing::info!("media transport recovered");
+                        }
+                    }
                 }
                 // No decoding, recording, media logging, control-plane JSON or IPC.
                 Output::Event(_) => {}
             }
         }
-        if !drained {
-            return Err(MediaFailure);
-        }
-        // One deadline for the entire batch, not 32 independently renewable waits.
+        Err(MediaFailure)
+    }
+
+    /// One deadline for the entire batch, not independently renewable waits.
+    async fn transmit(
+        &self,
+        datagrams: &mut Vec<(SocketAddr, Vec<u8>)>,
+    ) -> Result<(), MediaFailure> {
         tokio::time::timeout(Duration::from_millis(50), async {
-            for (destination, bytes) in datagrams {
+            for (destination, bytes) in datagrams.drain(..) {
                 self.socket
                     .send_to(&bytes, destination)
                     .await
@@ -1000,14 +1047,15 @@ mod tests {
     use tokio::net::UdpSocket;
 
     #[test]
-    fn isolated_budget_drops_do_not_accumulate_for_the_entire_session() {
-        let mut drops = ByteWindow::new();
+    fn budget_windows_reset_every_second_instead_of_accumulating() {
+        const BUDGET: usize = 64;
+        let mut window = ByteWindow::new();
         for _ in 0..3 {
-            for _ in 0..MAX_BUDGET_DROPS {
-                assert!(drops.charge(1, MAX_BUDGET_DROPS));
+            for _ in 0..BUDGET {
+                assert!(window.charge(1, BUDGET));
             }
-            assert!(!drops.charge(1, MAX_BUDGET_DROPS));
-            drops.start = Instant::now() - Duration::from_secs(2);
+            assert!(!window.charge(1, BUDGET));
+            window.start = Instant::now() - Duration::from_secs(2);
         }
     }
 
@@ -1952,20 +2000,21 @@ mod tests {
         peer.offered = true;
 
         for _ in 0..2 {
-            peer.receive(&[0; 16], "198.51.100.4:50000".parse().unwrap())
+            peer.receive(&[128; 16], "198.51.100.4:50000".parse().unwrap())
                 .await
                 .unwrap();
         }
         assert_eq!(peer.packets_in_window, 0);
-        peer.receive(&[0; 16], "203.0.114.10:50000".parse().unwrap())
+        peer.receive(&[128; 16], "203.0.114.10:50000".parse().unwrap())
             .await
             .unwrap();
         assert_eq!(peer.packets_in_window, 1);
-        assert!(
-            peer.receive(&[0; 16], "203.0.114.10:50000".parse().unwrap())
-                .await
-                .is_err()
-        );
+        assert_eq!(peer.counters().ingress_bytes(), 16);
+        // Over-budget media is dropped; the session itself stays healthy.
+        peer.receive(&[128; 16], "203.0.114.10:50000".parse().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(peer.counters().ingress_bytes(), 16);
     }
 
     #[tokio::test]

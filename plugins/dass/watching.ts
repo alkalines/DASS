@@ -19,7 +19,35 @@ import {
 import { defaultIdentityStore,deviceIdentity } from "./e2eeIdentity";
 import { type DassShare, ScreenshareRouting, type ScreenshareTransport } from "./routing";
 import { SpikePeer } from "../../clients/spike/peer";
-import { type DassAuthentication, isAuthenticationRejected, signalingFailureMessage, SpikeSignaling, SpikeSignalingError } from "../../clients/spike/signaling";
+import { type DassAuthentication, isAuthenticationRejected, signalingFailureMessage, signalingFailureReason, SpikeSignaling, SpikeSignalingError } from "../../clients/spike/signaling";
+
+/** Backoff before each automatic re-watch of the same share after an unexpected drop. */
+export const RECONNECT_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 15_000] as const;
+/** A watch that stayed up this long gets a fresh retry budget after its next drop. */
+const RECONNECT_STABLE_MS = 30_000;
+/** Final outcomes: denial, removal, an ended stream, rejected identity/credentials or local cancellation. */
+const FINAL_FAILURES = ["rejected:unauthorized", "rejected:denied", "rejected:e2ee_unavailable", "server:revoked", "server:left",
+    "denied", "approval_timeout", "cancelled"];
+
+function retryableFailure(code: string) {
+    return !!code && !FINAL_FAILURES.some(final => code === final || code.endsWith(`:${final}`));
+}
+
+/** Plain-language cause of a dropped watch; peer codes carry a `stage:` prefix. */
+function dropReason(cause: string) {
+    if (cause.startsWith("connection:")) return "The media connection to the DASS backend was lost.";
+    return signalingFailureReason(cause.replace(/^(?!rejected:|server:)[a-z_]+:/, ""));
+}
+
+interface ReconnectTarget {
+    backendUrl: string;
+    share: DassShare;
+    credential: string | DassAuthentication;
+    contextId?: string;
+    /** Automatic retries used since the last stable watch. */
+    attempt: number;
+    watchingSinceMs?: number;
+}
 
 export interface WatchStatus {
     phase: "idle" | "loading" | "ready" | "watching" | "disconnected" | "unauthorized" | "failed";
@@ -57,6 +85,8 @@ export class WatchController implements ScreenshareTransport {
     private poll?: ReturnType<typeof setTimeout>;
     private contextCheck?: ReturnType<typeof setInterval>;
     private busy = false;
+    private reconnect?: ReconnectTarget;
+    private reconnectTimer?: ReturnType<typeof setTimeout>;
     private identity?: E2eeIdentity;
     private identityStore?: IdentityStore;
     private publisherTrust?: string;
@@ -98,6 +128,18 @@ export class WatchController implements ScreenshareTransport {
     }
 
     reset(phase: WatchStatus["phase"] = "disconnected", message = "DASS viewer closed. Room binding and media were cleared.", closedShare?: DassShare, failedShare?: DassShare) {
+        this.cancelReconnect();
+        this.teardown(phase, message, { closedShare, failedShare });
+    }
+
+    private cancelReconnect() {
+        clearTimeout(this.reconnectTimer);
+        this.reconnectTimer = undefined;
+        this.reconnect = undefined;
+    }
+
+    /** Releases media and signaling; automatic reconnect state is owned by the callers. */
+    private teardown(phase: WatchStatus["phase"], message: string, retained: Pick<WatchStatus, "closedShare" | "failedShare" | "watchingShare"> = {}) {
         ++this.epoch;
         clearTimeout(this.poll);
         this.routing.setRoom(undefined);
@@ -108,14 +150,14 @@ export class WatchController implements ScreenshareTransport {
         this.abort = undefined;
         this.peer = undefined;
         this.signaling = undefined;
-        this.closedContextId = closedShare || failedShare ? this.contextId : undefined;
+        this.closedContextId = retained.closedShare || retained.failedShare ? this.contextId : undefined;
         this.contextId = this.roomId = undefined;
         this.busy = false;
         // The pinned identity is a long-lived local anchor and survives the
         // stream; only the stream-scoped trust label is cleared.
         this.publisherTrust = undefined;
-        this.update({ phase, message, shares: [], candidates: [], closedShare, failedShare,
-            disconnectedAtMs: closedShare || failedShare ? Date.now() : undefined });
+        this.update({ phase, message, shares: [], candidates: [], ...retained,
+            disconnectedAtMs: retained.closedShare || retained.failedShare ? Date.now() : undefined });
     }
 
     stop() {
@@ -136,22 +178,54 @@ export class WatchController implements ScreenshareTransport {
     }
 
     private failure(error: unknown) {
-        logDiagnostic("viewer setup failed", { code: error instanceof SpikeSignalingError ? error.code : browserFailureCode(error) }, true);
         const code = error instanceof SpikeSignalingError ? error.code : "";
+        logDiagnostic("viewer setup failed", { code: code || browserFailureCode(error) }, true);
         const unauthorized = isAuthenticationRejected(error) || code === "server:revoked";
         const disconnected = ["socket", "closed", "timeout", "expired", "server:left", "server:expired", "server:transport_failed"].includes(code);
         const message = error instanceof SpikeSignalingError
             ? signalingFailureMessage(error)
                 : "DASS setup failed. Check TLS, room access, LAN IP matching and the UDP path. No Discord fallback.";
         if (unauthorized) this.reset("unauthorized", message);
-        else this.unexpectedClose(disconnected ? "disconnected" : "failed", message);
+        else this.unexpectedClose(disconnected ? "disconnected" : "failed", message, code);
     }
 
-    private unexpectedClose(phase: "disconnected" | "failed", message: string) {
-        const share = this.status.phase === "watching" && this.status.stream ? this.status.watchingShare : undefined;
-        const failed = !share ? this.status.watchingShare : undefined;
+    /** `cause` is a signaling or `stage:code` peer failure; only transient causes re-watch the same share. */
+    private unexpectedClose(phase: "disconnected" | "failed", message: string, cause = "") {
+        const watched = this.status.phase === "watching" && this.status.stream ? this.status.watchingShare : undefined;
         const metadata = (value: DassShare | undefined) => value ? { roomId: value.roomId, shareId: value.shareId, displayName: value.displayName } : undefined;
-        this.reset(phase, message, metadata(share), metadata(failed));
+        const target = this.reconnect;
+        if (target && (watched || target.attempt > 0)) {
+            if (target.watchingSinceMs !== undefined && Date.now() - target.watchingSinceMs >= RECONNECT_STABLE_MS) target.attempt = 0;
+            target.watchingSinceMs = undefined;
+            if (retryableFailure(cause) && target.attempt < RECONNECT_DELAYS_MS.length && this.active && this.currentContext() === target.contextId) {
+                this.scheduleReconnect(target, cause);
+                return;
+            }
+            if (target.attempt > 0) logDiagnostic("viewer reconnect stopped", { code: cause || "none", attempt: target.attempt }, true);
+            const stopped = target.attempt > 0 ? ` Automatic reconnection stopped after ${target.attempt} attempt${target.attempt === 1 ? "" : "s"}.` : "";
+            this.reset(phase, `${message}${stopped}`, metadata(watched ?? target.share));
+            return;
+        }
+        const failed = !watched ? this.status.watchingShare : undefined;
+        this.reset(phase, message, metadata(watched), metadata(failed));
+    }
+
+    private scheduleReconnect(target: ReconnectTarget, cause: string) {
+        const delayMs = RECONNECT_DELAYS_MS[target.attempt];
+        target.attempt++;
+        logDiagnostic("viewer reconnect scheduled", { code: cause, attempt: target.attempt }, true);
+        this.teardown("loading", `${dropReason(cause)} [${cause}] Reconnecting in ${Math.round(delayMs / 1000)} s (attempt ${target.attempt} of ${RECONNECT_DELAYS_MS.length})…`,
+            { watchingShare: { ...target.share } });
+        // A context change while waiting cancels the retry through the normal context check.
+        this.closedContextId = target.contextId;
+        this.reconnect = target;
+        clearTimeout(this.reconnectTimer);
+        const timer = setTimeout(() => {
+            if (this.reconnectTimer !== timer) return;
+            this.reconnectTimer = undefined;
+            if (this.reconnect === target && this.active && this.currentContext() === target.contextId) void this.connectListedShare(target);
+        }, delayMs);
+        this.reconnectTimer = timer;
     }
 
     async bind(backendUrl: string, roomId: string, credential: string | DassAuthentication) {
@@ -212,7 +286,7 @@ export class WatchController implements ScreenshareTransport {
             if (!this.current(epoch)) { peer.close(); return; }
             this.peer = peer;
             peer.closed.addEventListener("abort", () => {
-                if (this.current(epoch)) this.unexpectedClose("disconnected", peer.closeMessage);
+                if (this.current(epoch)) this.unexpectedClose("disconnected", peer.closeMessage, peer.closeCode ?? "");
             }, { once: true });
             if (peer.closed.aborted) throw new Error("Viewer closed.");
             this.update({ ...this.status, phase: "ready", message: "Viewer prepared for 180 seconds. Automatic LAN admission needs no port updates; static policies require allowlisting. No capture is requested.",
@@ -240,28 +314,40 @@ export class WatchController implements ScreenshareTransport {
         const intercepted = routeWatch(this.routing, { transport: "dass", share });
         if (!intercepted.handled) throw new Error("DASS watch was not consumed.");
             const result = await intercepted.completion;
-            if (this.current(epoch)) {
-                this.busy = false;
-                if (result.ok) this.update({ ...this.status, phase: "watching",
+        if (this.current(epoch)) {
+            this.busy = false;
+            if (result.ok) {
+                if (this.reconnect) this.reconnect.watchingSinceMs = Date.now();
+                this.update({ ...this.status, phase: "watching",
                     message: `DASS tracks attached (${this.publisherTrust ?? "E2EE — identity unverified (TOFU)"}). Use Enable audio to permit sound playback.`,
                     stream: result.value,
                     watchingShare: this.status.shares.find(listed => listed.shareId === share.shareId) ?? { roomId: share.roomId, shareId: share.shareId } });
-            else this.unexpectedClose("failed", result.message);
+            } else this.unexpectedClose("failed", result.message);
         }
         return result;
     }
 
     async watchListedShare(backendUrl: string, share: DassShare, credential: string | DassAuthentication) {
-        this.reset();
+        this.cancelReconnect();
+        return this.connectListedShare({ backendUrl, share: { ...share }, credential, contextId: this.currentContext(), attempt: 0 });
+    }
+
+    /** One watch attempt for a directory share; also the automatic reconnect entry point. */
+    private async connectListedShare(target: ReconnectTarget) {
+        const { share } = target;
+        this.teardown(target.attempt ? "loading" : "disconnected", target.attempt
+            ? `Reconnecting to the stream (attempt ${target.attempt} of ${RECONNECT_DELAYS_MS.length})…`
+            : "DASS viewer closed. Room binding and media were cleared.", { watchingShare: { ...share } });
+        this.reconnect = target;
         const { epoch } = this;
-        this.update({ ...this.status, watchingShare: { ...share } });
         await this.prepareViewer();
         if (!this.current(epoch) || !this.peer) return { ok: false as const, message: this.status.message };
-        await this.bind(backendUrl, share.roomId, credential);
+        await this.bind(target.backendUrl, share.roomId, target.credential);
         if (!this.current(epoch)) return { ok: false as const, message: "DASS watching was cancelled." };
         if (this.status.phase !== "ready") return { ok: false as const, message: this.status.message };
         if (!this.status.shares.some(listed => listed.roomId === share.roomId && listed.shareId === share.shareId)) {
-            this.unexpectedClose("failed", "This publisher is no longer in the authorized DASS directory.");
+            if (target.attempt) this.unexpectedClose("disconnected", "The stream ended while reconnecting.");
+            else this.unexpectedClose("failed", "This publisher is no longer in the authorized DASS directory.");
             return { ok: false as const, message: this.status.message };
         }
         return this.watch(share);
@@ -329,9 +415,10 @@ export class WatchController implements ScreenshareTransport {
                             const pin = await pinReady;
                             const { epoch, keyBytes } = await unwrapEpochKey(identity, pin.key, `stream/${share.shareId}`, blob);
                             this.peer?.setReceiveEpoch(epoch, keyBytes);
-                            // Old epoch keys are dropped so a removed or
-                            // replaced key stops being usable here.
-                            this.peer?.retireEpochsBelow(epoch);
+                            // The publisher switches to a new epoch only after relaying
+                            // it, so frames under the previous epoch may still arrive.
+                            // Keep exactly one previous epoch; older keys are dropped.
+                            this.peer?.retireEpochsBelow(epoch - 1);
                         })().catch(() => logDiagnostic("epoch key unwrap failed", {}, true));
                     },
                 } });

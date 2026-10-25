@@ -8,13 +8,14 @@ import "./style.css";
 
 import { Button } from "@components/Button";
 import { Paragraph } from "@components/Paragraph";
+import { copyToClipboard } from "@utils/clipboard";
 import { TextInput, useEffect, useRef, useState } from "@webpack/common";
 
 import { readRememberedAccount } from "./accountStorage";
 import { type LocalCaptureCheck } from "./capture";
 import { getCaptureBridge } from "./captureHost";
 import { type DiscoveryController } from "./controller";
-import { diagnosticClientId } from "../../clients/spike/diagnostics";
+import { diagnosticClientId, RECENT_LOG_LIMIT, recentDiagnostics } from "../../clients/spike/diagnostics";
 import { trustPrompt } from "../../clients/spike/e2ee";
 import { type PublishController } from "./publishing";
 import { type DassSession } from "./session";
@@ -84,6 +85,17 @@ export function SettingsPanel({ session, publisher, watching, discovery, localCa
         }
     }
 
+    async function copyRecentLogs() {
+        const lines = recentDiagnostics();
+        if (!lines.length) return setMessage("No DASS log entries from the last 3 minutes.");
+        try {
+            await copyToClipboard(lines.join("\n"));
+            setMessage(`Copied ${lines.length} DASS log ${lines.length === 1 ? "entry" : "entries"} from the last 3 minutes (at most ${RECENT_LOG_LIMIT}).`);
+        } catch {
+            setMessage("Clipboard unavailable. The recent DASS logs could not be copied.");
+        }
+    }
+
     return <div className="vc-dass-settings">
         <label className="vc-dass-field">
             <span>Username</span>
@@ -100,6 +112,9 @@ export function SettingsPanel({ session, publisher, watching, discovery, localCa
         </div>
         <Paragraph role="status" aria-live="polite">{message || account.message}</Paragraph>
         <Paragraph>Admin log client: {diagnosticClientId()}. While connected, DASS sends bounded operational diagnostics to this backend. No raw console output, credentials or media payloads.</Paragraph>
+        <div className="vc-dass-actions">
+            <Button size="small" variant="secondary" onClick={() => void copyRecentLogs()}>Copy recent DASS logs</Button>
+        </div>
         {advanced && <div className="vc-dass-advanced">
             <Paragraph>Advanced diagnostics only. The native watch tile/player hook is not implemented; this temporary test player is not the replacement UI.</Paragraph>
             <Paragraph role="status">{publishStatus.message}</Paragraph>

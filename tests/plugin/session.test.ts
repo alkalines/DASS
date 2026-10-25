@@ -48,6 +48,34 @@ test("logout during a concurrent connection attempt closes the late result as we
     } finally { session.stop(); }
 });
 
+test("parallel watches authenticate one at a time instead of racing the backend's login pool", async () => {
+    const pending: Array<(connection: SpikeSignaling) => void> = [];
+    let inFlight = 0;
+    let maximum = 0;
+    const session = new DassSession(undefined, () => {
+        maximum = Math.max(maximum, ++inFlight);
+        const { promise, resolve } = Promise.withResolvers<SpikeSignaling>();
+        pending.push(connection => { inFlight--; resolve(connection); });
+        return promise;
+    });
+    try {
+        await session.start(account.backendUrl);
+        const login = session.login(account, false);
+        pending.shift()!(fakeConnection().connection);
+        await login;
+        const options = () => ({ experimental: true as const, backendUrl: account.backendUrl, ...session.getAccess(), signal: new AbortController().signal });
+        await session.connect(options());
+        const watches = [session.connect(options()), session.connect(options()), session.connect(options())];
+        for (let completed = 0; completed < 3; completed++) {
+            for (let flush = 0; flush < 10 && !pending.length; flush++) await Promise.resolve();
+            expect(pending).toHaveLength(1);
+            pending.shift()!(fakeConnection().connection);
+        }
+        expect(new Set(await Promise.all(watches)).size).toBe(3);
+        expect(maximum).toBe(1);
+    } finally { session.stop(); }
+});
+
 test("call context is derived live and saved credentials contain no room selection", async () => {
     let callId: string | undefined;
     let saved: AccountCredentials | undefined;

@@ -239,7 +239,9 @@ export class PublishController {
                             const pending = [...this.status.pendingViewers.filter(existing => existing.requestId !== viewRequest.request_id),
                                 { requestId: viewRequest.request_id, viewerId: viewRequest.viewer_id, displayName: viewRequest.viewer_display_name, trust }];
                             this.update({ ...this.status, pendingViewers: pending });
-                            if (this.willAutoApprove(trust)) void this.decideView(viewRequest.request_id, "approve");
+                            if (this.willAutoApprove(trust) || this.isApprovedReconnect(operation, requestKey.viewerId, requestKey.key, trust)) {
+                                void this.decideView(viewRequest.request_id, "approve");
+                            }
                             // The safety number needs a digest, so it fills in
                             // once it is computed.
                             const { identity } = operation;
@@ -282,6 +284,14 @@ export class PublishController {
         const next = prior.then(() => this.decideViewQueued(operation, requestId, decision));
         operation.membershipQueue = next.then(() => {}, () => {});
         await next;
+    }
+
+    /** A device already approved for this stream rejoins after a dropped connection without a new prompt.
+     * Removal, denial or blocking clears the approval; a changed key never qualifies. */
+    private isApprovedReconnect(operation: NonNullable<PublishController["operation"]>, viewerId: string, key: string, trust: IdentityTrust) {
+        return trust.kind !== "changed" && operation.viewerKeys?.get(viewerId) === key
+            && this.status.approvedViewers.some(viewer => viewer.viewerId === viewerId)
+            && (!this.dependencies.requireVerifiedViewers?.() || trust.kind === "verified");
     }
 
     /** Auto-approval never covers a changed identity or bypasses the verified-viewer policy. */
@@ -412,15 +422,18 @@ export class PublishController {
                 blob: await (this.dependencies.wrapEpochKey ?? wrapEpochKey)(operation.identity!, member.viewerKey, `stream/${operation.sessionId}`, epoch, epochKey),
             })));
             if (!current()) return;
-            operation.peer.setSendEpoch(epoch, epochKey);
-            operation.epoch = epoch;
-            operation.epochKey = epochKey;
-            try { operation.peer.retireEpochsBelow(epoch); } catch {}
+            // Every member holds the new key before any frame uses it, so a
+            // rekey (for example when a viewer joins or reconnects) does not
+            // blank the stream for viewers that are already watching.
             for (const member of wrapped) {
                 if (!current()) throw new Error("Membership changed during epoch relay.");
                 await operation.signaling.keyRelay(operation.sessionId, member.viewerId, member.blob);
                 if (!current()) throw new Error("Membership changed during epoch relay.");
             }
+            operation.peer.setSendEpoch(epoch, epochKey);
+            operation.epoch = epoch;
+            operation.epochKey = epochKey;
+            try { operation.peer.retireEpochsBelow(epoch); } catch {}
         } catch (error) {
             logDiagnostic("epoch rekey failed; publishing stopped", { code: error instanceof SpikeSignalingError ? error.code : "unknown" }, true);
             this.fail(operation, "A fresh approved-viewer epoch could not be installed and distributed. Publishing stopped fail-closed.");

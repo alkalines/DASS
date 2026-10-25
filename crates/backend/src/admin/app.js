@@ -392,15 +392,52 @@ let logPoll;
 let logsPaused = false;
 let logText;
 let logSource;
+let logPause;
 let logEntries = [];
+const RECENT_LOG_WINDOW_MS = 3 * 60_000;
+const RECENT_LOG_LIMIT = 100;
 
-function renderLogs() {
-    const selected = logEntries.filter(entry => !logSource.value || (entry.source === "server" ? "server" : entry.client_id) === logSource.value);
-    logText.value = selected.map(entry => JSON.stringify({
+function selectedLogEntries() {
+    return logEntries.filter(entry => !logSource.value || (entry.source === "server" ? "server" : entry.client_id) === logSource.value);
+}
+
+function logLine(entry) {
+    return JSON.stringify({
         ...entry,
         time: new Date(entry.at_unix_ms).toISOString(),
         received_time: new Date(entry.received_at_unix_ms).toISOString()
-    })).join("\n");
+    });
+}
+
+function renderLogs() {
+    logText.value = selectedLogEntries().map(logLine).join("\n");
+}
+
+function setLogsPaused(paused) {
+    logsPaused = paused;
+    logPause.textContent = paused ? "Resume" : "Pause";
+}
+
+/** Backend receipt time is used because client clocks can differ. */
+async function copyRecentLogs() {
+    const since = Date.now() - RECENT_LOG_WINDOW_MS;
+    const lines = selectedLogEntries().filter(entry => entry.received_at_unix_ms >= since).slice(-RECENT_LOG_LIMIT).map(logLine);
+    if (!lines.length) {
+        message.textContent = "No log entries from the last 3 minutes for this source.";
+        return;
+    }
+    const text = lines.join("\n");
+    try {
+        await navigator.clipboard.writeText(text);
+        message.textContent = `Copied ${lines.length} log ${lines.length === 1 ? "entry" : "entries"} from the last 3 minutes.`;
+    } catch {
+        // Show exactly the requested lines, and keep refreshes from replacing them.
+        setLogsPaused(true);
+        logText.value = text;
+        logText.focus();
+        logText.select();
+        message.textContent = "Clipboard unavailable. The last 3 minutes are selected and refreshing is paused; press Ctrl+C to copy.";
+    }
 }
 
 async function loadLogs() {
@@ -408,16 +445,15 @@ async function loadLogs() {
     const result = await api("logs");
     if (!logText) {
         content.replaceChildren();
-        content.append(node("p", "Recent DASS diagnostics, oldest first (512 entries, memory only; cleared on backend restart). Client labels are random per client runtime, not account names. Client events are self-reported; compare received_time when clocks differ. Pre-login and disconnected client logs remain local.", "hint"));
+        content.append(node("p", "Recent DASS diagnostics, oldest first (512 entries, memory only; cleared on backend restart). Client labels are random per client runtime, not account names. Client events are self-reported; compare received_time when clocks differ. Pre-login and disconnected client logs remain local; use Copy recent DASS logs in the plugin settings for those.", "hint"));
         logSource = node("select");
         logSource.setAttribute("aria-label", "Log source");
         logSource.addEventListener("change", renderLogs);
-        const pause = button("Pause", () => {
-            logsPaused = !logsPaused;
-            pause.textContent = logsPaused ? "Resume" : "Pause";
+        logPause = button("Pause", () => {
+            setLogsPaused(!logsPaused);
             if (!logsPaused) return loadLogs();
         });
-        content.append(logSource, pause, button("Copy JSON lines", async () => {
+        content.append(logSource, logPause, button(`Copy last 3 minutes (max ${RECENT_LOG_LIMIT})`, copyRecentLogs), button("Copy JSON lines", async () => {
             try {
                 await navigator.clipboard.writeText(logText.value);
                 message.textContent = "Logs copied.";

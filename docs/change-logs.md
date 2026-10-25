@@ -8,6 +8,54 @@ Uncommitted work has no commit ID until it is committed.
 > [!WARNING]
 > DASS is experimental. Production use and unrestricted public deployment are not recommended. Functional tests are not an independent security audit.
 
+## [Unreleased]
+
+### Added
+
+- **Watch several streams:** one client can watch up to 16 streams at once, each
+  in its own tile with independent connection, reconnect and audio; stopping one
+  leaves the others. The backend allows 20 connections per account (directory,
+  publishing, 16 watches, reconnect slack); an account is meant for one client.
+  The plugin now logs in one connection at a time to avoid backend login
+  overload. Each watched stream uses its own media slot, so size
+  `DASS_MAX_MEDIA_SESSIONS` accordingly.
+- **Viewer auto-reconnect:** a watched stream that drops for a transient reason
+  (UDP/media loss, server `transport_failed`, setup timeout, socket loss,
+  overload) is re-watched automatically after 1, 2, 4, 8 and 15 seconds, with
+  the cause shown on the tile. Ended streams, removal, denial, revoked access,
+  changed identities and explicit stops are not retried. Publishers re-admit the
+  same already-approved device for the current stream without a new prompt.
+- **Log copying:** the admin Logs page can copy the selected source's last three
+  minutes (at most 100 entries); the plugin settings can copy the client's own
+  last three minutes (at most 100 entries), including events that never reached
+  the backend.
+
+### Fixed
+
+- **Stream stability:** keyframe bursts no longer overflow 32-packet backend
+  queues (now 512 per viewer and per session ingress); a full viewer queue drops
+  packets for that viewer and requests a keyframe instead of disconnecting it;
+  media budgets drop excess packets instead of closing sessions; ICE
+  `Disconnected` gets a 15-second recovery window; large outgoing bursts are sent
+  in batches instead of failing; keyframe requests are no longer lost to rate
+  limiting, and the forced keyframe cadence dropped from 1 s to 3 s.
+- **Rekey blanking:** publishers relay a new media epoch to every approved viewer
+  before encrypting with it, and viewers keep one previous epoch, so a viewer
+  joining or reconnecting no longer blanks the stream for others.
+- **Publish while watching:** re-selecting the current voice channel no longer
+  stops both sharing and watching.
+- **Error messages:** signaling and media failures explain each code in plain
+  language and keep the bracketed code.
+
+### Validation and upgrade notes
+
+- Rebuild the backend **and** both clients. Plugin tests, lint, typecheck and
+  bundle builds passed with Bun 1.4.4. On 2026-10-25 the user reported that
+  `docker compose build backend` (formatting, Clippy with warnings denied,
+  locked tests) succeeded and the backend is running.
+- Real-client runtime acceptance of reconnection, burst handling,
+  publish-while-watching and multi-stream watching is pending.
+
 ## [1.0.1] - 2026-10-23
 
 ### Added

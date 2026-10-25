@@ -7,10 +7,21 @@
 import { logDiagnostic, mediaDiagnostics } from "./diagnostics";
 import { E2eeTransforms } from "./e2ee";
 import type { CaptureLease } from "../../plugins/dass/routing";
-import { type DassAuthentication, SpikeSignaling, SpikeSignalingError, type ViewDecision } from "./signaling";
+import { type DassAuthentication, signalingFailureReason, SpikeSignaling, SpikeSignalingError, type ViewDecision } from "./signaling";
 
 export const PREPARATION_TIMEOUT_MS = 180_000;
 const APPROVAL_TIMEOUT_MESSAGE = "The streamer did not approve your request in time. Ask them to approve it, or to enable automatic approval.";
+const ACTIVATION_STAGES: Record<string, string> = {
+    signaling: "connecting to the DASS backend",
+    join: "joining the DASS room",
+    request_view: "requesting to watch",
+    subscribe: "subscribing to the stream",
+    publish: "starting the share",
+    viewer_presence: "enabling viewer presence",
+    offer: "negotiating media",
+    answer: "applying the media answer",
+    connection: "streaming media",
+};
 
 /** E2EE hooks for `SpikePeer.activate`. Identity keys are mandatory: the
  * backend refuses media setup without them (no transport-only mode). */
@@ -107,6 +118,7 @@ export class SpikePeer {
     private activated = false;
     private activationStage = "signaling";
     private closeDiagnostic?: string;
+    private closeReason?: string;
     private offer?: string;
     private timer?: ReturnType<typeof setTimeout>;
     private statsTimer?: ReturnType<typeof setTimeout>;
@@ -125,7 +137,7 @@ export class SpikePeer {
         peer.addEventListener("connectionstatechange", this.onState);
         peer.addEventListener("track", this.onTrack);
         capture?.stream.getTracks().forEach(track => track.addEventListener("ended", this.close, { once: true }));
-        this.timer = setTimeout(() => this.closeWithDiagnostic("Preparation expired after 180 seconds. Prepare fresh candidates."), PREPARATION_TIMEOUT_MS);
+        this.timer = setTimeout(() => this.closeWithDiagnostic("Preparation expired after 180 seconds. Prepare fresh candidates.", "preparation:expired"), PREPARATION_TIMEOUT_MS);
     }
 
     static async prepare(options: { experimental: true; signal: AbortSignal; capture?: CaptureLease; e2ee?: boolean; }): Promise<SpikePeer> {
@@ -242,8 +254,11 @@ export class SpikePeer {
         }
         this.activated = true;
         clearTimeout(this.timer);
-        this.timer = setTimeout(() => this.closeWithDiagnostic(this.activationStage === "request_view" ? APPROVAL_TIMEOUT_MESSAGE
-            : `Activation failed [${this.activationStage}:timeout]. Check UDP reachability if the answer was applied.`), 15_000);
+        this.timer = setTimeout(() => {
+            if (this.activationStage === "request_view") this.closeWithDiagnostic(APPROVAL_TIMEOUT_MESSAGE, "request_view:approval_timeout");
+            else this.closeWithDiagnostic(`DASS could not finish ${ACTIVATION_STAGES[this.activationStage] ?? "media setup"} within 15 seconds [${this.activationStage}:timeout]. If the answer was applied, the backend's UDP media ports may be unreachable. No Discord fallback.`,
+                `${this.activationStage}:timeout`);
+        }, 15_000);
         try {
             this.signaling = options.signaling ?? await SpikeSignaling.connect({ experimental: true, backendUrl: options.backendUrl,
                 credential: options.credential, username: options.username, password: options.password, signal: this.closed });
@@ -305,7 +320,8 @@ export class SpikePeer {
             this.onState();
             return joined.session_id;
         } catch (error) {
-            this.closeWithDiagnostic(this.activationFailure(error));
+            const failure = this.activationFailure(error);
+            this.closeWithDiagnostic(failure.message, failure.code);
             throw new Error("DASS media setup failed or was cancelled. No Discord fallback.");
         }
     }
@@ -332,22 +348,36 @@ export class SpikePeer {
         return this.activationStage === "request_view" ? APPROVAL_TIMEOUT_MESSAGE : "Test stopped. Capture and connection resources were released.";
     }
 
-    private activationFailure(error: unknown): string {
-        const code = error instanceof SpikeSignalingError ? error.code : "";
-        if (this.activationStage === "request_view") {
-            if (code === "rejected:denied") return "The streamer denied your request to watch.";
-            if (["", "cancelled", "closed", "timeout", "server:setup_timeout"].includes(code)) return APPROVAL_TIMEOUT_MESSAGE;
-        }
-        return `Activation failed [${this.activationStage}${code && `:${code}`}]. No Discord fallback.`;
+    /** Stable `stage:code` failure code for retry decisions, e.g. `connection:failed` or `subscribe:rejected:invalid_state`. */
+    get closeCode(): string {
+        return this.closeReason ?? "closed";
     }
 
-    private closeWithDiagnostic(message: string) {
-        if (this.active) logDiagnostic("peer failed", { diagnostic: message }, true);
-        if (this.active) this.closeDiagnostic = message;
+    private activationFailure(error: unknown): { code: string; message: string; } {
+        const code = error instanceof SpikeSignalingError ? error.code : "";
+        if (this.activationStage === "request_view") {
+            if (code === "rejected:denied") return { code: "request_view:denied", message: "The streamer denied your request to watch." };
+            if (["", "cancelled", "closed", "timeout", "server:setup_timeout"].includes(code)) return { code: "request_view:approval_timeout", message: APPROVAL_TIMEOUT_MESSAGE };
+        }
+        const stage = ACTIVATION_STAGES[this.activationStage] ?? "media setup";
+        const failure = `${this.activationStage}${code && `:${code}`}`;
+        return { code: failure, message: `DASS failed while ${stage} [${failure}].${code ? ` ${signalingFailureReason(code)}` : ""} No Discord fallback.` };
+    }
+
+    private closeWithDiagnostic(message: string, code: string) {
+        if (this.active) {
+            const [stage, ...detail] = code.split(":");
+            logDiagnostic("peer failed", { stage, code: detail.join(":") || "none", diagnostic: message }, true);
+            this.closeDiagnostic = message;
+            this.closeReason = code;
+        }
         this.close();
     }
 
-    private readonly onSignalingClosed = () => this.closeWithDiagnostic(this.activationFailure(this.signaling?.closed.reason));
+    private readonly onSignalingClosed = () => {
+        const failure = this.activationFailure(this.signaling?.closed.reason);
+        this.closeWithDiagnostic(failure.message, failure.code);
+    };
 
     private readonly onState = () => {
         if (!this.active) return;
@@ -361,11 +391,11 @@ export class SpikePeer {
             // not extend the grace period, and setup retains its own deadline.
             this.disconnectTimer ??= setTimeout(() => {
                 if (this.active && this.peer.connectionState !== "connected") {
-                    this.closeWithDiagnostic("Media stopped [connection:disconnected_timeout]. The UDP connection did not recover within 15 seconds. Try watching again.");
+                    this.closeWithDiagnostic("Media stopped [connection:disconnected_timeout]. The UDP connection did not recover within 15 seconds.", "connection:disconnected_timeout");
                 }
             }, 15_000);
         } else if (["failed", "closed"].includes(this.peer.connectionState)) {
-            this.closeWithDiagnostic(`Media stopped [connection:${this.peer.connectionState}]. Check the UDP path and peer lifecycle.`);
+            this.closeWithDiagnostic(`Media stopped [connection:${this.peer.connectionState}]. The UDP media connection to the DASS backend was lost.`, `connection:${this.peer.connectionState}`);
         }
     };
 

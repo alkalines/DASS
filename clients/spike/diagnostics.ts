@@ -9,6 +9,11 @@ import type { DiagnosticEntry } from "../../crates/protocol/generated/signaling"
 const collectors = new Set<(entry: DiagnosticEntry) => void>();
 let clientId: string | undefined;
 
+/** Local copy of recent events, kept even when no backend connection can upload them. */
+export const RECENT_LOG_LIMIT = 100;
+export const RECENT_LOG_WINDOW_MS = 3 * 60_000;
+const recentLog: Array<{ atMs: number; event: string; failed: boolean; details: Record<string, string | number | boolean>; }> = [];
+
 /** Random, process-local label, not an account/Discord/device identifier. */
 export function diagnosticClientId() {
     return clientId ??= `client_${crypto.randomUUID().replaceAll("-", "")}`;
@@ -20,13 +25,21 @@ export function collectDiagnostics(collector: (entry: DiagnosticEntry) => void) 
     return () => { collectors.delete(collector); };
 }
 
+/** JSON lines of the last three minutes of local DASS events, at most 100, oldest first. */
+export function recentDiagnostics(nowMs = Date.now()): string[] {
+    return recentLog.filter(entry => nowMs - entry.atMs <= RECENT_LOG_WINDOW_MS).slice(-RECENT_LOG_LIMIT)
+        .map(entry => JSON.stringify({ time: new Date(entry.atMs).toISOString(), client_id: diagnosticClientId(), event: entry.event, failed: entry.failed, details: entry.details }));
+}
+
 /** Callers must supply fixed events and non-sensitive state only, never payloads or raw errors. */
 export function logDiagnostic(event: string, details: Record<string, string | number | boolean> = {}, failed = false) {
     if (failed) console.error(`[DASS] ${event}`, details);
     else console.info(`[DASS] ${event}`, details);
+    const now = Date.now();
+    if (recentLog.length >= RECENT_LOG_LIMIT) recentLog.shift();
+    recentLog.push({ atMs: now, event, failed, details: { ...details } });
     const collector = collectors.values().next().value;
     if (collector) {
-        const now = Date.now();
         const encoded = JSON.stringify(details);
         if (event.length <= 96 && new TextEncoder().encode(encoded).byteLength <= 2048) {
             collector({ at_unix_seconds: Math.floor(now / 1000), milliseconds: now % 1000, event, failed, details: encoded });

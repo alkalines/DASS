@@ -15,19 +15,30 @@ const share = { roomId: "call", shareId: "publisher", displayName: "DASS account
 const directory: WatchStatus = { ...idle, phase: "ready", shares: [share] };
 
 test("grid presentation is scoped, deduplicated and bounded without native stream records", () => {
-    expect(gridShares("call", "call", true, true, directory, idle)).toEqual([
+    expect(gridShares("call", "call", true, true, directory, [])).toEqual([
         { key: "dass-local:call", kind: "local" }, { key: "dass-remote:call:publisher", kind: "remote", share }
     ]);
-    expect(gridShares("call", "other", true, true, directory, idle)).toEqual([]);
-    expect(gridShares("call", "call", false, true, directory, idle)).toEqual([]);
-    expect(gridShares("call", "call", true, false, { ...directory, phase: "unauthorized" }, idle)).toEqual([]);
+    expect(gridShares("call", "other", true, true, directory, [])).toEqual([]);
+    expect(gridShares("call", "call", false, true, directory, [])).toEqual([]);
+    expect(gridShares("call", "call", true, false, { ...directory, phase: "unauthorized" }, [])).toEqual([]);
     const pending = { ...idle, phase: "loading" as const, watchingShare: share };
-    expect(gridShares("call", "call", true, false, directory, pending)).toHaveLength(1);
-    expect(gridShares("call", "call", true, false, idle, pending)).toHaveLength(1);
-    expect(gridShares("call", "call", true, false, idle, { ...pending, phase: "failed" })).toEqual([]);
-    expect(gridShares("call", "call", true, false, { ...directory, shares: [{ ...share, roomId: "other" }] }, idle)).toEqual([]);
+    expect(gridShares("call", "call", true, false, directory, [pending])).toHaveLength(1);
+    expect(gridShares("call", "call", true, false, idle, [pending])).toHaveLength(1);
+    expect(gridShares("call", "call", true, false, idle, [{ ...pending, phase: "failed" }])).toEqual([]);
+    expect(gridShares("call", "call", true, false, { ...directory, shares: [{ ...share, roomId: "other" }] }, [])).toEqual([]);
     const many = { ...directory, shares: Array.from({ length: 100 }, (_, index) => ({ ...share, shareId: `publisher_${index}` })) };
-    expect(gridShares("call", "call", true, false, many, idle)).toHaveLength(64);
+    expect(gridShares("call", "call", true, false, many, [])).toHaveLength(64);
+});
+
+test("several watched streams each keep their own pending, live or ended tile", () => {
+    const other = { ...share, shareId: "other" };
+    const live: WatchStatus = { ...idle, phase: "watching", watchingShare: share, stream: {} as MediaStream };
+    const ended: WatchStatus = { ...idle, phase: "disconnected", closedShare: other, disconnectedAtMs: 100 };
+    const confirmed: WatchStatus = { ...directory, directoryRoomId: "call", shares: [share], directoryRequestedAtMs: 101 };
+    expect(gridShares("call", "call", true, false, confirmed, [live, ended])).toEqual([
+        { key: "dass-remote:call:publisher", kind: "remote", share },
+        { key: "dass-remote:call:other", kind: "remote", share: other, ended: true }
+    ]);
 });
 
 test("native grid keys and callbacks are untouched; only owned render callbacks have DASS keys", () => {
@@ -52,20 +63,20 @@ test("a previously watched share ends only after matching authenticated director
     const closed: WatchStatus = { ...idle, phase: "disconnected", closedShare: share, disconnectedAtMs: 100 };
     const confirmed: WatchStatus = { ...directory, directoryRoomId: "call", shares: [], directoryRequestedAtMs: 101 };
     const expected = [{ key: "dass-remote:call:publisher", kind: "remote", share, ended: true }];
-    expect(gridShares("call", "call", true, false, confirmed, closed)).toEqual(expected);
+    expect(gridShares("call", "call", true, false, confirmed, [closed])).toEqual(expected);
     for (const unconfirmed of [idle, { ...confirmed, phase: "failed" as const },
         { ...confirmed, phase: "unauthorized" as const }, { ...confirmed, directoryRoomId: "other" },
         { ...confirmed, directoryRoomId: undefined }, { ...confirmed, shares: [share] },
         { ...confirmed, directoryRequestedAtMs: undefined }, { ...confirmed, directoryRequestedAtMs: 99 },
         { ...confirmed, directoryRequestedAtMs: 100 }]) {
-        const tiles = gridShares("call", "call", true, false, unconfirmed, closed);
+        const tiles = gridShares("call", "call", true, false, unconfirmed, [closed]);
         expect(tiles).toHaveLength(1);
         expect(tiles[0]).not.toHaveProperty("ended");
     }
-    expect(gridShares("call", "call", false, false, confirmed, closed)).toEqual([]);
-    expect(gridShares("call", "other", true, false, confirmed, closed)).toEqual([]);
-    expect(gridShares("call", "call", true, false, confirmed, idle)).toEqual([]);
-    expect(gridShares("call", "call", true, false, confirmed, { ...closed, phase: "unauthorized" })).toEqual([]);
+    expect(gridShares("call", "call", false, false, confirmed, [closed])).toEqual([]);
+    expect(gridShares("call", "other", true, false, confirmed, [closed])).toEqual([]);
+    expect(gridShares("call", "call", true, false, confirmed, [])).toEqual([]);
+    expect(gridShares("call", "call", true, false, confirmed, [{ ...closed, phase: "unauthorized" }])).toEqual([]);
 });
 
 const OBSERVED_GRID = 'function b(e){let{participants:t,onClick:n,onDoubleClick:b,onContextMenu:_,channel:S,className:T,inCall:R,totalNumberOfParticipants:O,popoutType:L}=e,P=(0,f.Us)()===E.BRT.POPOUT,M=(0,r.bG)([C.A],()=>C.A.getGuild(S.guild_id),[S.guild_id]),{dismissedActivityEntryPointTileChannel:w}=(0,N.P)(),U=(0,r.bG)([h.A],()=>h.A.getUserParticipantCount(S.id),[S]),D=(0,g.vp)(S.id,t),V=l.useCallback(()=>{(0,s.r)(()=>{N.P.setState({dismissedActivityEntryPointTileChannel:S.id})})},[S.id]);l.useEffect(()=>{null!=w&&S.id!==w&&(0,s.r)(()=>{N.P.setState({dismissedActivityEntryPointTileChannel:null})})},[S.id,w]);let G=(0,r.bG)([j.A],()=>S.isPrivate()||(0,A.K)(j.A,M,S),[M,S]),k=M?.afkChannelId===S.id,B=S.userLimit<=0||S.userLimit>1,F=(0,r.bG)([c.Ay],()=>c.Ay.getEmbeddedActivitiesForChannel(S.id).length<=0),z=(0,m.HX)(o.M.VC_TILE_ACTIVITIES_ENTRY_POINT),H=(0,d.et)(S.id)!==d.xy.CAN_LAUNCH,W=null!=w&&w===S.id,Y=D.map(e=>t=>(0,i.jsx)(I.Ay,{participant:e,channel:S,className:v.V,onClick:n,onDoubleClick:b,onContextMenu:_,inCall:R,width:t,popoutType:L},e.id));(0,u.A)({type:a.ImpressionTypes.VIEW,name:a.ImpressionNames.CHANNEL_CALL_VIDEO_GRID_VIEW,properties:{total_participants:O,can_invite:G,is_afk_channel:k,channel_user_limit:S.userLimit}},{trackOnInitialLoad:!0},[]);let $=F&&!H,[K,X]=(0,p._)();null!=M&&!k&&!S.isGuildStageVoice()&&(K?Y.push(e=>(0,i.jsx)(p.V,{width:e,handleClose:X},"clips-video-call-tile")):U>=2&&$&&!z&&!W?Y.push(e=>(0,i.jsx)(y.y,{channel:S,guild:M,width:e,inPopout:P,handleClose:V,userParticipantCount:U})):B&&1===U&&G&&Y.push(e=>(0,i.jsx)(y.y,{channel:S,guild:M,width:e,inPopout:P,handleClose:V,userParticipantCount:U,activitiesEnabled:$})));let q=l.useCallback(e=>D[e]?.id??"empty-tile",[D]);return(0,i.jsx)(x.A,{className:T,keyExtractor:q,paddingTop:64,paddingBottom:64,children:Y})}';
