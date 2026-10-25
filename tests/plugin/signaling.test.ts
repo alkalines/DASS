@@ -216,6 +216,25 @@ test("validated backend rejection survives socket cleanup without exposing reque
     } finally { diagnostic.mockRestore(); connection.close(); }
 });
 
+test("a key relay to a viewer that already left fails alone; the publisher connection stays open", async () => {
+    const socket = new Socket();
+    const connection = await connect(socket);
+    try {
+        const relay = connection.keyRelay("session", "gone_viewer", "YmxvYg");
+        socket.reply({ type: "rejected", code: "invalid_state" });
+        await expect(relay).rejects.toThrow("rejected:invalid_state");
+        expect(connection.closed.aborted).toBe(false);
+        const next = connection.keyRelay("session", "viewer", "YmxvYg");
+        socket.reply({ type: "accepted", session_id: "session" });
+        await next;
+        // Any other rejection of the same operation still closes the connection.
+        const unauthorized = connection.keyRelay("session", "viewer", "YmxvYg");
+        socket.reply({ type: "rejected", code: "unauthorized" });
+        await expect(unauthorized).rejects.toThrow("rejected:unauthorized");
+        expect(connection.closed.aborted).toBe(true);
+    } finally { connection.close(); }
+});
+
 test("aborted connect never opens a socket", async () => {
     const abort = new AbortController();
     abort.abort();

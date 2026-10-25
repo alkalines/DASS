@@ -427,7 +427,15 @@ export class PublishController {
             // blank the stream for viewers that are already watching.
             for (const member of wrapped) {
                 if (!current()) throw new Error("Membership changed during epoch relay.");
-                await operation.signaling.keyRelay(operation.sessionId, member.viewerId, member.blob);
+                try {
+                    await operation.signaling.keyRelay(operation.sessionId, member.viewerId, member.blob);
+                } catch (error) {
+                    // The viewer's session ended between approval and relay (it
+                    // left, failed or is reconnecting). It keeps its approval and
+                    // gets a fresh epoch when it rejoins; nobody else is affected.
+                    if (!(error instanceof SpikeSignalingError) || error.code !== "rejected:invalid_state" || operation.signaling.closed.aborted) throw error;
+                    logDiagnostic("epoch relay skipped; viewer not connected", { code: error.code });
+                }
                 if (!current()) throw new Error("Membership changed during epoch relay.");
             }
             operation.peer.setSendEpoch(epoch, epochKey);

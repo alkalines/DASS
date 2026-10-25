@@ -63,6 +63,11 @@ export class WatchSet {
         return entry.controller.watchListedShare(backendUrl, share, credential);
     }
 
+    /** Explicitly trust the changed identity a share's publisher presented; the next watch pins it. */
+    async acceptPublisherIdentity(share: DassShare) {
+        await this.watches.get(shareKey(share))?.controller.acceptPublisherIdentity();
+    }
+
     /** Stops one share's viewer and forgets its retained ended/error state. */
     stopWatching(share: DassShare) {
         this.release(shareKey(share));

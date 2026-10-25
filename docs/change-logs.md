@@ -46,13 +46,22 @@ Uncommitted work has no commit ID until it is committed.
   stops both sharing and watching.
 - **Error messages:** signaling and media failures explain each code in plain
   language and keep the bracketed code.
+- **Publisher stopped by a leaving viewer:** when an approved viewer's session
+  ended before its epoch key arrived (for example after an identity-check
+  failure), the backend's `rejected:invalid_state` closed the publisher's
+  connection and stopped the share. That relay is now skipped; the viewer keeps
+  its approval and gets a fresh key when it rejoins.
+- **Changed streamer identity:** a watch refused because the streamer's E2EE
+  identity changed now explains why on the tile and offers an explicit
+  **Trust new identity and watch** action instead of a generic setup error.
 
 ### Validation and upgrade notes
 
 - Rebuild the backend **and** both clients. Plugin tests, lint, typecheck and
   bundle builds passed with Bun 1.4.4. On 2026-10-25 the user reported that
   `docker compose build backend` (formatting, Clippy with warnings denied,
-  locked tests) succeeded and the backend is running.
+  locked tests) succeeded and the backend is running; the later diagnostic
+  allowlist addition for skipped relays has not been rebuilt yet.
 - Real-client runtime acceptance of reconnection, burst handling,
   publish-while-watching and multi-stream watching is pending.
 

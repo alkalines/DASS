@@ -32,13 +32,17 @@ function fixture(options: { requireVerifiedViewers?: boolean; autoApproveViewers
     const decisions: Array<{ requestId: string; decision: string; }> = [];
     const keyRelays: Array<{ viewerId: string; blob: string; }> = [];
     const removals: string[] = [];
+    const goneViewers = new Set<string>();
     const signalingClosed = new AbortController();
     const signaling = { closed: signalingClosed.signal, close: () => signalingClosed.abort(),
         onViewRequests: (_session: string, listener: typeof viewRequestListener) => { viewRequestListener = listener; },
         onViewRequestClosed: (_session: string, requestId: string, listener: () => void) => { requestClosedListeners.set(requestId, listener); },
         decideView: async (_session: string, requestId: string, decision: string) => { decisions.push({ requestId, decision }); await decisionGate; },
         removeViewer: async (_session: string, viewerId: string) => { removals.push(viewerId); if (rejectRemoval) throw new Error("remove failed"); },
-        keyRelay: async (_session: string, viewerId: string, blob: string) => { keyRelays.push({ viewerId, blob }); }
+        keyRelay: async (_session: string, viewerId: string, blob: string) => {
+            if (goneViewers.has(viewerId)) throw new SpikeSignalingError("rejected:invalid_state");
+            keyRelays.push({ viewerId, blob });
+        }
     } as unknown as SpikeSignaling;
     const peerClosed = new AbortController();
     const sendEpochs: number[] = [];
@@ -77,7 +81,7 @@ function fixture(options: { requireVerifiedViewers?: boolean; autoApproveViewers
         decisions, removals, keyRelays, sendEpochs, publisherPublicKey: () => publisherPublicKey,
         holdDecision: () => { decisionGate = new Promise<void>(resolve => { releaseDecision = resolve; }); },
         releaseDecision: () => { decisionGate = undefined; releaseDecision?.(); releaseDecision = undefined; },
-        failRemoval: () => { rejectRemoval = true; },
+        failRemoval: () => { rejectRemoval = true; }, viewerLeft: (viewerId: string) => { goneViewers.add(viewerId); },
         deny: () => { deny = true; }, failConnection: (error: SpikeSignalingError) => { failure = error; }, exit: () => { context = undefined; controller.reset(); } };
 }
 
@@ -452,6 +456,27 @@ test("an approved device that reconnects is re-admitted without a prompt until i
         await settle(3);
         expect(f.decisions).toHaveLength(2);
         expect(f.controller.getSnapshot().pendingViewers.map(viewer => viewer.requestId)).toContain("after_removal");
+    } finally { f.controller.stop(); }
+});
+
+test("a viewer that leaves before its key relay does not stop the stream for anyone", async () => {
+    const f = fixture();
+    const alice = await generateIdentity();
+    const bob = await generateIdentity();
+    try {
+        await f.controller.publish("https://dass.example", f.bridge);
+        f.request({ request_id: "alice_1", viewer_id: "alice", viewer_display_name: "Alice", viewer_key: alice.publicKey });
+        await Promise.resolve(); await Promise.resolve();
+        await f.controller.decideView("alice_1", "approve");
+        // Bob is approved but his session is gone before the relay arrives.
+        f.viewerLeft("bob");
+        f.request({ request_id: "bob_1", viewer_id: "bob", viewer_display_name: "Bob", viewer_key: bob.publicKey });
+        await Promise.resolve(); await Promise.resolve();
+        await f.controller.decideView("bob_1", "approve");
+        expect(f.controller.getSnapshot().phase).toBe("publishing");
+        expect(f.sendEpochs).toEqual([1, 2]);
+        expect(f.keyRelays.map(relay => relay.viewerId)).toEqual(["alice", "alice"]);
+        expect(f.controller.getSnapshot().approvedViewers).toEqual([{ viewerId: "alice" }, { viewerId: "bob" }]);
     } finally { f.controller.stop(); }
 });
 

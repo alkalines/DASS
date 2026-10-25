@@ -49,6 +49,8 @@ export interface GridRuntime {
     isActive(): boolean;
     watch(share: DassShare): void;
     stopWatching(share: DassShare): void;
+    /** Explicit user trust of a publisher's changed E2EE identity, then a fresh watch. */
+    trustPublisherAndWatch(share: DassShare): void;
     stopPublishing(): void;
 }
 
@@ -162,6 +164,11 @@ function GridTile({ runtime, participant, width, className, focused, paused, con
             onDoubleClick={ended || failed ? event => onDoubleClick?.(participant, event) : undefined}>
             {ended ? <StreamEndedScreen onClose={event => { event.stopPropagation(); stopWatching(); }} />
                 : failed ? <StreamErrorScreen started={!!watching?.closedShare} message={watching?.message ?? ""}
+                    action={watching?.publisherIdentityChanged && tile.kind === "remote" ? {
+                        description: "This streamer's encryption identity changed since you last watched (new device, reinstall, or someone else using the account). Trust it only if you confirmed this with them.",
+                        label: "Trust new identity and watch",
+                        onClick: event => { event.stopPropagation(); runtime.trustPublisherAndWatch(tile.share); }
+                    } : undefined}
                     onClose={event => { event.stopPropagation(); stopWatching(); }} /> : <>
             <Clickable className="vc-dass-grid-focus" aria-label={title} onClick={event => onClick?.(participant, event)}
                 onDoubleClick={event => onDoubleClick?.(participant, event)}>

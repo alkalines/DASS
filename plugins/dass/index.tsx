@@ -105,7 +105,11 @@ async function watchGridShare(share: DassShare) {
 
 const gridRuntime: GridRuntime = { publisher, directory, watches, currentCall, isActive: () => pluginActive,
     localDisplayName: () => { const user = UserStore.getCurrentUser(); return user?.globalName ?? user?.username; },
-    watch: share => { void watchGridShare(share); }, stopWatching: stopWatchingShare, stopPublishing: () => publisher.reset() };
+    watch: share => { void watchGridShare(share); }, stopWatching: stopWatchingShare, stopPublishing: () => publisher.reset(),
+    trustPublisherAndWatch: share => {
+        void watches.acceptPublisherIdentity(share).then(() => watchGridShare(share),
+            () => showToast({ text: "The new streamer identity could not be saved. Nothing was trusted." }));
+    } };
 
 function currentParticipants(channelId: string) {
     return projectParticipants(gridShares(channelId, currentCall(), pluginActive, !!publisher.getPreviewStream(), directory.getSnapshot(), watches.getSnapshot()));

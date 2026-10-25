@@ -67,6 +67,7 @@ const CLIENT_EVENTS: &[&str] = &[
     "publisher decision failed",
     "viewer identity pin persistence failed",
     "epoch rekey failed; publishing stopped",
+    "epoch relay skipped; viewer not connected",
     "viewer removal failed",
     "plugin started",
     "plugin stopped",

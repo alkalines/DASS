@@ -107,7 +107,8 @@ export class SpikeSignaling {
     private requestWindowStartedMs = -Infinity;
     private requestsInWindow = 0;
     private openWait?: Pending<void>;
-    private pending?: Pending<ServerOperation> & { requestId: string; requestType: ClientOperation["type"]; expectedType: ServerOperation["type"]; };
+    private pending?: Pending<ServerOperation> & { requestId: string; requestType: ClientOperation["type"]; expectedType: ServerOperation["type"];
+        recoverable: readonly ErrorCode[]; };
     private expiryTimer?: ReturnType<typeof setTimeout>;
     private diagnosticTimer?: ReturnType<typeof setInterval>;
     private stopDiagnostics?: () => void;
@@ -276,7 +277,17 @@ export class SpikeSignaling {
             }
             const { pending } = this;
             if (!pending || pending.requestId !== message.request_id) return this.close("protocol");
-            if (message.operation.type === "rejected") return this.close(`rejected:${message.operation.code}`);
+            if (message.operation.type === "rejected") {
+                const code = `rejected:${message.operation.code}` as const;
+                if (!pending.recoverable.includes(message.operation.code)) return this.close(code);
+                // The backend keeps the connection open after a rejection; an
+                // operation that declared this outcome recoverable handles it.
+                this.pending = undefined;
+                clearTimeout(pending.timer);
+                logDiagnostic("signaling response", { type: "rejected", code });
+                pending.reject(new SpikeSignalingError(code));
+                return;
+            }
             if (message.operation.type !== pending.expectedType) return this.close("protocol");
             this.pending = undefined;
             clearTimeout(pending.timer);
@@ -317,9 +328,11 @@ export class SpikeSignaling {
         }
     }
 
-    /** Relay one E2EE-wrapped epoch key to an approved viewer account. */
+    /** Relay one E2EE-wrapped epoch key to an approved viewer account. A viewer
+     * whose session already ended rejects with `rejected:invalid_state` without
+     * closing this connection. */
     async keyRelay(sessionId: string, viewerId: string, blob: string) {
-        const accepted = await this.request({ type: "key_relay", session_id: sessionId, viewer_id: viewerId, blob }, "accepted");
+        const accepted = await this.request({ type: "key_relay", session_id: sessionId, viewer_id: viewerId, blob }, "accepted", ["invalid_state"]);
         if (accepted.type !== "accepted" || accepted.session_id !== sessionId) {
             this.close("protocol");
             throw new SpikeSignalingError("protocol");
@@ -380,7 +393,8 @@ export class SpikeSignaling {
         });
     }
 
-    async request(operation: ClientOperation, expectedType: ServerOperation["type"]): Promise<ServerOperation> {
+    /** `recoverable` rejection codes reject this request only; any other rejection closes the connection. */
+    async request(operation: ClientOperation, expectedType: ServerOperation["type"], recoverable: readonly ErrorCode[] = []): Promise<ServerOperation> {
         if (!this.active || this.signal.aborted || this.socket.readyState !== 1 || this.requestInFlight || this.sequence >= Number.MAX_SAFE_INTEGER) {
             return Promise.reject(new Error("DASS connection is unavailable or busy."));
         }
@@ -412,7 +426,7 @@ export class SpikeSignaling {
             }
             return await new Promise<ServerOperation>((resolve, reject) => {
                 if (operation.type !== "directory") logDiagnostic("signaling request", { type: operation.type });
-                this.pending = { requestId, requestType: operation.type, expectedType, resolve, reject, timer: setTimeout(() => this.close("timeout"), LOGIN_DEADLINE_MS) };
+                this.pending = { requestId, requestType: operation.type, expectedType, recoverable, resolve, reject, timer: setTimeout(() => this.close("timeout"), LOGIN_DEADLINE_MS) };
                 try { this.socket.send(message); } catch { this.close("socket"); }
             });
         } finally {

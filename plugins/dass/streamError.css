@@ -29,6 +29,14 @@
     user-select: text;
 }
 
+.vc-dass-stream-error-action {
+    max-width: 480px;
+    margin: 8px 0 0;
+    color: var(--text-default);
+    font-size: 14px;
+    line-height: 18px;
+}
+
 .vc-dass-stream-error-help {
     max-width: 480px;
     color: var(--primary-200);
