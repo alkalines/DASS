@@ -20,8 +20,9 @@ import { isDassParticipant, isFocusedDassWatch, participantTitle, projectPartici
 import { LocalCaptureCheck } from "./capture";
 import { getCaptureBridge, stopCaptureHost } from "./captureHost";
 import { DiscoveryController } from "./controller";
+import { useDassGoLive } from "./desktopCapture";
 import { logDiagnostic } from "../../clients/spike/diagnostics";
-import { DISCORD_PRESENTATION_PATCHES, DISCORD_SHARE_PATCHES, getDiscordBuildWarning, isLocalPublisherLive, type PublishIntent, routePublish, routeWatch, type WatchIntent } from "./discordAdapter";
+import { DISCORD_GO_LIVE_PATCHES, DISCORD_PRESENTATION_PATCHES, DISCORD_SHARE_PATCHES, getDiscordBuildWarning, isLocalPublisherLive, type PublishIntent, routePublish, routeWatch, type WatchIntent } from "./discordAdapter";
 import { configureIdentityBackend, defaultIdentityStore } from "./e2eeIdentity";
 import { gridShares, gridTileKeyExtractor } from "./gridPresentation";
 import { CallAudioControl, callPresentation, type CallTileProps, type CallViewProps, type FocusedCallProps, type GridRuntime, type GridTileRenderer, NativeCallView, NativeGridTile, type TileAction, useFocusedCallProps, useFocusedWatchingState, useGridTiles, useHasGridShares } from "./gridTile";
@@ -278,8 +279,9 @@ export default definePlugin({
             }
         }
     }],
-    patches: [...DISCORD_SHARE_PATCHES, ...DISCORD_PRESENTATION_PATCHES],
-    settingsAboutComponent: () => <Paragraph>Configure your account once, then use the call's Share button. Supported builds route DASS tiles through the call grid, focused layout and filmstrip, with independent share audio controls and a local sidebar card. Runtime verification, zoom, individual tile popouts and remote voice-row badges remain incomplete. The temporary test viewer remains in Advanced options.</Paragraph>,
+    patches: [...DISCORD_SHARE_PATCHES, ...DISCORD_GO_LIVE_PATCHES, ...DISCORD_PRESENTATION_PATCHES],
+    settingsAboutComponent: () => <Paragraph>Configure your account once, then use the call's Share button. On Discord desktop, choosing DASS opens Discord's own Go Live picker and captures the chosen source, quality and stream audio for DASS. Supported builds route DASS tiles through the call grid, focused layout and filmstrip, with independent share audio controls and a local sidebar card. Runtime verification, zoom, individual tile popouts and remote voice-row badges remain incomplete. The temporary test viewer remains in Advanced options.</Paragraph>,
+    useDassGoLive,
     ShareButton(props: ShareButtonProps) {
         return <NativeShareButton {...props} controller={publisher} />;
     },

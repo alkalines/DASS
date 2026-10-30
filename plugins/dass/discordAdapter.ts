@@ -100,6 +100,44 @@ const SHARE_PATCHES = [{
     }]
 }];
 
+/**
+ * Discord desktop's own Go Live picker in DASS mode. The opener forwards an
+ * explicit `dassGoLive` request as a modal prop; only that modal instance lists
+ * Chromium capture sources and hands the chosen source to DASS instead of
+ * starting a native stream. Non-embedded hosts refuse the request.
+ */
+const GO_LIVE_PATCHES = [{
+    find: ".getMediaEngine().getDesktopSource(",
+    group: true,
+    replacement: [{
+        match: /function (\i)\((\i),(\i),(\i)\)\{if\((\i\.isPlatformEmbedded)\)(?=\(0,\i\.openModalLazy\))/,
+        replace: "function $1($2,$3,$4,dassGoLive){if($5)return "
+    }, {
+        match: /(analyticsLocations:\i)(\}\)\}\));else\{/,
+        replace: '$1,dassGoLive$2;else if(dassGoLive)throw Error("DASS needs the Discord desktop Go Live picker.");else{'
+    }]
+}, {
+    find: '"useCreateGoLiveModalState"',
+    group: true,
+    replacement: [{
+        match: /(onStreamStart:\i)\}=(\i),/,
+        replace: "$1,dassGoLive}=$2,dassGoLiveMount=$self.useDassGoLive(dassGoLive),"
+    }, {
+        // The OS picker path returns sources Chromium cannot capture.
+        match: /(?<=\(\)=>)(?=\(\i\.\i\.getUseSystemScreensharePicker\(\)\|\|)/,
+        replace: "!dassGoLive&&"
+    }, {
+        match: /(value:\i\.\i\.CAMERA,icon:\i\.VideoIcon\}\];return )(\i\|\|(\i)\.splice\()/,
+        replace: "$1dassGoLive&&$3.pop(),$2"
+    }, {
+        match: /(cameraSources:\i\}=await )(\i)\((\i)\)/,
+        replace: "$1(dassGoLive?dassGoLive.fetchSources($3):$2($3))"
+    }, {
+        match: /(?<=await ?\(0,)(\i\.\i)(?=\)\(\i\.hasOwnProperty\("pid"\))/,
+        replace: "dassGoLive?dassGoLive.start:$1"
+    }]
+}];
+
 const PRESENTATION_PATCHES = [{
     find: "handleFullscreenParticipant=",
     group: true,
@@ -242,6 +280,7 @@ const PRESENTATION_PATCHES = [{
 
 export const APPROVED_DISCORD_BUILDS: readonly number[] = [634304, 637268, 638651];
 export const DISCORD_SHARE_PATCHES = SHARE_PATCHES;
+export const DISCORD_GO_LIVE_PATCHES = GO_LIVE_PATCHES;
 export const DISCORD_PRESENTATION_PATCHES = PRESENTATION_PATCHES;
 
 export function getDiscordBuildWarning(build: number): string | undefined {
@@ -262,6 +301,42 @@ export function isLocalPublisherLive(context: LocalLiveContext): boolean {
     return context.pluginActive && !!context.localDiscordUserId && context.discordUserId === context.localDiscordUserId
         && !!context.currentDiscordChannelId && context.discordChannelId === context.currentDiscordChannelId
         && ["preparing", "prepared", "activating", "publishing"].includes(context.publisherPhase);
+}
+
+/** Go Live picker options, as Discord's modal passes them to its stream start (build 655747). */
+export interface GoLiveStreamOptions {
+    preset?: number;
+    resolution?: number;
+    fps?: number;
+    soundshareEnabled?: boolean;
+}
+
+export interface GoLiveCaptureQuality {
+    maxWidth: number;
+    maxHeight: number;
+    maxFrameRate: number;
+}
+
+const GO_LIVE_PRESET_DOCUMENTS = 2;
+const GO_LIVE_PRESET_CUSTOM = 3;
+const GO_LIVE_RESOLUTION_SOURCE = 0;
+const SOURCE_MAX_HEIGHT = 4320;
+
+/**
+ * Capture bounds for the picker's quality choice. DASS honours the selection
+ * directly: Discord's Nitro limits govern Discord's service, not the DASS
+ * backend. Video and Auto use the top of Discord's Video preset (1440p60);
+ * Documents uses source resolution at 15 FPS.
+ */
+export function goLiveCaptureQuality(options?: GoLiveStreamOptions): GoLiveCaptureQuality {
+    const [resolution, fps] = options?.preset === GO_LIVE_PRESET_CUSTOM ? [options.resolution, options.fps]
+        : options?.preset === GO_LIVE_PRESET_DOCUMENTS ? [GO_LIVE_RESOLUTION_SOURCE, 15] : [1440, 60];
+    const maxHeight = resolution === GO_LIVE_RESOLUTION_SOURCE ? SOURCE_MAX_HEIGHT
+        : resolution !== undefined && Number.isFinite(resolution) && resolution > 0 && resolution <= SOURCE_MAX_HEIGHT ? resolution : 1080;
+    const maxFrameRate = fps !== undefined && Number.isFinite(fps) && fps >= 1 && fps <= 60 ? fps : 30;
+    // Discord's encoder bound: 4:3 at 480p and below, 16:9 above.
+    const maxWidth = Math.round(maxHeight <= 480 ? maxHeight / 3 * 4 : maxHeight / 9 * 16);
+    return { maxWidth, maxHeight, maxFrameRate };
 }
 
 export const TRANSPORT_UNAVAILABLE_MESSAGE = "DASS transport unavailable.";
