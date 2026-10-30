@@ -30,8 +30,28 @@ Uncommitted work has no commit ID until it is committed.
   last three minutes (at most 100 entries), including events that never reached
   the backend.
 
+### Changed
+
+- **Discord desktop picker:** choosing DASS now opens Discord's own Go Live
+  picker instead of a separate DASS dialog. Its source, quality and
+  stream-audio choices go to DASS without starting a Discord stream. Quality
+  ignores Nitro limits (Video and Auto use 1440p60, Documents source resolution
+  at 15 FPS, Custom the selected values) instead of the old 1080p30 cap.
+- **Discord-style call tiles:** DASS tiles use Discord's own hover overlay, LIVE
+  badge with quality, Watch Stream button, loading spinner and menu wording.
+- **Change Stream:** the share keeps running while the picker is open, and
+  cancelling changes nothing. A new source replaces the live tracks without
+  disconnecting viewers; toggling stream audio restarts the share with the
+  chosen source.
+
 ### Fixed
 
+- **Viewers hearing themselves:** Discord desktop stream audio now uses Windows
+  process loopback like Discord's soundshare: a window shares only its
+  application's audio, and a screen shares everything except Discord. Screen
+  audio needs one Discord restart after enabling DASS.
+- **Change Stream closing the share:** choosing **Alterar a Transmissão** no
+  longer stops the stream and reconnects before showing the picker.
 - **Stream stability:** keyframe bursts no longer overflow 32-packet backend
   queues (now 512 per viewer and per session ingress); a full viewer queue drops
   packets for that viewer and requests a keyframe instead of disconnecting it;
