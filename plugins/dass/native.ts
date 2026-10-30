@@ -9,6 +9,8 @@ import { type IpcMainInvokeEvent, safeStorage, shell } from "electron";
 import { DASS_VERSION } from "./releaseInfo";
 import { fetchPluginUpdate, pluginReleaseUrl } from "./releaseUpdates";
 
+export { prepareDesktopCapture } from "./nativeCapture";
+
 let updateRequest: AbortController | undefined;
 
 export async function getPluginUpdate(_: IpcMainInvokeEvent): Promise<string | undefined> {

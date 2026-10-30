@@ -6,7 +6,7 @@ let encryptionAvailable = true;
 let sequence = 0;
 const encryptedPayloads = new Map<string, string>();
 const openedReleaseUrls: string[] = [];
-mock.module("electron", () => ({ shell: { openExternal: async (url: string) => { openedReleaseUrls.push(url); } }, safeStorage: {
+mock.module("electron", () => ({ app: {}, webContents: {}, shell: { openExternal: async (url: string) => { openedReleaseUrls.push(url); } }, safeStorage: {
     isEncryptionAvailable: () => encryptionAvailable,
     getSelectedStorageBackend: () => secureBackend,
     encryptString: (plaintext: string) => {
@@ -23,6 +23,8 @@ mock.module("electron", () => ({ shell: { openExternal: async (url: string) => {
 const values = new Map<string, unknown>();
 mock.module("@api/DataStore", () => ({ get: async (key: string) => values.get(key), set: async (key: string, value: unknown) => { values.set(key, value); },
     del: async (key: string) => { values.delete(key); } }));
+mock.module("@main/settings", () => ({ RendererSettings: { store: { plugins: {} } } }));
+Object.assign(globalThis, { IS_DISCORD_DESKTOP: false });
 
 const native = await import("../../plugins/dass/native");
 Object.assign(globalThis, { VencordNative: { pluginHelpers: { DASS: {

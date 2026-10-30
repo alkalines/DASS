@@ -106,7 +106,7 @@ describe("capture consent stays on the host boundary", () => {
             for (const token of forbidden) {
                 expect(source.includes(token)).toBe(false);
             }
-            if (name !== "captureHost.ts" && name !== "stockCapture.ts") expect(source.includes("getDisplayMedia")).toBe(false);
+            if (!["captureHost.ts", "stockCapture.ts", "nativeCapture.ts"].includes(name)) expect(source.includes("getDisplayMedia")).toBe(false);
         }
     });
 
