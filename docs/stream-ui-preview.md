@@ -1,10 +1,13 @@
 # DASS screenshare UI preview
 
 Discord Alternative ScreenShare (DASS) has an isolated visual prototype in
-`plugins/dass/streamUi.tsx` and `plugins/dass/streamUi.css`. Those approved components
-are now wired into DASS's real tile overlay and sidebar body. The separate DevTools
-comparison panel remains mock-only. Native tile/sidebar frames, sidebar Stop
-actions and share buttons are preserved; ordinary Discord shares remain unchanged.
+`plugins/dass/streamUi.tsx` and `plugins/dass/streamUi.css`. DASS call tiles no
+longer use its recreated tile surface, hover overlay or LIVE badge: they now
+compose Discord's own tile pieces (see [plugin.md](plugin.md)). The prototype
+keeps the stream menu, sidebar body, stream-ended and error screens and the
+volume control. The separate DevTools comparison panel remains mock-only and
+opens the stream menu instead of a mock tile. The sections below record the
+earlier tile prototype's validation history.
 
 The prototype owns the stream surface, hover overlay, publisher/viewer titles,
 hover-expanded quality badge and sidebar-card composition. Buttons, tooltips,

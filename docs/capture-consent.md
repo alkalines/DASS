@@ -10,16 +10,20 @@ what is **not** verified yet.
 - On Equibop, only the stock capture adapter calls Equibop's installed
   `getDisplayMedia` wrapper. On standard Discord desktop, only
   `desktopCapture.tsx` reads Discord's desktop source list and calls
-  `getUserMedia` with Chromium desktop-source constraints; its audio constraint
-  is system loopback, never an input device. No other plugin file calls
-  `getUserMedia`, `captureStream()`, Discord's native media engine capture APIs
-  or any preview upload. A source scan in `tests/plugin/captureConsent.test.ts`
-  enforces this for every other file.
+  `getDisplayMedia`; the main-process `nativeCapture.ts` grants that call
+  exactly the source chosen in Discord's picker, with Windows process-loopback
+  audio (the chosen application, or everything except Discord for a screen),
+  never an input device. No other plugin file calls `getUserMedia`,
+  `captureStream()`, Discord's native media engine capture APIs or any preview
+  upload. A source scan in `tests/plugin/captureConsent.test.ts` enforces this
+  for every other file.
 - Equibop capture comes from the installed picker through plugin-owned
   `captureHost.ts`, `stockCapture.ts` and `captureLifecycle.ts`, retaining the
-  installed host wrapper. Standard Discord uses the DASS picker dialog in
-  `desktopCapture.tsx` with the same `captureLifecycle.ts` ownership. No custom
-  host build, helper process, daemon, proxy, encoder or decoder is used.
+  installed host wrapper. Standard Discord uses Discord's own Go Live picker,
+  opened in DASS mode by `desktopCapture.tsx`, with the same
+  `captureLifecycle.ts` ownership. Choosing a source there never starts a
+  Discord stream. No custom host build, helper process, daemon, proxy, encoder
+  or decoder is used.
 - Share audio is explicit. The bridge reports `audioSelected` from the
   picker's own choice; when the user selects no audio, the captured audio
   tracks are stopped and removed before the lease is handed to DASS. The
@@ -30,7 +34,10 @@ what is **not** verified yet.
   See [stock-host limitations](capture-bridge.md), especially pending picker
   dismissal and host-internal capture failures.
 - The bridge owns a singleton capture: a second capture attempt while one is
-  live is refused instead of replacing it.
+  live is refused instead of replacing it. The one exception is an explicit
+  source change, which runs the picker while the current lease keeps the host
+  and hands ownership to the new lease; the host is released only after the
+  final lease is released.
 - The DASS share path never creates a Discord media stream and never uploads a
   preview thumbnail. Discord's own voice call continues independently.
 

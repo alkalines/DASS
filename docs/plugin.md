@@ -656,16 +656,54 @@ An existing injection that already points at this checkout's `dist/desktop`
 only needs a rebuild and a full Discord restart; `bun run inject` is not rerun.
 Desktop bundle checks do not prove plugin loading.
 
-Standard Discord has no Equibop picker or venmic. There, DASS opens its own
-screen/window picker listing Discord's desktop capture sources; source previews
-stay in that dialog. The selected source is captured in the renderer through
-Chromium's desktop capture constraints, at most 1920×1080 and 30 FPS. Share
-audio is an unticked checkbox that captures Windows system loopback, which
-includes the call's voices; no microphone device is requested. On Windows
-Discord 1.0.9264 (Electron 42), the picker, a 1080p30 video-only capture and a
-connected publisher peer were observed through DevTools. Selected system audio,
-viewer playback of a desktop-published stream and macOS/Linux desktop builds are
-not verified.
+Standard Discord has no Equibop picker or venmic. There, choosing DASS opens
+Discord's own Go Live picker in DASS mode: its tabs, source grid, quality
+settings and stream-audio switch stay native, but the source grid lists
+Chromium's desktop capture sources (`DiscordNative.desktopCapture`) instead of
+the native media engine's, and choosing a source hands it to DASS instead of
+starting a Discord stream. The camera tab and the OS picker path are hidden in
+this mode. The main process grants exactly that source to the renderer's next
+`getDisplayMedia` call (`nativeCapture.ts`); other display-media requests are
+refused, as they are without a handler. DASS honours the picker's quality without
+Discord's Nitro limits: Video and Auto presets use 1440p60, Documents uses the
+source resolution at 15 FPS, and Custom uses the selected resolution and frame
+rate. No microphone device is requested.
+
+Stream audio follows the picker's switch and uses Windows process loopback, like
+Discord's own soundshare. An application source captures only that
+application's process tree. A screen captures everything except Discord: the
+capture excludes the process tree of Chromium's audio service, so DASS runs that
+service inside Discord's browser process (`--disable-features=AudioServiceOutOfProcess`)
+when the plugin is enabled at startup. Enabling DASS while Discord runs needs one
+restart before screen audio works; until then DASS refuses screen audio instead of
+capturing the call. Trade-off: an audio-service crash, for example from an audio
+driver, now closes Discord instead of only its audio. Sharing a Discord window
+with stream audio is refused, because Discord's own process plays the call.
+
+**Alterar a Transmissão** keeps the current share running while the picker is
+open; cancelling changes nothing. A new source with the same stream-audio choice
+replaces the published tracks on the live connection (`replaceTrack`), so
+viewers stay connected. Turning stream audio on or off needs a new negotiation:
+DASS then restarts the share with the chosen source, and viewers rejoin it.
+
+DASS call tiles reuse Discord's own tile pieces: the hover overlay (title,
+options and mute buttons), the LIVE badge with its quality pill, the **Watch
+Stream** button, the video wrapper and its loading spinner, and Discord's menu
+wording. DASS media, state and actions stay DASS-owned; no Discord stream
+records, stores or telemetry are created.
+
+On Windows Discord 1.0.9266 (Electron 44, build 655747), the local capture
+test was observed through DevTools: the picker opened in DASS mode without the
+camera tab, cancelling it left no capture, and a screen with the Video preset
+captured native 1920×1080 frames at 60 FPS without dispatching any `STREAM_*`
+action. With a 1 kHz tone playing in another application's window and a 440 Hz
+tone playing inside Discord, both the application source and the screen source
+carried the 1 kHz tone (about −35 dB) and not Discord's tone (about −171 dB,
+silence). Mounted DASS tiles rendered Discord's overlay, LIVE badge, Watch Stream
+button, spinner and menu labels. Publishing and source changes against a backend,
+call-voice exclusion during a real call, viewer playback, the quality popout's
+Custom values and macOS/Linux desktop builds are not verified.
+See [discord-hooks.md](discord-hooks.md#discord-desktop-go-live-picker-in-dass-mode).
 
 ## Install in Equibop
 

@@ -402,6 +402,55 @@ button-source excerpt and simulated native callbacks; they do not establish
 runtime interception or media isolation. The existing build adapter's Bun-version
 guard was already commented out; this work does not change it or upstream pins.
 
+## Discord desktop Go Live picker in DASS mode
+
+Observed through DevTools on Windows Discord 1.0.9266 (Electron 44, Chromium
+152), build 655747. On Discord desktop `isPlatformEmbedded` is true, so the
+share callback `471993.A` lazily opens the Go Live modal `266536`. Its source
+grid comes from `742459.A`, which prefers the native media engine's previews
+(`screen-handle:<monitor>`, `window:<hwnd>`). Choosing a screen or window calls
+`startStreamWithSource` (`560595.A`), which dispatches `STREAM_START`.
+
+`DISCORD_GO_LIVE_PATCHES` add an optional fourth `dassGoLive` argument to the
+opener and forward it as a modal prop. Only a modal opened with that prop:
+
+- lists sources from `DiscordNative.desktopCapture` (`screen:<id>:0`,
+  `window:<hwnd>:<n>`). Native `screen-handle` IDs have no reliable mapping to
+  Chromium screen IDs, so the list itself must come from Chromium;
+- hides the camera tab and the Linux/macOS OS-picker path, whose sources
+  Chromium cannot capture;
+- passes the chosen source and quality options to DASS instead of
+  `startStreamWithSource`, so no native stream starts. Closing the modal without
+  a choice cancels the DASS capture.
+
+Both groups must match completely or neither applies. The opener throws when it
+receives `dassGoLive` on a non-embedded host instead of starting its native
+branch.
+
+Discord's native screen capture is not reusable by DASS. It runs only inside a
+native RTC connection (`createOwnStreamConnectionWithOptions`). That connection
+registers its video callback and codecs only after UDP IP discovery with a
+Discord media server. Native video can reach the renderer through
+`window.createDiscordStream`, but only from such a connection, and
+per-application share audio stays inside the native connection. DASS instead
+uses the same Windows process-loopback technique through Chromium's
+`applicationLoopback:<pid>` and `loopbackWithoutChrome` devices; the window's
+process comes from Discord's own `getPidFromDesktopSource`. See
+[plugin.md](plugin.md#install-in-standard-discord-desktop-with-equicord).
+
+## Native call-tile pieces in DASS tiles
+
+Build 655747's CallTile module (`175203`) defines an unexported
+`CallTileOverlay` (title pill, options and mute buttons, zoom controls). The
+existing `.displayName="CallTile"` patch also hands that component to
+`captureCallTileOverlay`. DASS renders it as a `STREAM` participant without a
+Discord user ID, stream ID or secure-frames claim, so the user-only volume,
+gifting and zoom controls stay off. The LIVE badge (`402216`), quality text badge
+(`286134`), Discord button (`657718`), spinner (`289873`) and the tile/video CSS
+modules are found by code or class names. The native stream tile (`802867`) and
+video wrapper (`51092`) are not reused: they read `ApplicationStreamStore` and
+report receiver timeouts as Discord AV errors.
+
 ## Historical chooser acceptance procedure
 
 The first user runtime attempt went directly to the OS picker with no DASS
