@@ -56,10 +56,19 @@
     aspect-ratio: auto;
 }
 
-.vc-dass-grid-tile video {
-    width: 100%;
-    height: 100%;
-    object-fit: contain;
+.vc-dass-tile-status {
+    position: absolute;
+    top: calc(50% + 28px);
+    inset-inline: 12px;
+    text-align: center;
+}
+
+.vc-dass-grid-play {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    z-index: 1;
+    transform: translate(-50%, -50%);
 }
 
 .vc-dass-grid-placeholder {
@@ -70,11 +79,6 @@
     align-items: center;
     justify-content: center;
     gap: 8px;
-}
-
-.vc-dass-grid-focus {
-    width: 100%;
-    height: 100%;
 }
 
 .vc-dass-grid-preview-status {

@@ -50,8 +50,5 @@ test("DASS tile uses the native frame without Card styling, native media IDs or 
     expect(source).not.toContain("@components/Card");
     expect(source).not.toContain("participantUserId=");
     expect(source).not.toContain("streamKey=");
-    expect(source).toContain('role="group" aria-label={title}');
-    expect(source).toContain("<StreamLiveBadge quality={quality} />");
-    expect(source).toContain("<StreamOverlay title={title}");
     expect(css.match(/\.vc-dass-grid-tile \{[^}]+\}/)?.[0]).not.toContain("border-radius");
 });

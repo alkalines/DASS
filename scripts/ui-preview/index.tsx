@@ -9,7 +9,7 @@ import { ContextMenuApi, useState } from "@webpack/common";
 
 import { StreamEndedScreen } from "../../plugins/dass/streamEnded";
 import { StreamErrorScreen } from "../../plugins/dass/streamError";
-import { StreamSidebarCard, StreamTileSurface } from "../../plugins/dass/streamUi";
+import { StreamActionsMenu, StreamSidebarCard } from "../../plugins/dass/streamUi";
 import { StreamVolumeControl } from "../../plugins/dass/volumeControl";
 
 declare const __DASS_UI_CSS__: string;
@@ -46,7 +46,6 @@ window.dassUiPreview = { remove };
 
 function Preview() {
     const [local, setLocal] = useState(true);
-    const [focused, setFocused] = useState(false);
     const [showPreview, setShowPreview] = useState(true);
     const [pauseWhenUnfocused, setPauseWhenUnfocused] = useState(true);
     const [premiumQuality, setPremiumQuality] = useState(true);
@@ -63,7 +62,6 @@ function Preview() {
         <div className="vc-dass-ui-preview-body">
             <div className="vc-dass-ui-preview-toolbar">
                 <Button variant="secondary" size="xs" onClick={() => setLocal(!local)}>{local ? "Show viewer" : "Show publisher"}</Button>
-                <Button variant="secondary" size="xs" onClick={() => setFocused(!focused)}>{focused ? "Grid tile" : "Focused tile"}</Button>
                 <Button variant="secondary" size="xs" onClick={() => setPremiumQuality(!premiumQuality)}>{premiumQuality ? "Standard quality" : "Nitro styling"}</Button>
                 <Button variant="secondary" size="xs" onClick={() => setEnded(!ended)}>{ended ? "Show live tile" : "Stream ended"}</Button>
                 <Button variant="secondary" size="xs" onClick={() => { setEnded(false); setFailed(!failed); }}>{failed ? "Show live tile" : "Stream error"}</Button>
@@ -74,18 +72,12 @@ function Preview() {
                 : ended ? <div className="vc-dass-ui-preview-ended"><StreamEndedScreen onClose={() => {
                 setEnded(false);
                 setStatus("Close Stream clicked. Preview only, no media action.");
-            }} /></div> : <StreamTileSurface title="MegArthur" local={local} focused={focused}
-                quality={{ resolution: premiumQuality ? "1080p" : "720p", framesPerSecond: 30, premium: premiumQuality }}
-                className={focused ? "vc-dass-ui-preview-focused" : undefined}
-                stop={mockAction(local ? "Stop Streaming" : "Stop Watching")}
-                changeSource={mockAction("Change Stream")} popout={mockAction("Pop Out Stream")}
-                onFocusStream={() => setFocused(!focused)}
+            }} /></div> : <Button variant="secondary" size="xs" onClick={event => ContextMenuApi.openContextMenu(event, () => <StreamActionsMenu local={local}
+                stop={mockAction(local ? "Stop Streaming" : "Stop Watching")} changeSource={mockAction("Change Stream")}
                 previewOptions={{ showPreview, pauseWhenUnfocused, setShowPreview, setPauseWhenUnfocused: value => {
                     setPauseWhenUnfocused(value);
                     setStatus(`Pause when unfocused: ${value ? "on" : "off"}. Preview preference only, no media action.`);
-                } }}>
-                <div className="vc-dass-ui-preview-placeholder"><span>Screen preview</span><small>No capture requested</small></div>
-            </StreamTileSurface>}
+                } }} />)}>Open stream menu</Button>}
             <StreamSidebarCard qualityLabel={premiumQuality ? "1080p 30FPS" : "720p 30FPS"} premiumQuality={premiumQuality} stop={mockAction("Stop Streaming")} />
             <div style={{ display: "flex", justifyContent: "flex-end", padding: "12px" }}>
                 <StreamVolumeControl {...audio} onToggleMute={() => setAudio({ ...audio, muted: !audio.muted })}

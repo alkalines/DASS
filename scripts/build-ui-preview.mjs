@@ -28,7 +28,7 @@ const result = await build({
     plugins: [{
         name: "existing-equicord-runtime",
         setup(builder) {
-            builder.onResolve({ filter: /^(@webpack|@webpack\/common|@components\/Button|@components\/Heading|@components\/Paragraph|@components\/ErrorBoundary|@utils\/misc)$/ }, args => ({ path: args.path, namespace: "host" }));
+            builder.onResolve({ filter: /^(@webpack|@webpack\/common|@components\/Button|@components\/Heading|@components\/Paragraph|@components\/ErrorBoundary|@utils\/misc|@utils\/discord)$/ }, args => ({ path: args.path, namespace: "host" }));
             builder.onLoad({ filter: /.*/, namespace: "host" }, args => ({
                 contents: args.path === "@webpack"
                     ? "export const {findCssClassesLazy}=Vencord.Webpack;"
@@ -42,6 +42,8 @@ const result = await build({
                             ? "export const {Paragraph}=Vencord.Components;"
                         : args.path === "@components/ErrorBoundary"
                             ? "export default Vencord.Components.ErrorBoundary;"
+                        : args.path === "@utils/discord"
+                            ? "export const {getIntlMessage}=Vencord.Util;"
                             : "export const classes=(...names)=>names.filter(Boolean).join(' ');",
                 loader: "js"
             }));

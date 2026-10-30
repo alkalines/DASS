@@ -5,7 +5,6 @@
  */
 
 import { expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
 
 import { isFocusedDassWatch, projectParticipants } from "../../plugins/dass/callPresentation";
 import { DISCORD_PRESENTATION_PATCHES } from "../../plugins/dass/discordAdapter";
@@ -69,12 +68,4 @@ test("native Stop Watching routes to DASS without touching native streams or voi
         const activity = render({ ...base, nativeParticipant: { type: "activity", applicationId: "app" }, connectedEmbeddedActivity: { applicationId: "app" } }).props.children;
         expect(activity.component).toBe(focused ? "stop-watching" : "ACTIVITY");
     }
-});
-
-test("stream name stays frame-anchored independently of the raised native controls", () => {
-    const source = readFileSync(new URL("../../plugins/dass/streamUi.tsx", import.meta.url), "utf8");
-    const css = readFileSync(new URL("../../plugins/dass/streamUi.css", import.meta.url), "utf8");
-    expect(source).toContain('<div className="vc-dass-stream-name-overlay">');
-    expect(source).toContain('<div className="vc-dass-stream-overlay" style={{ bottom: props.controlsBottom }}>');
-    expect(css).toContain(".vc-dass-stream-name-overlay {\n    position: absolute;\n    inset-inline: 12px;\n    bottom: 12px;");
 });

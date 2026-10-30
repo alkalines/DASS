@@ -5,6 +5,7 @@
  */
 
 import ErrorBoundary from "@components/ErrorBoundary";
+import { getIntlMessage } from "@utils/discord";
 import { Menu, useEffect, useState } from "@webpack/common";
 import type { ComponentType } from "react";
 
@@ -53,12 +54,12 @@ function StreamMenu({ controller, currentChannelId, changeSource, dassNativeComp
 }) {
     const active = usePublishingState(controller);
     if (!active || props.channel.id !== currentChannelId || props.hideSelfOptions) return <NativeMenu {...props} />;
-    return <Menu.Menu navId="dass-manage-stream" aria-label="Manage Stream" onClose={props.onClose} onSelect={props.onSelect}>
+    return <Menu.Menu navId="dass-manage-stream" aria-label={getIntlMessage("STOP_STREAMING")} onClose={props.onClose} onSelect={props.onSelect}>
         <Menu.MenuGroup>
-            <Menu.MenuItem id="dass-stop-stream" label="Stop Streaming" color="danger"
+            <Menu.MenuItem id="dass-stop-stream" label={getIntlMessage("STOP_STREAMING")} color="danger"
                 leadingAccessory={{ type: "icon", icon: () => <StreamIcon name="stop" /> }}
                 action={() => { props.onClose(); controller.reset(); }} />
-            <Menu.MenuItem id="dass-change-stream" label="Change Stream"
+            <Menu.MenuItem id="dass-change-stream" label={getIntlMessage("SCREENSHARE_CHANGE_STREAM")}
                 leadingAccessory={{ type: "icon", icon: () => <StreamIcon name="change" /> }}
                 action={() => { props.onClose(); changeSource(); }} />
         </Menu.MenuGroup>

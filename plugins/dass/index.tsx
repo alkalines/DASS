@@ -105,13 +105,18 @@ async function watchGridShare(share: DassShare) {
     }
 }
 
+function changePublishedSource() {
+    void publisher.changeSource(settings.store.backendUrl, getCaptureBridge());
+}
+
 const gridRuntime: GridRuntime = { publisher, directory, watches, currentCall, isActive: () => pluginActive,
     localDisplayName: () => { const user = UserStore.getCurrentUser(); return user?.globalName ?? user?.username; },
     watch: share => { void watchGridShare(share); }, stopWatching: stopWatchingShare, stopPublishing: () => publisher.reset(),
     trustPublisherAndWatch: share => {
         void watches.acceptPublisherIdentity(share).then(() => watchGridShare(share),
             () => showToast({ text: "The new streamer identity could not be saved. Nothing was trusted." }));
-    } };
+    },
+    changeSource: changePublishedSource };
 
 function currentParticipants(channelId: string) {
     return projectParticipants(gridShares(channelId, currentCall(), pluginActive, !!publisher.getPreviewStream(), directory.getSnapshot(), watches.getSnapshot()));
@@ -287,9 +292,7 @@ export default definePlugin({
         return <NativeShareButton {...props} controller={publisher} />;
     },
     StreamMenu(props: StreamMenuProps) {
-        return <NativeStreamMenu {...props} controller={publisher} currentChannelId={pluginActive ? currentCall() : undefined} changeSource={() => {
-            void publisher.changeSource(settings.store.backendUrl, getCaptureBridge());
-        }} />;
+        return <NativeStreamMenu {...props} controller={publisher} currentChannelId={pluginActive ? currentCall() : undefined} changeSource={changePublishedSource} />;
     },
     captureCallTileOverlay,
     usePublishingState(channelId: string) {
