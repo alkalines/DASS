@@ -199,6 +199,10 @@ const PRESENTATION_PATCHES = [{
     replacement: [{
         match: /(,)(\i=)(\i)(?=\}$)/,
         replace: "$1$2$self.wrapCallTile($3)"
+    }, {
+        // Discord's own tile hover overlay, reused for DASS tiles.
+        match: /(\i)(\.displayName="CallTileOverlay")/,
+        replace: "$self.captureCallTileOverlay($1)$2"
     }]
 }, {
     find: "cropSelfVideo:!1",

@@ -26,6 +26,7 @@ import { DISCORD_GO_LIVE_PATCHES, DISCORD_PRESENTATION_PATCHES, DISCORD_SHARE_PA
 import { configureIdentityBackend, defaultIdentityStore } from "./e2eeIdentity";
 import { gridShares, gridTileKeyExtractor } from "./gridPresentation";
 import { CallAudioControl, callPresentation, type CallTileProps, type CallViewProps, type FocusedCallProps, type GridRuntime, type GridTileRenderer, NativeCallView, NativeGridTile, type TileAction, useFocusedCallProps, useFocusedWatchingState, useGridTiles, useHasGridShares } from "./gridTile";
+import { captureCallTileOverlay } from "./nativeTile";
 import { hasAcceptedPublishCapture, PublishController } from "./publishing";
 import type { DassShare } from "./routing";
 import { DassSession } from "./session";
@@ -290,6 +291,7 @@ export default definePlugin({
             void publisher.changeSource(settings.store.backendUrl, getCaptureBridge());
         }} />;
     },
+    captureCallTileOverlay,
     usePublishingState(channelId: string) {
         const active = usePublishingState(publisher);
         return pluginActive && channelId === currentCall() && active;
