@@ -29,6 +29,7 @@ function fixture(options: { requireVerifiedViewers?: boolean; autoApproveViewers
     let decisionGate: Promise<void> | undefined;
     let releaseDecision: (() => void) | undefined;
     let rejectRemoval = false;
+    let replaceAccepted = true;
     const decisions: Array<{ requestId: string; decision: string; }> = [];
     const keyRelays: Array<{ viewerId: string; blob: string; }> = [];
     const removals: string[] = [];
@@ -49,6 +50,7 @@ function fixture(options: { requireVerifiedViewers?: boolean; autoApproveViewers
     const peer = { closed: peerClosed.signal, candidates: ["candidate:1 1 UDP 1 192.168.1.2 50000 typ host"],
         closeMessage: "Source ended.", close: () => peerClosed.abort(),
         setSendEpoch: (epoch: number) => { sendEpochs.push(epoch); }, retireEpochsBelow: () => {},
+        replaceCapture: async () => { events.push("replace"); return replaceAccepted; },
         activate: async (options: any) => {
              events.push("activate");
               publisherPublicKey = options.e2ee.identityPublicKey;
@@ -82,22 +84,49 @@ function fixture(options: { requireVerifiedViewers?: boolean; autoApproveViewers
         holdDecision: () => { decisionGate = new Promise<void>(resolve => { releaseDecision = resolve; }); },
         releaseDecision: () => { decisionGate = undefined; releaseDecision?.(); releaseDecision = undefined; },
         failRemoval: () => { rejectRemoval = true; }, viewerLeft: (viewerId: string) => { goneViewers.add(viewerId); },
+        refuseReplace: () => { replaceAccepted = false; },
         deny: () => { deny = true; }, failConnection: (error: SpikeSignalingError) => { failure = error; }, exit: () => { context = undefined; controller.reset(); } };
 }
 
-test("Change Stream releases the old source before opening the picker; cancellation leaves sharing stopped", async () => {
+function replacement(audioSelected = false) {
+    let releases = 0;
+    let replaced: CaptureLease | undefined;
+    const lease = { stream: {} as MediaStream, audioSelected, release: () => { releases++; } } as CaptureLease;
+    const bridge = { version: 1 as const, capture: async (_signal: AbortSignal, current?: CaptureLease) => { replaced = current; return lease; } };
+    return { lease, bridge, releases: () => releases, replaced: () => replaced };
+}
+
+test("Change Stream keeps the current share live while the picker is open; cancelling changes nothing", async () => {
     const f = fixture();
     try {
         await f.controller.publish("https://dass.example", f.bridge);
         await f.controller.changeSource("https://dass.example", { version: 1, capture: async () => { throw new Error("Cancelled"); } });
-        expect(f.controller.getSnapshot().phase).toBe("failed");
-        expect(f.controller.getPreviewStream()).toBeUndefined();
-        expect(f.releases()).toBe(1);
-        expect(f.peer.closed.aborted).toBe(true);
+        expect(f.controller.getSnapshot().phase).toBe("publishing");
+        expect(f.controller.getPreviewStream()).toBe(f.lease.stream);
+        expect(f.releases()).toBe(0);
+        expect(f.peer.closed.aborted).toBe(false);
+        expect(f.events).toEqual(["authenticate", "capture", "prepare", "activate"]);
     } finally { f.controller.stop(); }
 });
 
-test("stop during Change Stream aborts the picker and releases late results without restarting", async () => {
+test("a chosen source with the same tracks replaces the live tracks without a new session", async () => {
+    const f = fixture();
+    const next = replacement();
+    try {
+        await f.controller.publish("https://dass.example", f.bridge);
+        await f.controller.changeSource("https://dass.example", next.bridge);
+        expect(next.replaced()).toBe(f.lease);
+        expect(f.events).toEqual(["authenticate", "capture", "prepare", "activate", "replace"]);
+        expect(f.controller.getSnapshot().phase).toBe("publishing");
+        expect(f.controller.getPreviewStream()).toBe(next.lease.stream);
+        expect(f.releases()).toBe(1);
+        expect(next.releases()).toBe(0);
+        f.controller.reset();
+        expect(next.releases()).toBe(1);
+    } finally { f.controller.stop(); }
+});
+
+test("stop during Change Stream cancels the picker and releases a late source", async () => {
     const f = fixture();
     let complete: ((lease: CaptureLease) => void) | undefined;
     let signal: AbortSignal | undefined;
@@ -118,42 +147,38 @@ test("stop during Change Stream aborts the picker and releases late results with
         await changing;
         expect(releases).toBe(1);
         expect(f.controller.getSnapshot().phase).toBe("idle");
-        expect(f.events.filter(event => event === "authenticate")).toHaveLength(2);
+        expect(f.events.filter(event => event === "authenticate")).toHaveLength(1);
     } finally { f.controller.stop(); }
 });
 
-test("source changes reauthenticate before acquiring a replacement", async () => {
+test("a changed stream-audio choice restarts the share with the chosen source and no second picker", async () => {
     const f = fixture();
-    let releases = 0;
+    const next = replacement(true);
     try {
         await f.controller.publish("https://dass.example", f.bridge);
-        f.deny();
-        await f.controller.changeSource("https://dass.example", { version: 1, capture: async () => ({
-            stream: {} as MediaStream, audioSelected: true, release: () => { releases++; }
-        }) });
+        f.refuseReplace();
+        await f.controller.changeSource("https://dass.example", next.bridge);
+        expect(f.events).toEqual(["authenticate", "capture", "prepare", "activate", "replace", "authenticate", "prepare", "activate"]);
+        expect(f.controller.getSnapshot().phase).toBe("publishing");
+        expect(f.controller.getPreviewStream()).toBe(next.lease.stream);
         expect(f.releases()).toBe(1);
-        expect(releases).toBe(0);
-        expect(f.controller.getSnapshot().phase).toBe("failed");
+        expect(next.releases()).toBe(0);
     } finally { f.controller.stop(); }
 });
 
-for (const stopWhileReleasing of [false, true]) {
-    test(`Change Stream waits for host audio cleanup${stopWhileReleasing ? " and cannot restart after stop" : " before restarting DASS"}`, async () => {
-        const f = fixture();
-        let finish: (() => void) | undefined;
-        try {
-            await f.controller.publish("https://dass.example", f.bridge);
-            f.lease.release = () => new Promise<void>(resolve => { finish = resolve; });
-            const changing = f.controller.changeSource("https://dass.example", f.bridge);
-            expect(f.events.filter(event => event === "capture")).toHaveLength(1);
-            if (stopWhileReleasing) f.controller.stop();
-            finish?.();
-            await changing;
-            expect(f.events.filter(event => event === "capture")).toHaveLength(stopWhileReleasing ? 1 : 2);
-            expect(f.controller.getSnapshot().phase).toBe(stopWhileReleasing ? "idle" : "publishing");
-        } finally { f.controller.stop(); }
-    });
-}
+test("a refused restart releases the chosen source", async () => {
+    const f = fixture();
+    const next = replacement(true);
+    try {
+        await f.controller.publish("https://dass.example", f.bridge);
+        f.refuseReplace();
+        f.deny();
+        await f.controller.changeSource("https://dass.example", next.bridge);
+        expect(f.controller.getSnapshot().phase).toBe("failed");
+        expect(f.releases()).toBe(1);
+        expect(next.releases()).toBe(1);
+    } finally { f.controller.stop(); }
+});
 
 test("session snapshots never contain credentials; setup is reused and can be forgotten", () => {
     const session = new DassSession();

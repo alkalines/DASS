@@ -182,4 +182,32 @@ describe("explicit host capture lifecycle", () => {
         expect(f.audio.stops).toBe(1);
         expect(f.stops()).toBe(1);
     });
+
+    test("a source change keeps host ownership until the replacing lease is released", async () => {
+        const first = fixture();
+        const second = fixture();
+        let ownershipReleased = false;
+        const results: Array<MediaStream | Error> = [first.stream, new Error("Picker cancelled."), second.stream];
+        const bridge = createCaptureBridge({ ...first.host, claim: () => () => { ownershipReleased = true; }, capture: async () => {
+            const result = results.shift()!;
+            if (result instanceof Error) throw result;
+            return result;
+        } });
+        const current = await bridge.capture(new AbortController().signal);
+        await expect(bridge.capture(new AbortController().signal, { stream: second.stream })).rejects.toThrow("unavailable");
+        await expect(bridge.capture(new AbortController().signal, current)).rejects.toThrow("cancelled");
+        expect(first.video.stops).toBe(0);
+        expect(first.stops()).toBe(0);
+        const next = await bridge.capture(new AbortController().signal, current);
+        await current.release();
+        expect(first.video.stops).toBe(1);
+        expect(second.video.stops).toBe(0);
+        expect(first.stops()).toBe(0);
+        expect(bridge.ownsAudio()).toBe(true);
+        await next.release();
+        expect(second.video.stops).toBe(1);
+        expect(first.stops()).toBe(1);
+        expect(bridge.ownsAudio()).toBe(false);
+        expect(ownershipReleased).toBe(true);
+    });
 });

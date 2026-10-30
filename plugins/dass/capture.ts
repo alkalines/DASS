@@ -9,26 +9,27 @@ import type { CaptureLease } from "./routing";
 
 export interface EquibopCaptureBridge {
     version: 1;
-    capture(signal: AbortSignal): Promise<CaptureLease>;
+    /** `replacing` keeps the current lease live while the picker runs (source change). */
+    capture(signal: AbortSignal, replacing?: CaptureLease): Promise<CaptureLease>;
 }
 
 /** Capture ownership is supplied by the plugin's Equibop adapter. */
 export function createEquibopCapture(bridge?: EquibopCaptureBridge) {
-    return async (signal: AbortSignal): Promise<CaptureLease> => {
+    return async (signal: AbortSignal, replacing?: CaptureLease): Promise<CaptureLease> => {
         if (signal.aborted || bridge?.version !== 1 || typeof bridge.capture !== "function") {
             logDiagnostic("capture unavailable", { code: signal.aborted ? "cancelled" : "bridge_missing_or_incompatible" }, true);
             throw new Error("DASS screen capture is unavailable in this client.");
         }
-        logDiagnostic("capture picker requested");
+        logDiagnostic("capture picker requested", { replacement: !!replacing });
         try {
-            const lease = await bridge.capture(signal);
+            const lease = await bridge.capture(signal, replacing);
             // The picker may have been closed while the host was still starting.
             // A cancelled capture must never leave a live lease behind.
             if (signal.aborted) {
                 await lease.release();
                 throw new Error("The DASS capture was cancelled.");
             }
-            logDiagnostic("capture acquired", { audioSelected: lease.audioSelected });
+            logDiagnostic("capture acquired", { audioSelected: lease.audioSelected, replacement: !!replacing });
             return lease;
         } catch (error) {
             logDiagnostic("capture failed or cancelled", { code: signal.aborted ? "cancelled" : browserFailureCode(error) }, true);

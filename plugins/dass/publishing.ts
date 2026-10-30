@@ -71,6 +71,7 @@ export class PublishController {
         viewerKeys?: Map<string, string>; requestKeys?: Map<string, { viewerId: string; key: string; trust: IdentityTrust; deciding?: boolean }>;
         membershipVersions?: Map<string, number>; membershipTokens?: Map<string, object>; membershipQueue?: Promise<void>; };
     private contextCheck?: ReturnType<typeof setInterval>;
+    /** The pending source change; its signal cancels the replacement picker. */
     private sourceChange?: AbortController;
     private listeners = new Set<() => void>();
     private status: PublishStatus = { phase: "idle", message: "No DASS share is running.", candidates: [], pendingViewers: [], approvedViewers: [] };
@@ -97,7 +98,6 @@ export class PublishController {
         }, 250);
     }
     reset(message = "DASS sharing stopped. Capture and connection resources were released.") {
-        this.sourceChange?.abort();
         this.sourceChange = undefined;
         const { operation } = this;
         this.operation = undefined;
@@ -123,21 +123,56 @@ export class PublishController {
         return this.active && this.operation === operation && !operation.abort.signal.aborted && this.currentContext() === operation.contextId;
     }
 
+    /**
+     * Discord-style source change: the current share keeps running while the
+     * picker is open. Cancelling changes nothing. A chosen source with the same
+     * track kinds replaces the published tracks on the live connection; a
+     * changed stream-audio choice needs a new negotiation, so DASS restarts
+     * the share with the already chosen source.
+     */
     async changeSource(backendUrl: string, bridge?: EquibopCaptureBridge) {
         const { operation } = this;
-        if (!operation || !this.current(operation) || !hasAcceptedPublishCapture(this.status.phase) || this.sourceChange) return;
-        const released = operation.capture?.release();
-        operation.capture = undefined;
-        this.reset();
+        const current = operation?.capture;
+        if (!operation || !current || !this.current(operation) || !hasAcceptedPublishCapture(this.status.phase) || this.sourceChange) return;
         const request = new AbortController();
         this.sourceChange = request;
+        // Stopping the share cancels a pending picker. The chosen lease is not
+        // bound to the old operation: a restart below aborts that operation.
+        const cancel = () => request.abort();
+        operation.abort.signal.addEventListener("abort", cancel, { once: true });
         try {
-            await released;
-            if (request.signal.aborted || !this.active || this.currentContext() !== operation.contextId) return;
-            this.sourceChange = undefined;
-            await this.publish(backendUrl, bridge);
-        } catch {
-            if (!request.signal.aborted) this.update({ phase: "failed", message: "Could not release the old capture. Restart the client before sharing again.", candidates: [], pendingViewers: [], approvedViewers: [] });
+            let next: CaptureLease;
+            try {
+                next = await createEquibopCapture(bridge)(request.signal, current);
+            } catch {
+                return;
+            } finally {
+                operation.abort.signal.removeEventListener("abort", cancel);
+            }
+            if (!this.current(operation) || operation.capture !== current) {
+                void next.release();
+                return;
+            }
+            if (this.status.phase === "publishing" && operation.peer && await operation.peer.replaceCapture(next)) {
+                if (!this.current(operation)) {
+                    void next.release();
+                    return;
+                }
+                operation.capture = next;
+                void current.release();
+                logDiagnostic("publisher source changed", { restarted: false });
+                this.update({ ...this.status });
+                return;
+            }
+            if (!this.current(operation)) {
+                void next.release();
+                return;
+            }
+            logDiagnostic("publisher source changed", { restarted: true });
+            this.reset();
+            let consumed = false;
+            await this.publish(backendUrl, { version: 1, capture: async () => { consumed = true; return next; } });
+            if (!consumed) void next.release();
         } finally {
             if (this.sourceChange === request) this.sourceChange = undefined;
         }

@@ -131,7 +131,7 @@ export class SpikePeer {
     private constructor(
         private readonly peer: RTCPeerConnection,
         private readonly signal: AbortSignal,
-        private readonly capture?: CaptureLease
+        private capture?: CaptureLease
     ) {
         signal.addEventListener("abort", this.close, { once: true });
         peer.addEventListener("connectionstatechange", this.onState);
@@ -327,6 +327,28 @@ export class SpikePeer {
     }
 
     private checkActive() { if (!this.active || this.signal.aborted) throw new Error("DASS peer is closed."); }
+
+    /**
+     * Swap the published source on the live connection, as Discord's own source
+     * change does: `replaceTrack` keeps the negotiated session, E2EE transforms
+     * and approved viewers. Returns false when the track kinds differ (stream
+     * audio toggled), which needs a new negotiation.
+     */
+    async replaceCapture(next: CaptureLease): Promise<boolean> {
+        const current = this.capture;
+        const kinds = (lease: CaptureLease) => lease.stream.getTracks().map(track => track.kind).sort().join();
+        if (!this.active || !current || kinds(current) !== kinds(next) || next.stream.getTracks().some(track => track.readyState !== "live")) return false;
+        const replacements = this.peer.getSenders().flatMap(sender => {
+            const track = sender.track && next.stream.getTracks().find(candidate => candidate.kind === sender.track!.kind);
+            return track ? [sender.replaceTrack(track)] : [];
+        });
+        try { await Promise.all(replacements); } catch { return false; }
+        if (!this.active) return false;
+        for (const track of current.stream.getTracks()) track.removeEventListener("ended", this.close);
+        for (const track of next.stream.getTracks()) track.addEventListener("ended", this.close, { once: true });
+        this.capture = next;
+        return true;
+    }
 
     private async sampleMedia() {
         try {
