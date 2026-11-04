@@ -69,7 +69,7 @@ test("publisher name uses the current display name without changing remote DASS 
 });
 
 test("unapproved builds warn without gating or duplicating presentation and capture hooks", () => {
-    expect(APPROVED_DISCORD_BUILDS).toEqual([634304, 637268, 638651]);
+    expect(APPROVED_DISCORD_BUILDS).toEqual([634304, 637268, 638651, 661871]);
     for (const build of APPROVED_DISCORD_BUILDS) expect(getDiscordBuildWarning(build)).toBeUndefined();
     for (const build of [638652, 999999, 0, NaN]) {
         expect(getDiscordBuildWarning(build)).toBe("The current plugin version is not yet approved for this Discord build. This could cause the UI to break.");

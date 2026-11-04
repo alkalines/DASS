@@ -46,6 +46,13 @@ Uncommitted work has no commit ID until it is committed.
 
 ### Fixed
 
+- **Voice Connected Share button on build 661871:** Discord renamed the
+  panel's analytics export, so one replacement in the grouped Voice Connected
+  patch stopped matching and Discord dropped the whole group; the button no
+  longer showed the Discord / DASS chooser. The same rename also disabled the
+  own-voice-row LIVE badge, sidebar stream card stop hook and focused-watch
+  center control. All four patch groups match again, and build 661871 is now
+  an approved build.
 - **Viewers hearing themselves:** Discord desktop stream audio now uses Windows
   process loopback like Discord's soundshare: a window shares only its
   application's audio, and a screen shares everything except Discord. Screen

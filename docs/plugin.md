@@ -326,7 +326,7 @@ loss, logout, disable and revoked access clear retained entries. DevTools mock
 checks verified typography, help expansion and close behavior; real failure
 timing still needs runtime acceptance.
 
-The reviewed Discord builds are **634304**, **637268** and **638651**. This list is
+The reviewed Discord builds are **634304**, **637268**, **638651** and **661871**. This list is
 informational, not a patch gate: DASS attempts its hooks on every build. On an
 unapproved or unidentifiable build, plugin startup shows a **DASS compatibility
 warning** once per client session: “The current plugin version is not yet approved
@@ -334,6 +334,15 @@ for this Discord build. This could cause the UI to break.” Enabling the plugin
 later in the session also performs this check. Source-match and grouped-patch
 rollback checks remain in place, but cannot guarantee compatibility or interception
 on future builds. If the chooser is missing, do not continue sharing expecting DASS.
+On November 3, 2026, the Voice Connected Share button stopped opening the chooser
+on stable build 661871 (hash `0758a12ada8f466683700289bd55037f8a3010a5`). A
+read-only check against that build's downloaded web assets showed four patch
+groups (Voice Connected panel, VoiceUserIcons, ActivityPanelGameCard and
+CenterControlTray) each losing one replacement to renamed exports or new
+properties, so Discord's patcher dropped those groups. After updating the
+matches, all 66 replacements across 16 patch groups matched once, with every
+intermediate source compiling. Runtime acceptance after rebuilding and
+restarting is still pending.
 On October 15, 2026, the running stable client
 reported build 638651 (hash `5622b31c0cab24812146307b2dd36712a87d7174`). DASS was
 enabled, but the previous exact-build gates skipped its share-button hooks,

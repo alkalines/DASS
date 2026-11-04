@@ -140,6 +140,14 @@ describe("build 634304 Voice Connected panel patch", () => {
         expect(() => new Function("$self", `let t; let ${source};`)).not.toThrow();
     });
 
+    test("build 661871 renamed analytics export still applies the whole group", () => {
+        const build661871 = OBSERVED_VOICE_PANEL_RENDER_SOURCE.replace("(0,DH.X)(l,DH.O.STREAM,null==I)", "(0,DU.XJ)(l,DU.OP.STREAM,null==I)");
+        expect(build661871).not.toBe(OBSERVED_VOICE_PANEL_RENDER_SOURCE);
+        const source = patchSidebar(build661871);
+        expect(source).toContain("DU.OP.STREAM,!dassSidebarPublishing&&null==I");
+        expect(source).toContain("$self.chooseShareTransport(");
+    });
+
     function renderSidebar(dassActive: boolean, nativeActive = false, hasActivity = false, blocked = false) {
         const calls: string[] = [];
         const jsx = (component: unknown, props: any) => ({ component, props });

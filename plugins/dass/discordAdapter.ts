@@ -47,7 +47,7 @@ const SHARE_PATCHES = [{
         match: /("data-migration-pending":!0,buttonRef:\i,size:\i\.\i\.Sizes.MEDIUM,"aria-pressed":)(null!=\i)/,
         replace: "$1dassSidebarPublishing||$2"
     }, {
-        match: /(\i\.O.STREAM,)(null==\i)(?=\),\i\?\i\(\i\):\i\(\)\},disabled:)/,
+        match: /(\i\.\i\.STREAM,)(null==\i)(?=\),\i\?\i\(\i\):\i\(\)\},disabled:)/,
         replace: "$1!dassSidebarPublishing&&$2"
     }, {
         match: /disabled:(!\i\|\|\i),className:(\i\(\)\(\i\.\i,\i\.\i,\{\[\i\.\i\]:)(null!=\i)(,\[\i\.\i\]:)(!\i\|\|\i)(\}\))(?=,\.\.\.\i\?\i:null,onMouseEnter:)/,
@@ -60,7 +60,7 @@ const SHARE_PATCHES = [{
     find: "VoiceUserIcons",
     group: true,
     replacement: [{
-        match: /(guildId:\i,channelId:(\i),user:(\i),disconnected:\i,isHovered:\i\}=\i)(?=,\i=\i\|\|\i,\{enabled:\i\}=\i\.useConfig\(\{guildId:\i\?\?"",location:"VoiceUserIcons"\}\))/,
+        match: /(guildId:\i,channelId:(\i),user:(\i),disconnected:\i,isHovered:\i(?:,\i:\i){0,4}\}=\i)(?=,\i=\i\|\|\i,\{enabled:\i\}=\i\.useConfig\(\{guildId:\i\?\?"",location:"VoiceUserIcons"\}\))/,
         replace: "$1,dassOwnLive=$self.useLocalLiveState($3.id,$2)"
     }, {
         match: /(?<=return\(\i&&null!=\i&&\i\.push\(\i\),)(\i&&!\i)(?=&&\i\.push\(\(0,\i\.jsx\)\(\i\.Ay,\{size:\i\.Ay\.Sizes.SMALL\},"stream"\)\))/,
@@ -245,7 +245,7 @@ const PRESENTATION_PATCHES = [{
         match: /(\i\.useCallback\(\(\)=>\{)(\(0,\i\.A\)\((\i)\))(\},\[\3)(\]\))/,
         replace: "$1$self.stopSidebarStream(dassStop,()=>$2)$4,dassStop$5"
     }, {
-        match: /(\i=\(\)=>\{\i\(\),)(\(0,\i\.X\)\(\i,\i\.O\.STREAM,!1\))(?=\},\i=\i\.\i,)/,
+        match: /(\i=\(\)=>\{\i\(\),)(\(0,\i\.\i\)\(\i,\i\.\i\.STREAM,!1\))(?=\},\i=\i\.\i,)/,
         replace: "$1dassStop||$2"
     }, {
         match: /(\(\i\?\?\i\)==null\?\(0,\i\.jsx\)\(\i,\{isActivity:)/,
@@ -265,7 +265,7 @@ const PRESENTATION_PATCHES = [{
         match: /(let\{currentUser:\i,onDisconnectCall:\i,channel:(\i),connectedEmbeddedActivity:\i\}=\i,)/,
         replace: "$1dassFocusedWatching=$self.useFocusedWatchingState($2.id),"
     }, {
-        match: /(\i\.useCallback\(\(\)=>)(?=\i\?\.type===\i\.lp\.ACTIVITY&&\i\.applicationId===\i\?\.applicationId\?"ACTIVITY":\i\|\|\i\?"STREAM":)/,
+        match: /(\i\.useCallback\(\(\)=>)(?=\i\?\.type===\i\.lp\.ACTIVITY&&\(?(?:null!=\i\.frameId\|\|)?\i\.applicationId===\i\?\.applicationId\)?\?"ACTIVITY":\i\|\|\i\?"STREAM":)/,
         replace: '$1dassFocusedWatching?"STREAM":'
     }, {
         match: /(\[\i,\i\?\.applicationId,\i,\i,\i)(\]\),\[\i,\i\]=\i\.useState\(\i\(\)\))/,
@@ -282,7 +282,7 @@ const PRESENTATION_PATCHES = [{
     }]
 }];
 
-export const APPROVED_DISCORD_BUILDS: readonly number[] = [634304, 637268, 638651];
+export const APPROVED_DISCORD_BUILDS: readonly number[] = [634304, 637268, 638651, 661871];
 export const DISCORD_SHARE_PATCHES = SHARE_PATCHES;
 export const DISCORD_GO_LIVE_PATCHES = GO_LIVE_PATCHES;
 export const DISCORD_PRESENTATION_PATCHES = PRESENTATION_PATCHES;
