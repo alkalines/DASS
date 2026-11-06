@@ -1,11 +1,11 @@
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 
-const revision = "27219be3566589280c0c933b04753805381d3bc8";
+const revision = "57406f627221bc6054deb9834c18fa9cd914d96a";
 const root = fileURLToPath(new URL("../", import.meta.url));
 const vendor = join(root, "vendor/Equibop");
 const checkout = join(root, "build/Equibop");
@@ -39,6 +39,11 @@ function replaceOnce(contents, from, to) {
 }
 
 if (git(["rev-parse", "HEAD"], vendor) !== revision) throw new Error("Unexpected Equibop pin.");
+if (existsSync(checkout) && git(["rev-parse", "HEAD"]) !== revision) {
+    const backup = join(mkdtempSync(join(root, "build/Equibop-backup-")), "Equibop");
+    renameSync(checkout, backup);
+    console.log(`Preserved the previous Equibop checkout in ${backup}`);
+}
 if (!existsSync(checkout)) {
     mkdirSync(join(root, "build"), { recursive: true });
     git(["clone", "--no-hardlinks", "--no-checkout", vendor, checkout], root);
@@ -115,7 +120,11 @@ files.set(pickerPath, picker);
 const indexPath = "src/renderer/index.ts";
 files.set(indexPath, git(["show", `${revision}:${indexPath}`]) + '\n\nexport { DassCapture } from "./dassCapture";\n');
 for (const name of ["dassCapture.ts", "dassCaptureLifecycle.ts", "captureOwnership.ts", "installedCapture.ts"]) {
-    files.set(`src/renderer/${name}`, readFileSync(join(root, name === "dassCaptureLifecycle.ts" ? "plugins/dass/captureLifecycle.ts" : `tooling/equibop/${name}`), "utf8"));
+    let contents = readFileSync(join(root, name === "dassCaptureLifecycle.ts" ? "plugins/dass/captureLifecycle.ts" : `tooling/equibop/${name}`), "utf8");
+    if (name === "dassCaptureLifecycle.ts") {
+        contents = contents.replace(" * Vencord, a Discord client mod", " * Vesktop, a desktop app aiming to give you a snappier Discord Experience");
+    }
+    files.set(`src/renderer/${name}`, contents);
 }
 files.set("src/renderer/patches/screenShareFixes.ts", readFileSync(join(root, "tooling/equibop/screenShareFixes.ts"), "utf8"));
 await formatHostSources(files);

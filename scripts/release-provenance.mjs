@@ -13,8 +13,8 @@ const git = (args, cwd = rootDirectory) => {
 };
 const sha256 = path => createHash("sha256").update(readFileSync(new URL(`../${path}`, import.meta.url))).digest("hex");
 const expectedPins = {
-    "vendor/Equicord": "e0e85c8d4f6dc73aac9368cf3f4b2200eac4d4b4",
-    "vendor/Equibop": "27219be3566589280c0c933b04753805381d3bc8"
+    "vendor/Equicord": "cb95617b390c52addac1ab456388ead3fd2dbe11",
+    "vendor/Equibop": "57406f627221bc6054deb9834c18fa9cd914d96a"
 };
 const inputs = ["Cargo.toml", "Cargo.lock", "Dockerfile", "compose.yaml", "tooling/equicord/bun.lock", "scripts/build-plugin.mjs"];
 const nodeVersion = spawnSync("node", ["--version"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });

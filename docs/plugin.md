@@ -1,5 +1,18 @@
 # DASS plugin
 
+## Empty black Equibop window at startup
+
+Discord build 667580 was observed leaving `app-mount` empty with
+`TypeError: i.A is not a constructor`. Its webpack export helper accepts a third
+argument for value exports, which the old Equicord loader ignored. Equicord
+1.15.16.0 includes upstream support for both getter and value exports. The
+current build uses that upstream fix without a local loader patch.
+
+From the repository root, run `bun scripts/build-plugin.mjs`, then fully quit and
+restart Equibop using `build/Equicord/dist` as its custom Equicord location.
+This fix does not require clearing login data or settings. Loader regression
+tests cover both export formats; they do not establish DASS media compatibility.
+
 ## Unexpected stream disconnects
 
 Discord Alternative ScreenShare (DASS) now uses a shared 24-hour authenticated
@@ -622,16 +635,21 @@ bun scripts/build-plugin.mjs
 ```
 
 The current build adapter targets Equicord
-`17068a94859be00cde5432dfe72823231347899b` (1.15.12.0), alongside the updated
+`cb95617b390c52addac1ab456388ead3fd2dbe11` (1.15.16.0), alongside the updated
 Equibop submodule `57406f627221bc6054deb9834c18fa9cd914d96a` (3.3.2).
-Lint, full typechecking, both bundle builds and 349 plugin/manifest tests passed
-with Bun 1.4.3 and Node 24.18.0 on Linux. GUI loading and capture on these updated
-revisions remain unverified; the earlier compatibility snapshot is historical.
+Both upstream branches were fetched on 2026-11-06 at the user's request;
+Equibop was already current. GUI loading and capture on these updated revisions
+remain unverified; the earlier compatibility snapshot is historical.
+With Bun 1.4.4, Equicord lint/typecheck and both bundles passed, all 360
+plugin/adapter tests passed, and the staged Equibop host passed lint/typecheck
+and its build (using upstream prebuilt libvesktop binaries).
 
 `vendor/Equicord` is the shared upstream source. The adapter clones a dedicated
 `build/Equicord` checkout from that submodule on
 first use, verifies both pins, adapts the local
-types dependency, stages `plugins/dass` under `src/userplugins/dass`, installs the
+types dependency, resolves upstream catalog versions into the Bun manifest,
+registers the local types workspace and its catalog, stages `plugins/dass` under
+`src/userplugins/dass`, installs the
 locked dependencies, runs lint/typecheck, and builds both targets. It refuses
 unfamiliar manifest, lockfile and staged-source edits rather than overwriting them.
 When the build checkout has a different revision, it is preserved in

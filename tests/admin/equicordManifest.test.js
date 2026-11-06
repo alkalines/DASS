@@ -5,6 +5,7 @@ import { readFileSync } from "node:fs";
 import { adaptEquicordManifest } from "../../scripts/equicordManifest.mjs";
 
 const pinnedManifest = await readFile(new URL("../../vendor/Equicord/package.json", import.meta.url), "utf8");
+const workspace = await readFile(new URL("../../vendor/Equicord/pnpm-workspace.yaml", import.meta.url), "utf8");
 
 describe("Equicord adapter manifest", () => {
     it("builds the checked-out upstream revision", () => {
@@ -14,7 +15,7 @@ describe("Equicord adapter manifest", () => {
     });
 
     it("keeps only target-build dependencies and patched advisory versions", () => {
-        const manifest = JSON.parse(adaptEquicordManifest(pinnedManifest));
+        const manifest = JSON.parse(adaptEquicordManifest(pinnedManifest, workspace));
 
         expect(manifest.devDependencies["@vencord/discord-types"]).toBe("file:packages/discord-types");
         expect(manifest.devDependencies["zip-local"]).toBeUndefined();
@@ -29,8 +30,15 @@ describe("Equicord adapter manifest", () => {
     });
 
     it("rejects an unexpected upstream dependency change", () => {
-        expect(() => adaptEquicordManifest(pinnedManifest.replace('"zip-local": "^0.3.5"', '"zip-local": "^1.0.0"')))
+        expect(() => adaptEquicordManifest(pinnedManifest, workspace.replace('"zip-local": "^0.3.5"', '"zip-local": "^1.0.0"')))
             .toThrow("Pinned web-only zip-local dependency did not match.");
+    });
+
+    it("resolves catalog dependencies and rejects missing versions", () => {
+        const manifest = JSON.parse(adaptEquicordManifest(pinnedManifest, workspace));
+        expect(manifest.dependencies["@vencord/monaco-editor"]).toBe("0.57.0-beta.4");
+        expect(Object.values(manifest.devDependencies)).not.toContain("catalog:");
+        expect(() => adaptEquicordManifest(pinnedManifest, "")).toThrow("Missing pinned catalog version");
     });
 
     it("excludes only the unsupported web packager from the adapter typecheck", () => {

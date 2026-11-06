@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { adaptEquicordManifest } from "./equicordManifest.mjs";
 import { parseVersion } from "./release-plan.mjs";
 
-const EQUICORD_REVISION = "17068a94859be00cde5432dfe72823231347899b";
+const EQUICORD_REVISION = "cb95617b390c52addac1ab456388ead3fd2dbe11";
 const rootDirectory = fileURLToPath(new URL("../", import.meta.url));
 const vendorDirectory = join(rootDirectory, "vendor/Equicord");
 const checkoutDirectory = join(rootDirectory, "build/Equicord");
@@ -58,7 +58,7 @@ try {
     if (upstreamManifest.status !== 0) throw new Error("Cannot read pinned Equicord manifest.");
     const originalManifest = upstreamManifest.stdout;
     const previousAdapterManifest = originalManifest.replace('"link:packages/discord-types"', '"file:packages/discord-types"');
-    const adaptedManifest = adaptEquicordManifest(originalManifest);
+    const adaptedManifest = adaptEquicordManifest(originalManifest, readFileSync(join(vendorDirectory, "pnpm-workspace.yaml"), "utf8"));
     const manifestPath = join(checkoutDirectory, "package.json");
     const currentManifest = readFileSync(manifestPath, "utf8");
     if (currentManifest !== originalManifest && currentManifest !== previousAdapterManifest && currentManifest !== adaptedManifest) {

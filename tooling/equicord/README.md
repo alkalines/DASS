@@ -4,12 +4,18 @@ This directory owns the Bun dependency lock used by `scripts/build-plugin.mjs`,
 not an Equicord fork or a client runtime helper.
 
 - Upstream source: `https://github.com/Equicord/Equicord.git`
-- Revision: `e0e85c8d4f6dc73aac9368cf3f4b2200eac4d4b4`
-- Validated tooling: Bun 1.4.2, Node 24.18.0, Linux x64.
+- Revision: `cb95617b390c52addac1ab456388ead3fd2dbe11` (1.15.16.0)
+- Tooling for this update: Bun 1.4.4, Node 24.18.0, Linux x64.
 - Upstream license: GPL-3.0-or-later; local Discord type package: LGPL-3.0-or-later.
 
 The pinned manifest uses a relative `link:` dependency that Bun cannot migrate.
 The build adapter changes that one specifier to `file:packages/discord-types`.
+It resolves the flat catalog in `pnpm-workspace.yaml` into root dependency
+versions and registers the local types workspace with the same catalog for its
+own dependencies. No pnpm command is run. The lock was intentionally refreshed
+for the user-requested upstream update on 2026-11-06; later builds stay frozen.
+Upstream replaces `monaco-editor` with `@vencord/monaco-editor` (MIT); the local
+type package remains LGPL-3.0-or-later. No new DASS native helper was introduced.
 The local types retain their upstream package identity, and Equicord's dependency
 alias remains `@vencord/discord-types`. No React, Electron or media dependency is
 added by DASS. Bun then resolved the upstream ranges intentionally to generate
