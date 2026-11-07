@@ -46,6 +46,11 @@ Uncommitted work has no commit ID until it is committed.
 
 ### Fixed
 
+- **Every connection failing with `socket`:** Discord's connection policy
+  blocked the client from reaching a custom backend, so login, watching and sharing
+  all failed instantly. DASS now allows exactly the configured HTTPS backend
+  origin (HTTPS and WSS) in Discord's policy while the plugin is enabled. Fully
+  restart the client once; reload Discord after changing the backend URL.
 - **Voice Connected Share button on build 661871:** Discord renamed the
   panel's analytics export, so one replacement in the grouped Voice Connected
   patch stopped matching and Discord dropped the whole group; the button no

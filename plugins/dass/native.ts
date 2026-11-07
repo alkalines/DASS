@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
+import "./nativeCsp";
+
 import { type IpcMainInvokeEvent, safeStorage, shell } from "electron";
 
 import { DASS_VERSION } from "./releaseInfo";

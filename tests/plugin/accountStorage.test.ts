@@ -23,7 +23,8 @@ mock.module("electron", () => ({ app: {}, webContents: {}, shell: { openExternal
 const values = new Map<string, unknown>();
 mock.module("@api/DataStore", () => ({ get: async (key: string) => values.get(key), set: async (key: string, value: unknown) => { values.set(key, value); },
     del: async (key: string) => { values.delete(key); } }));
-mock.module("@main/settings", () => ({ RendererSettings: { store: { plugins: {} } } }));
+mock.module("@main/settings", () => ({ RendererSettings: { store: { plugins: {} }, addGlobalChangeListener() {} } }));
+mock.module("@main/csp", () => ({ ConnectSrc: ["connect-src"], CspPolicies: {} }));
 Object.assign(globalThis, { IS_DISCORD_DESKTOP: false });
 
 const native = await import("../../plugins/dass/native");

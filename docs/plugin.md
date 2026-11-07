@@ -1,5 +1,22 @@
 # DASS plugin
 
+## Every DASS connection fails with `socket`
+
+On 2026-11-07, Discord's main-frame Content Security Policy listed only Discord
+and partner hosts in `connect-src`, so Chromium refused the WebSocket to the
+configured backend before any network request. Logs showed `signaling closed`
+with `code: "socket"` milliseconds after every `signaling connecting`, for
+account login, watching and publishing alike, while the backend accepted the
+same `dass.v1` upgrade from outside Discord.
+
+The plugin's main-process half (`plugins/dass/nativeCsp.ts`) now adds exactly
+the configured HTTPS backend origin to Equicord's `CspPolicies` as
+`https://host[:port]` and `wss://host[:port]` `connect-src` sources, only while
+DASS is enabled. Equicord's **Allow domain** dialog is not sufficient: it stores
+scheme-less hosts, and Chromium does not match those against `wss:` from an
+`https:` page. Rebuild, then fully quit and restart Equibop or Discord once.
+After changing the backend URL, reload Discord (Ctrl+R) to apply the new policy.
+
 ## Empty black Equibop window at startup
 
 Discord build 667580 was observed leaving `app-mount` empty with

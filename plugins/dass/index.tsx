@@ -172,7 +172,7 @@ const settings = definePluginSettings({
     },
     backendUrl: {
         type: OptionType.STRING,
-        description: "Trusted HTTPS DASS backend origin.",
+        description: "Trusted HTTPS DASS backend origin. DASS adds only this origin to Discord's connection policy; reload Discord (Ctrl+R) after changing it.",
         default: "https://localhost:8080",
         onChange: resetConfiguration
     },
