@@ -162,17 +162,22 @@ test("focused layout and filmstrip use DASS participants without native user/med
 
 test("CallTile export routes to a DASS-owned component before native hooks mount", () => {
     const source = patch(`${tileSource}}`, 2);
-    expect(source).toContain("eY=$self.wrapCallTile(eU)");
+    expect(source).toContain('eU.displayName="CallTile";eU=$self.wrapCallTile(eU);');
     expect(source).toContain('$self.captureCallTileOverlay(eB).displayName="CallTileOverlay"');
     expect(() => new Function("$self", `function factory(){${source}`)).not.toThrow();
 });
 
-test("CallTile wrapping does not depend on the neighboring frame export being unconditional", () => {
-    const conditional = 'let eP=l.memo(e=>native(e));eP.displayName="CallTile";let eB=l.memo(e=>overlay(e));eB.displayName="CallTileOverlay";let e$=/^(123|456)$/.test(l.j)?F.$:null,ez=eP}';
-    const source = patch(conditional, 2);
-    expect(source).toContain("ez=$self.wrapCallTile(eP)");
-    expect(source).toContain("/^(123|456)$/.test(l.j)?F.$:null");
-    expect(() => new Function("$self", `function factory(){${source}`)).not.toThrow();
+test("build 670026 value export receives the wrapped CallTile", () => {
+    const valueExport = 'let ew=[1],ez=i.memo(e=>native(e));ez.displayName="CallTile";let eX=i.memo(e=>overlay(e));eX.displayName="CallTileOverlay";let eB=F.$;n.d(l,{},{Ay:ez,Yl:eB})';
+    const source = patch(valueExport, 2);
+    const exports: Record<string, unknown> = {};
+    const wrapped = { wrapped: true };
+    new Function("$self", "i", "F", "n", "l", source)(
+        { wrapCallTile: () => wrapped, captureCallTileOverlay: (component: unknown) => component },
+        { memo: (render: unknown) => ({ render }) }, { $: "frame" },
+        { d: (_target: unknown, _getters: unknown, values: Record<string, unknown>) => Object.assign(exports, values) }, {});
+    expect(exports.Ay).toBe(wrapped);
+    expect(exports.Yl).toBe("frame");
 });
 
 test("voice participant updates preserve DASS call layout without changing native voice mode", () => {

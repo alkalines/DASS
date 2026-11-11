@@ -356,7 +356,7 @@ loss, logout, disable and revoked access clear retained entries. DevTools mock
 checks verified typography, help expansion and close behavior; real failure
 timing still needs runtime acceptance.
 
-The reviewed Discord builds are **634304**, **637268**, **638651** and **661871**. This list is
+The reviewed Discord builds are **634304**, **637268**, **638651**, **661871** and **670026**. This list is
 informational, not a patch gate: DASS attempts its hooks on every build. On an
 unapproved or unidentifiable build, plugin startup shows a **DASS compatibility
 warning** once per client session: “The current plugin version is not yet approved
@@ -364,6 +364,17 @@ for this Discord build. This could cause the UI to break.” Enabling the plugin
 later in the session also performs this check. Source-match and grouped-patch
 rollback checks remain in place, but cannot guarantee compatibility or interception
 on future builds. If the chooser is missing, do not continue sharing expecting DASS.
+On November 11, 2026, opening a DASS stream tile on stable build 670026 (hash
+`b3c0fdde529de65f069998d669fe1987e4cdbeef`) crashed the call view: Discord now
+exports values directly (`n.d(module,{},{Ay:CallTile})`), so the trailing-alias
+CallTile wrapper no longer applied and Discord's native tile read
+`participant.user.id` from a DASS participant. Anonymous value exports and
+renamed or removed props also broke the stream menu, Go Live opener,
+focused-call auxiliary participants, VoiceUserIcons and ActivityPanelGameCard
+matches. After loading every lazy chunk through DevTools and updating the
+matches, all 65 replacements across 16 patches matched once in 19,274 module
+factories, with every patched factory compiling. Runtime acceptance after
+rebuilding and restarting is still pending.
 On November 3, 2026, the Voice Connected Share button stopped opening the chooser
 on stable build 661871 (hash `0758a12ada8f466683700289bd55037f8a3010a5`). A
 read-only check against that build's downloaded web assets showed four patch
@@ -652,14 +663,15 @@ bun scripts/build-plugin.mjs
 ```
 
 The current build adapter targets Equicord
-`cb95617b390c52addac1ab456388ead3fd2dbe11` (1.15.16.0), alongside the updated
+`577946253e6b62be0740b0ad86969ebc6ffbb2e4` (1.15.17.2), alongside the
 Equibop submodule `57406f627221bc6054deb9834c18fa9cd914d96a` (3.3.2).
-Both upstream branches were fetched on 2026-11-06 at the user's request;
-Equibop was already current. GUI loading and capture on these updated revisions
-remain unverified; the earlier compatibility snapshot is historical.
-With Bun 1.4.4, Equicord lint/typecheck and both bundles passed, all 360
-plugin/adapter tests passed, and the staged Equibop host passed lint/typecheck
-and its build (using upstream prebuilt libvesktop binaries).
+Both upstreams were fetched on 2026-11-11 at the user's request; Equibop `main`
+was still at 3.3.2. GUI loading and capture on these revisions remain
+unverified; the earlier compatibility snapshot is historical.
+With Bun 1.4.4, Equicord lint/typecheck and both bundles passed and all 380
+plugin/adapter tests passed. Upstream now lints with oxlint, which skips the
+gitignored `src/userplugins` directory when walking paths, so the adapter passes
+each staged TypeScript file explicitly.
 
 `vendor/Equicord` is the shared upstream source. The adapter clones a dedicated
 `build/Equicord` checkout from that submodule on

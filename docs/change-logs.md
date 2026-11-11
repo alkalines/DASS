@@ -43,6 +43,12 @@ Uncommitted work has no commit ID until it is committed.
   cancelling changes nothing. A new source replaces the live tracks without
   disconnecting viewers; toggling stream audio restarts the share with the
   chosen source.
+- **Equicord 1.15.17.2:** the build now uses Equicord
+  `577946253e6b62be0740b0ad86969ebc6ffbb2e4`; Equibop stays at 3.3.2, still its
+  latest release. Upstream replaced ESLint with oxlint, which skips the
+  gitignored `src/userplugins`, so the build adapter lints the staged DASS files
+  by explicit path. Rebuild with `bun scripts/build-plugin.mjs` and fully restart
+  the client.
 
 ### Fixed
 
@@ -51,6 +57,14 @@ Uncommitted work has no commit ID until it is committed.
   all failed instantly. DASS now allows exactly the configured HTTPS backend
   origin (HTTPS and WSS) in Discord's policy while the plugin is enabled. Fully
   restart the client once; reload Discord after changing the backend URL.
+- **Opening a stream tile on build 670026:** Discord now exports module values
+  directly instead of through a trailing alias, so the CallTile wrapper stopped
+  applying and DASS tiles reached Discord's native tile, which crashed with
+  “DASS call presentation failed. TypeError: Cannot read properties of
+  undefined (reading 'id')”. The wrapper now follows the `CallTile` display
+  name. The same build also broke the stream menu, Go Live picker opener,
+  focused-call auxiliary participants, own-voice-row LIVE badge and sidebar
+  stream card hooks; all match again, and build 670026 is now an approved build.
 - **Voice Connected Share button on build 661871:** Discord renamed the
   panel's analytics export, so one replacement in the grouped Voice Connected
   patch stopped matching and Discord dropped the whole group; the button no

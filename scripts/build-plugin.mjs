@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { adaptEquicordManifest } from "./equicordManifest.mjs";
 import { parseVersion } from "./release-plan.mjs";
 
-const EQUICORD_REVISION = "cb95617b390c52addac1ab456388ead3fd2dbe11";
+const EQUICORD_REVISION = "577946253e6b62be0740b0ad86969ebc6ffbb2e4";
 const rootDirectory = fileURLToPath(new URL("../", import.meta.url));
 const vendorDirectory = join(rootDirectory, "vendor/Equicord");
 const checkoutDirectory = join(rootDirectory, "build/Equicord");
@@ -136,7 +136,8 @@ try {
     writeFileSync(markerPath, JSON.stringify(currentHashes, null, 2) + "\n");
 
     run("bun", ["install", "--frozen-lockfile", "--ignore-scripts"]);
-    run("bun", ["run", "lint", "src/userplugins/dass"]);
+    // Upstream oxlint skips gitignored src/userplugins during directory walks; explicit paths are linted.
+    run("bun", ["run", "lint", ...sourceFiles.filter(name => /\.tsx?$/.test(name)).map(name => `src/userplugins/dass/${name}`)]);
     run("bun", ["run", "testTsc", "--project", join(rootDirectory, "tooling/equicord/tsconfig.json")]);
     run("bun", ["run", "build", "--disable-updater"]);
 

@@ -1,7 +1,5 @@
 import { type ClientMessage, MAX_DIRECTORY_SHARES, MAX_IDENTITY_KEY_CHARS, MAX_KEY_RELAY_CHARS, MAX_LOGIN_PASSWORD_BYTES, MAX_MESSAGE_BYTES, MAX_PUBLISHER_DISPLAY_NAME_BYTES, MAX_ROOM_MEMBERS, PROTOCOL_VERSION, type ServerMessage } from "./signaling";
 
-const pushedRequestIds = ["server_view_request", "server_view_decision", "server_view_request_closed", "server_viewer_presence", "server_key_relay"];
-
 const encoder = new TextEncoder();
 const identifier = (value: unknown) => typeof value === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(value);
 const opaqueField = (maximumChars: number) => (value: unknown) => typeof value === "string"

@@ -11,18 +11,28 @@ import { DISCORD_SHARE_PATCHES, isLocalPublisherLive } from "../../plugins/dass/
 const OBSERVED_ICON_PREFIX = 'function el(e){let{className:s,mute:t,localMute:n,localVideoDisabled:l,serverMute:r,deaf:c,serverDeaf:u,collapsed:C,video:I,isStreaming:S,disabled:_,isWatching:k,ringing:b,iconClassName:D,embeddedApplication:y,otherClientSessionType:M,voicePlatform:V,application:U,game:F,guildId:K,channelId:w,user:z,disconnected:H,isHovered:Z}=e,B=C||_,{enabled:J}=G.useConfig({guildId:K??"",location:"VoiceUserIcons"}),{previewUrl:X}=(0,P.A)(K,w,J&&S&&!B?z.id:void 0),$=null!=X&&""!==X.trim();if(B)return null;';
 const OBSERVED_BADGE_EXPRESSION = 'return(J&&null!=el&&Q.push(el),S&&!$&&Q.push((0,i.jsx)(v.Ay,{size:v.Ay.Sizes.SMALL},"stream"))';
 const fixtureSource = OBSERVED_ICON_PREFIX + 'let Q=[],el=null;' + OBSERVED_BADGE_EXPRESSION + '),Q}';
+const BUILD_670026_ICONS = 'function er(e){let{className:s,collapsed:p,isStreaming:_,disabled:D,isWatching:k,guildId:K,channelId:F,user:w,disconnected:z,isHovered:H,soundboardMuted:J}=e;if(p||D)return null;let Z=[];return k&&Z.push((0,r.jsx)(m.m,{children:null},"watch")),_&&Z.push((0,r.jsx)(b.Ay,{size:b.Ay.Sizes.SMALL},"stream")),Z}';
 
 function patchedIcons(source = fixtureSource) {
     const patch = DISCORD_SHARE_PATCHES[2];
-    expect(patch.find).toBe("VoiceUserIcons");
+    expect(new RegExp((patch.find as RegExp).source.replaceAll("\\i", "(?:[A-Za-z_$][\\w$]*)")).test(source)).toBe(true);
     expect(patch.group).toBe(true);
     for (const replacement of patch.replacement) {
         const regex = new RegExp(replacement.match.source.replaceAll("\\i", "(?:[A-Za-z_$][\\w$]*)"));
         expect([...source.matchAll(new RegExp(regex.source, "g"))]).toHaveLength(1);
-        source = source.replace(regex, replacement.replace);
+        source = source.replace(regex, replacement.replace as string);
     }
     return source;
 }
+
+test("build 670026 icons gate the native LIVE badge on DASS before the early return", () => {
+    const source = patchedIcons(BUILD_670026_ICONS);
+    expect(source).toContain("}=e,dassOwnLive=$self.useLocalLiveState(w.id,F);if(p||D)return null");
+    const render = new Function("r", "m", "b", "$self", `return ${source}`)(
+        { jsx: (_component: unknown, _props: unknown, key: string) => key }, {}, { Ay: { Sizes: { SMALL: "small" } } },
+        { useLocalLiveState: () => true });
+    expect(render({ user: { id: "self" }, channelId: "call", isStreaming: false })).toEqual(["stream"]);
+});
 
 test("local LIVE presentation needs owned capture in the same call, never a guessed remote identity", () => {
     const context = { pluginActive: true, publisherPhase: "publishing", discordUserId: "self", localDiscordUserId: "self",

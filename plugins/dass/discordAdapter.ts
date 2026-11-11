@@ -57,13 +57,13 @@ const SHARE_PATCHES = [{
         replace: '$1dassSidebarPublishing?"Stop Streaming":$2'
     }]
 }, {
-    find: "VoiceUserIcons",
+    find: /,disconnected:\i,isHovered:\i(?:,\i:\i){0,4}\}=\i[,;]/,
     group: true,
     replacement: [{
-        match: /(guildId:\i,channelId:(\i),user:(\i),disconnected:\i,isHovered:\i(?:,\i:\i){0,4}\}=\i)(?=,\i=\i\|\|\i,\{enabled:\i\}=\i\.useConfig\(\{guildId:\i\?\?"",location:"VoiceUserIcons"\}\))/,
+        match: /(guildId:\i,channelId:(\i),user:(\i),disconnected:\i,isHovered:\i(?:,\i:\i){0,4}\}=\i)(?=[,;])/,
         replace: "$1,dassOwnLive=$self.useLocalLiveState($3.id,$2)"
     }, {
-        match: /(?<=return\(\i&&null!=\i&&\i\.push\(\i\),)(\i&&!\i)(?=&&\i\.push\(\(0,\i\.jsx\)\(\i\.Ay,\{size:\i\.Ay\.Sizes.SMALL\},"stream"\)\))/,
+        match: /(?<=,)(\i(?:&&!\i)?)(?=&&\i\.push\(\(0,\i\.jsx\)\(\i\.Ay,\{size:\i\.Ay\.Sizes.SMALL\},"stream"\)\))/,
         replace: "(dassOwnLive||$1)"
     }]
 }, {
@@ -95,8 +95,10 @@ const SHARE_PATCHES = [{
 }, {
     find: 'navId:"manage-streams"',
     replacement: [{
-        match: /function (\i)\((\i)\)\{(?=let\{channel:\i,currentUser:\i,activeStreams:\i,hideSelfOptions:)/,
-        replace: "function $1($2){return $self.StreamMenu({...$2,dassNativeComponent:dassNativeStreamMenu})}function dassNativeStreamMenu($2){"
+        // Build 670026 exports this menu as an anonymous value; name it so the native body can render as a child.
+        match: /function(?: (\i))?\((\i)\)\{(?=let\{channel:\i,currentUser:\i,activeStreams:\i,hideSelfOptions:)/,
+        replace: (_: string, name = "dassNativeStreamMenu", props: string) =>
+            `function ${name}(${props}){if(!${props}.dassNativeStreamMenu)return $self.StreamMenu({...${props},dassNativeStreamMenu:!0,dassNativeComponent:${name}});`
     }]
 }];
 
@@ -110,8 +112,8 @@ const GO_LIVE_PATCHES = [{
     find: ".getMediaEngine().getDesktopSource(",
     group: true,
     replacement: [{
-        match: /function (\i)\((\i),(\i),(\i)\)\{if\((\i\.isPlatformEmbedded)\)(?=\(0,\i\.openModalLazy\))/,
-        replace: "function $1($2,$3,$4,dassGoLive){if($5)return "
+        match: /function( \i)?\((\i),(\i),(\i)\)\{if\((\i\.isPlatformEmbedded)\)(?=\(0,\i\.\i\)\(async\(\)=>)/,
+        replace: "function$1($2,$3,$4,dassGoLive){if($5)return "
     }, {
         match: /(analyticsLocations:\i)(\}\)\}\));else\{/,
         replace: '$1,dassGoLive$2;else if(dassGoLive)throw Error("DASS needs the Discord desktop Go Live picker.");else{'
@@ -197,8 +199,8 @@ const PRESENTATION_PATCHES = [{
 }, {
     find: '.displayName="CallTile"',
     replacement: [{
-        match: /(,)(\i=)(\i)(?=\}$)/,
-        replace: "$1$2$self.wrapCallTile($3)"
+        match: /((\i)\.displayName="CallTile";)/,
+        replace: "$1$2=$self.wrapCallTile($2);"
     }, {
         // Discord's own tile hover overlay, reused for DASS tiles.
         match: /(\i)(\.displayName="CallTileOverlay")/,
@@ -217,15 +219,15 @@ const PRESENTATION_PATCHES = [{
 }, {
     find: /\i\.type===\i\.lp\.STREAM\?\i\.find\(\i=>\i\.type===\i\.lp\.USER/,
     replacement: [{
-        match: /(function \i\(\i,(\i),\i\)\{return)/,
+        match: /(function(?: \i)?\(\i,(\i),\i\)\{return)/,
         replace: "$1 $self.isDassParticipant($2)?[]:"
     }]
 }, {
     find: "ActivityPanelGameCard",
     group: true,
     replacement: [{
-        match: /let\{guildId:(\i),analyticsContext:(\i),className:(\i)\}=(\i)(?=,\i=\i\.useRef\(null\),\i=\i\.useRef\(null\),\i=\i\.useRef\(null\))/,
-        replace: "let{guildId:$1,analyticsContext:$2,className:$3,dassSidebar}=$self.useNativeSidebarProps($4)"
+        match: /let\{((?:guildId:\i,)?)analyticsContext:(\i),className:(\i)\}=(\i)(?=,\i=\i\.useRef\(null\),\i=\i\.useRef\(null\),\i=\i\.useRef\(null\))/,
+        replace: "let{$1analyticsContext:$2,className:$3,dassSidebar}=$self.useNativeSidebarProps($4)"
     }, {
         match: /(return null==\i)(\?null:\(0,\i\.jsx\)\("div",\{className:\i\(\)\(\i\.\i,\i\),ref:\i,children:)/,
         replace: "$1&&!dassSidebar$2"
@@ -239,7 +241,7 @@ const PRESENTATION_PATCHES = [{
         match: /(?<=,)(\(0,\i\.jsx\)\(\i,\{popover:\i,dismissPopover:)/,
         replace: "dassSidebar?null:$1"
     }, {
-        match: /(function\(\i\)\{)(?=let\{stream:\i,canGoLive:\i,canGoLiveActivity:)/,
+        match: /(function\(\i\)\{(?:var \i(?:,\i)*;)?)(?=let\{stream:\i,canGoLive:\i,canGoLiveActivity:)/,
         replace: "$1let dassStop=arguments[0].dassStop;"
     }, {
         match: /(\i\.useCallback\(\(\)=>\{)(\(0,\i\.A\)\((\i)\))(\},\[\3)(\]\))/,
@@ -282,7 +284,7 @@ const PRESENTATION_PATCHES = [{
     }]
 }];
 
-export const APPROVED_DISCORD_BUILDS: readonly number[] = [634304, 637268, 638651, 661871];
+export const APPROVED_DISCORD_BUILDS: readonly number[] = [634304, 637268, 638651, 661871, 670026];
 export const DISCORD_SHARE_PATCHES = SHARE_PATCHES;
 export const DISCORD_GO_LIVE_PATCHES = GO_LIVE_PATCHES;
 export const DISCORD_PRESENTATION_PATCHES = PRESENTATION_PATCHES;

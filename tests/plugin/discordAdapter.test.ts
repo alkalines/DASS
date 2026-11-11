@@ -205,17 +205,20 @@ describe("build 634304 Voice Connected panel patch", () => {
 
 test("native stream menu wrapper keeps hooks in a child and forwards native props", () => {
     const patch = DISCORD_SHARE_PATCHES[5];
-    const source = 'function _(e){let{channel:t,currentUser:n,activeStreams:r,hideSelfOptions:l=!1}=e;return t}';
-    const replacement = patch.replacement[0];
-    const regex = new RegExp(replacement.match.source.replaceAll("\\i", "(?:[A-Za-z_$][\\w$]*)"));
-    expect([...source.matchAll(new RegExp(regex.source, "g"))]).toHaveLength(1);
-    const patched = source.replace(regex, replacement.replace);
-    const render = new Function("$self", `${patched};return _;`)({ StreamMenu: (props: unknown) => props });
-    const channel = { id: "call" };
-    const props = render({ channel, hideSelfOptions: false, onClose: () => {} });
-    expect(props.channel).toBe(channel);
-    expect(props.dassNativeComponent(props)).toBe(channel);
-    expect(props.onClose).toBeFunction();
+    const body = '(e){let{channel:t,currentUser:n,activeStreams:r,hideSelfOptions:l=!1}=e;return t}';
+    // Builds before 670026 declare the menu; 670026 exports it as an anonymous value.
+    for (const [source, exported] of [[`function _${body}`, "_"], [`let x={A:function${body}}`, "x.A"]]) {
+        const replacement = patch.replacement[0];
+        const regex = new RegExp(replacement.match.source.replaceAll("\\i", "(?:[A-Za-z_$][\\w$]*)"));
+        expect([...source.matchAll(new RegExp(regex.source, "g"))]).toHaveLength(1);
+        const patched = source.replace(regex, replacement.replace as (substring: string, ...groups: string[]) => string);
+        const render = new Function("$self", `${patched};return ${exported};`)({ StreamMenu: (props: unknown) => props });
+        const channel = { id: "call" };
+        const props = render({ channel, hideSelfOptions: false, onClose: () => {} });
+        expect(props.channel).toBe(channel);
+        expect(props.dassNativeComponent(props)).toBe(channel);
+        expect(props.onClose).toBeFunction();
+    }
 });
 
 describe("explicit transport selection", () => {
