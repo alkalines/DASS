@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { adaptEquicordManifest } from "./equicordManifest.mjs";
 import { parseVersion } from "./release-plan.mjs";
 
-const EQUICORD_REVISION = "577946253e6b62be0740b0ad86969ebc6ffbb2e4";
+const EQUICORD_REVISION = "42a73345be4ada7359866fc5a198ec5dd40c6b84";
 const rootDirectory = fileURLToPath(new URL("../", import.meta.url));
 const vendorDirectory = join(rootDirectory, "vendor/Equicord");
 const checkoutDirectory = join(rootDirectory, "build/Equicord");

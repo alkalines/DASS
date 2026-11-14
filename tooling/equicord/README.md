@@ -4,7 +4,7 @@ This directory owns the Bun dependency lock used by `scripts/build-plugin.mjs`,
 not an Equicord fork or a client runtime helper.
 
 - Upstream source: `https://github.com/Equicord/Equicord.git`
-- Revision: `577946253e6b62be0740b0ad86969ebc6ffbb2e4` (1.15.17.2)
+- Revision: `42a73345be4ada7359866fc5a198ec5dd40c6b84` (1.15.17.2)
 - Tooling for this update: Bun 1.4.4, Linux x64.
 - Upstream license: GPL-3.0-or-later; local Discord type package: LGPL-3.0-or-later.
 
@@ -14,6 +14,8 @@ It resolves the flat catalog in `pnpm-workspace.yaml` into root dependency
 versions and registers the local types workspace with the same catalog for its
 own dependencies. No pnpm command is run. The lock was intentionally refreshed
 for the user-requested upstream update on 2026-11-11; later builds stay frozen.
+The 2026-11-14 source update leaves manifests, catalogs and build scripts unchanged,
+so the existing Bun lock is retained.
 Upstream replaced ESLint and Stylelint with oxlint, oxlint-tsgolint and oxfmt
 (MIT), which ship platform-specific prebuilt binaries as optional dependencies;
 they are build tooling only. The local type package remains LGPL-3.0-or-later.

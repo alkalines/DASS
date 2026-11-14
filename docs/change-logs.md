@@ -43,9 +43,11 @@ Uncommitted work has no commit ID until it is committed.
   cancelling changes nothing. A new source replaces the live tracks without
   disconnecting viewers; toggling stream audio restarts the share with the
   chosen source.
-- **Equicord 1.15.17.2:** the build now uses Equicord
-  `577946253e6b62be0740b0ad86969ebc6ffbb2e4`; Equibop stays at 3.3.2, still its
-  latest release. Upstream replaced ESLint with oxlint, which skips the
+- **Upstream refresh (2026-11-14):** the build now uses Equicord 1.15.17.2 at
+  `42a73345be4ada7359866fc5a198ec5dd40c6b84` and pins Equibop 3.3.3 at
+  `eae7bc8fc4d25f09189c537876dde510a5e5436d`. Equicord's existing Bun lock
+  is unchanged. Equibop capture/audio changes still need runtime acceptance.
+  Upstream replaced ESLint with oxlint, which skips the
   gitignored `src/userplugins`, so the build adapter lints the staged DASS files
   by explicit path. Rebuild with `bun scripts/build-plugin.mjs` and fully restart
   the client.

@@ -663,15 +663,25 @@ bun scripts/build-plugin.mjs
 ```
 
 The current build adapter targets Equicord
-`577946253e6b62be0740b0ad86969ebc6ffbb2e4` (1.15.17.2), alongside the
-Equibop submodule `57406f627221bc6054deb9834c18fa9cd914d96a` (3.3.2).
-Both upstreams were fetched on 2026-11-11 at the user's request; Equibop `main`
-was still at 3.3.2. GUI loading and capture on these revisions remain
+`42a73345be4ada7359866fc5a198ec5dd40c6b84` (1.15.17.2), alongside the
+Equibop submodule `eae7bc8fc4d25f09189c537876dde510a5e5436d` (3.3.3).
+Both upstreams were updated from `origin/main` on 2026-11-14 at the user's request.
+Equicord's manifests, catalogs and build scripts are unchanged from the previous
+pin, so the existing Bun lock is retained. GUI loading and capture on these revisions remain
 unverified; the earlier compatibility snapshot is historical.
-With Bun 1.4.4, Equicord lint/typecheck and both bundles passed and all 380
-plugin/adapter tests passed. Upstream now lints with oxlint, which skips the
+With Bun 1.4.4 on 2026-11-14, Equicord lint/typecheck and both bundles passed.
+All 362 tests in `bun test ./tests/plugin ./tests/admin/equicordManifest.test.js`
+passed (15,070 assertions). The Equibop host itself was not built or launched.
+Upstream now lints with oxlint, which skips the
 gitignored `src/userplugins` directory when walking paths, so the adapter passes
 each staged TypeScript file explicitly.
+
+Equibop 3.3.3 changes the picker, venmic and installed `getDisplayMedia` wrapper,
+including a `STREAM_UPDATE_SETTINGS` dispatch after capture. DASS capture consent,
+ordinary voice independence and absence of Discord media/thumbnail leakage need
+fresh runtime acceptance. The legacy `scripts/stage-equibop-capture.mjs` remains
+pinned to 3.3.2 and intentionally rejects the new host; it is not part of the
+current plugin build or installation path.
 
 `vendor/Equicord` is the shared upstream source. The adapter clones a dedicated
 `build/Equicord` checkout from that submodule on
@@ -796,9 +806,9 @@ bun run package:dir
 
 Alternatively, after installing dependencies, `bun run start` builds and launches
 Equibop directly from this same working directory without packaging.
-Do not disable Electron's sandbox to work around launch failures. Dependency
-installation runs upstream's postinstall (arRPC DB update/compilation); review any
-resulting submodule changes. Missing venmic/libvesktop warnings do not verify audio
+Do not disable Electron's sandbox to work around launch failures.
+Equibop 3.3.3 removes the former arRPC postinstall and uses an in-tree RPC workspace.
+Missing venmic/libvesktop warnings do not verify audio
 or capture. No extra DASS client process is introduced.
 
 The host appends `equibop` to the selected directory and expects `equibop/main.js`.
