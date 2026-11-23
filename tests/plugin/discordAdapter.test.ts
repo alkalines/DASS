@@ -6,7 +6,7 @@
 
 import { describe, expect, test } from "bun:test";
 
-import { createShareSelection, DISCORD_SHARE_PATCHES, TRANSPORT_UNAVAILABLE_MESSAGE } from "../../plugins/dass/discordAdapter";
+import { createShareSelection, DISCORD_GO_LIVE_PATCHES, DISCORD_SHARE_PATCHES, TRANSPORT_UNAVAILABLE_MESSAGE } from "../../plugins/dass/discordAdapter";
 
 const OBSERVED_BUTTON_SOURCE = 'return(0,i.jsx)(ee.h,{...l,centerButton:!0,disabled:c||!r,className:ev.uH,hasPermission:r,streamActive:null!=C,videoBlocked:o,isSelfStream:!0,onPopoutClick:s?function(e){t?.(e)}:null,popoutOpen:n,shouldShowTooltip:!n,renderNUXHighlight:N,buttonRef:f,onClick:null!=C?S:_})';
 const OBSERVED_VOICE_PANEL_CALLBACK = 'f=em.useCallback(()=>{(0,vT.A)(_,n.id,o)},[_,n.id,o]),I=c.find(e=>e.ownerId===d?.id)';
@@ -246,5 +246,49 @@ describe("explicit transport selection", () => {
             expect(changedContext(transport)).toBeUndefined();
             expect(starts).toBe(0);
         }
+    });
+});
+
+// Discord build 668923 Go Live opener module, verbatim except the shortened chunk list.
+const OBSERVED_GO_LIVE_OPENER_668923 = 'function(e,t,i){var a=i(477900);i(582128);var l=i(192308),n=i(401843),s=i(676030),r=i(734057),d=i(71393),h=i(754712),o=i(287809),c=i(723702),u=i(753070);i.d(t,{},{A:function(e,t,g){if(c.isPlatformEmbedded)(0,l.mM)(async()=>{let{default:e}=await Promise.all([i.e(249169),i.e(190088)]).then(i.bind(i,742527));return t=>(0,a.jsx)(e,{...t,analyticsLocations:g})});else{let i=r.A.getChannel(t),a=(0,s.A)(u.jQ.PRESET_CUSTOM,u.on.RESOLUTION_1080,u.kn.FPS_30,o.default.getCurrentUser(),d.A.getGuild(e)?.premiumTier,i)?{width:1920,height:1080}:{width:1280,height:720};(0,n.Xd)({preset:u.jQ.PRESET_CUSTOM,resolution:a.height,frameRate:u.kn.FPS_30,soundshareEnabled:!0}),h.Ay.getMediaEngine().getDesktopSource(a,!0).then(i=>{(0,n.XI)(e,t,{pid:null,sourceId:i,sourceName:null,analyticsLocations:g})})}}})}';
+
+describe("build 668923 Go Live opener patch", () => {
+    const openerPatch = DISCORD_GO_LIVE_PATCHES[0];
+
+    function loadOpener(embedded: boolean) {
+        let source = OBSERVED_GO_LIVE_OPENER_668923;
+        expect(source.includes(openerPatch.find as string)).toBe(true);
+        for (const replacement of openerPatch.replacement) {
+            const regex = new RegExp(replacement.match.source.replaceAll("\\i", "(?:[A-Za-z_$][\\w$]*)"));
+            expect([...source.matchAll(new RegExp(regex.source, "g"))]).toHaveLength(1);
+            source = source.replace(regex, replacement.replace);
+        }
+        let modalFactory: (() => Promise<(props: object) => { props: Record<string, unknown>; }>) | undefined;
+        const modules: Record<number, unknown> = {
+            477900: { jsx: (type: unknown, props: Record<string, unknown>) => ({ type, props }) },
+            192308: { mM: (factory: typeof modalFactory) => { modalFactory = factory; return Promise.resolve("modal-key"); } },
+            723702: { isPlatformEmbedded: embedded },
+            742527: { default: "GoLiveModal" }
+        };
+        const require = Object.assign((id: number) => modules[id] ?? {}, {
+            d: (target: object, _getters: object, values: object) => Object.assign(target, values),
+            e: () => Promise.resolve()
+        });
+        const exports: { A?: (...args: unknown[]) => unknown; } = {};
+        new Function(`return ${source}`)()(undefined, exports, require);
+        return { open: exports.A!, modalFactory: () => modalFactory };
+    }
+
+    test("forwards the DASS request into Discord's modal and returns its key", async () => {
+        const { open, modalFactory } = loadOpener(true);
+        const request = { fetchSources() {}, start() {}, mount() {} };
+        await expect(open(undefined, undefined, ["voice-panel"], request) as Promise<string>).resolves.toBe("modal-key");
+        const render = await modalFactory()!();
+        expect(render({ onClose: "close" }).props).toEqual({ onClose: "close", analyticsLocations: ["voice-panel"], dassGoLive: request });
+    });
+
+    test("a DASS request never falls back to the native capture path", () => {
+        const { open } = loadOpener(false);
+        expect(() => open(undefined, undefined, undefined, { fetchSources() {}, start() {}, mount() {} })).toThrow("DASS needs the Discord desktop Go Live picker.");
     });
 });

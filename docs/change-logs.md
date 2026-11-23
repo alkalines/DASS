@@ -54,6 +54,11 @@ Uncommitted work has no commit ID until it is committed.
 
 ### Fixed
 
+- **DASS picker not opening on build 668923:** Discord now exports the Go Live
+  opener as an anonymous value and minifies `openModalLazy`, so the opener patch
+  stopped matching and Discord dropped the group. Choosing DASS closed the
+  share silently instead of showing the screen and window picker. The opener
+  patch matches both forms again; the picker modal patches were unaffected.
 - **Every connection failing with `socket`:** Discord's connection policy
   blocked the client from reaching a custom backend, so login, watching and sharing
   all failed instantly. DASS now allows exactly the configured HTTPS backend

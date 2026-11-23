@@ -112,6 +112,7 @@ const GO_LIVE_PATCHES = [{
     find: ".getMediaEngine().getDesktopSource(",
     group: true,
     replacement: [{
+        // Build 668923 exports the opener as an anonymous value and minifies openModalLazy.
         match: /function( \i)?\((\i),(\i),(\i)\)\{if\((\i\.isPlatformEmbedded)\)(?=\(0,\i\.\i\)\(async\(\)=>)/,
         replace: "function$1($2,$3,$4,dassGoLive){if($5)return "
     }, {
