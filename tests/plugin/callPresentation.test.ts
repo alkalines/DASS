@@ -8,6 +8,7 @@ import { expect, test } from "bun:test";
 
 import { CallPresentation, isDassParticipant, participantTitle, projectParticipants, sliderPlaybackVolume } from "../../plugins/dass/callPresentation";
 import { DISCORD_PRESENTATION_PATCHES } from "../../plugins/dass/discordAdapter";
+import { isDassTileKey } from "../../plugins/dass/gridPresentation";
 
 const participants = projectParticipants([
     { key: "dass-local:call", kind: "local" },
@@ -77,7 +78,10 @@ renderContent(){return(0,i.jsx)(en.A,{onSelectParticipant:this.handleSelectParti
 function eZ(e){let{channel:t}=e,g="app",j=!0,y=t.isGuildStageVoice();(0,Z.A)(y);let{participants:b,filteredParticipants:S,participantsVersion:R,mode:L,layout:M,participantsOpen:w,chatOpen:U,stageAudienceSidebarOpen:k,selectedParticipant:B}=(0,d.cf)([eP.A],()=>{let e=g===ez.BRT.POPOUT,n=eP.A.getMode(t.id),i=eP.A.getLayout(t.id,g);e&&(n=ez._Of.VIDEO);let l=n===ez._Of.VIDEO?i:ez.DUB.MINIMUM;e&&l!==ez.DUB.FULL_SCREEN&&(l=ez.DUB.NO_CHAT);let a=y?eP.A.getStageSpeakerParticipants(t.id):null,s=n!==ez._Of.VOICE?eP.A.getSelectedParticipant(t.id):null;return null==s||null==a||a.includes(s)||(s=null),{mode:n,layout:l,selectedParticipant:s,participants:a??eP.A.getParticipants(t.id),filteredParticipants:a??eP.A.getFilteredParticipants(t.id),participantsOpen:eP.A.getParticipantsOpen(t.id),chatOpen:eP.A.getChatOpen(t.id),stageAudienceSidebarOpen:y&&eP.A.getStageAudienceSidebarOpen(t.id),participantsVersion:eP.A.getParticipantsVersion(t.id)}},[g,t.id,y]),{selectedStream:Y}=(0,d.cf)([eg.A],()=>({selectedStream:null!=B?eg.A.getActiveStreamForStreamKey(B.id):null}),[B]);return(0,i.jsx)(eq,{channel:t,guild:K,hasConnectPermission:ee,participantsOpen:w,selectedStream:Y,mode:L,inCall:j,layout:M})}`;
 
 const focusedSource = `function _(e){let t,{onSelectParticipant:n,onContextMenuParticipant:a,onFullscreenParticipant:_,participants:S,filteredParticipants:T,popoutType:R,inCall:O,channel:L,selectedParticipant:P,showParticipants:M=!0,className:w,width:U,height:D,layout:V,idle:G}=e,k=m.Ay.getVideoComponent(),B=p.default.getId(),X=P.type===I.lp.ACTIVITY,Z=!X&&null!=P.streamId;return{S,T,Z}}`;
-const tileSource = 'let eU=i.memo(e=>{return native(e)});eU.displayName="CallTile";let eB=i.memo(e=>overlay(e));eB.displayName="CallTileOverlay";let ez=F.$,eY=eU';
+// Build 679109 CallTileOverlay focused-stream controls, verbatim.
+const overlayControlsSource = 'eM=[];c&&I===ew.lp.STREAM&&(eM.push((0,s.jsx)(ep.A,{streamKey:A},"stream-drawing")),null!=ec&&eM.push((0,s.jsx)(eZ,{stream:ec,hideWhenInactive:!1,idle:l},"pass-the-controller")),eM.push((0,s.jsx)(q.A,{streamId:es,paused:el},"zoom-controls")));';
+const overlaySource = `let eB=i.memo(e=>{let{idle:l,focused:c,participantId:A,participantType:I,paused:el,streamId:es,stream:ec}=e,${overlayControlsSource}return eM});eB.displayName="CallTileOverlay";`;
+const tileSource = `let eU=i.memo(e=>{return native(e)});eU.displayName="CallTile";${overlaySource}let ez=F.$,eY=eU`;
 const filmstripSource = 'function sort(e,t){switch(e.type){case p.lp.ACTIVITY:return`\\x01${e.sortKey}`;case p.lp.STREAM:return e.user.username}}function render(n){let[d,f]=(0,r.partition)(n,p.Xw);return[d,f]}';
 const auxiliarySource = 'function s(e,t,n){return null==t||t.type===a.lp.ACTIVITY?[]:[t.type===a.lp.STREAM?e.find(e=>e.type===a.lp.USER&&e.id===t?.user.id&&e.id!==n&&(0,l.Ay)(e)):null,t.type===a.lp.USER?e.find(e=>e.type===a.lp.STREAM&&e.user.id===t?.user.id&&null!=e.streamId):null,t.id!==n?e.find(e=>e.type===a.lp.USER&&e.id===n&&(0,l.Ay)(e)):null].filter(i.Vq)}';
 
@@ -168,7 +172,7 @@ test("CallTile export routes to a DASS-owned component before native hooks mount
 });
 
 test("build 670026 value export receives the wrapped CallTile", () => {
-    const valueExport = 'let ew=[1],ez=i.memo(e=>native(e));ez.displayName="CallTile";let eX=i.memo(e=>overlay(e));eX.displayName="CallTileOverlay";let eB=F.$;n.d(l,{},{Ay:ez,Yl:eB})';
+    const valueExport = `let ew=[1],ez=i.memo(e=>native(e));ez.displayName="CallTile";${overlaySource.replaceAll("eB", "eX")}let eB=F.$;n.d(l,{},{Ay:ez,Yl:eB})`;
     const source = patch(valueExport, 2);
     const exports: Record<string, unknown> = {};
     const wrapped = { wrapped: true };
@@ -178,6 +182,20 @@ test("build 670026 value export receives the wrapped CallTile", () => {
         { d: (_target: unknown, _getters: unknown, values: Record<string, unknown>) => Object.assign(exports, values) }, {});
     expect(exports.Ay).toBe(wrapped);
     expect(exports.Yl).toBe("frame");
+});
+
+test("focused DASS tiles skip Discord's stream drawing toolbar, which parses the participant id as a stream key", () => {
+    const source = patch(`${tileSource};return eB;`, 2);
+    const STREAM = 1;
+    const overlay = new Function("$self", "i", "F", "ew", "s", "ep", "q", source)(
+        { wrapCallTile: (tile: unknown) => tile, captureCallTileOverlay: (component: unknown) => component, isDassTileKey },
+        { memo: (render: unknown) => render }, { $: "frame" }, { lp: { STREAM } },
+        { jsx: (_type: unknown, _props: unknown, key: string) => key }, { A: "StreamDrawing" }, { A: "ZoomControls" }
+    ) as (props: object) => string[];
+    const focusedStream = (participantId: string) => overlay({ focused: true, participantId, participantType: STREAM, streamId: null });
+    expect(focusedStream("dass-remote:call:publisher")).toEqual(["zoom-controls"]);
+    expect(focusedStream("dass-local:call")).toEqual(["zoom-controls"]);
+    expect(focusedStream("call:123:456")).toEqual(["stream-drawing", "zoom-controls"]);
 });
 
 test("voice participant updates preserve DASS call layout without changing native voice mode", () => {

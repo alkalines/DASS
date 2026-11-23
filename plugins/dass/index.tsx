@@ -24,7 +24,7 @@ import { useDassGoLive } from "./desktopCapture";
 import { logDiagnostic } from "../../clients/spike/diagnostics";
 import { DISCORD_GO_LIVE_PATCHES, DISCORD_PRESENTATION_PATCHES, DISCORD_SHARE_PATCHES, getDiscordBuildWarning, isLocalPublisherLive, type PublishIntent, routePublish, routeWatch, type WatchIntent } from "./discordAdapter";
 import { configureIdentityBackend, defaultIdentityStore } from "./e2eeIdentity";
-import { gridShares, gridTileKeyExtractor } from "./gridPresentation";
+import { gridShares, gridTileKeyExtractor, isDassTileKey } from "./gridPresentation";
 import { CallAudioControl, callPresentation, type CallTileProps, type CallViewProps, type FocusedCallProps, type GridRuntime, type GridTileRenderer, NativeCallView, NativeGridTile, type TileAction, useFocusedCallProps, useFocusedWatchingState, useGridTiles, useHasGridShares } from "./gridTile";
 import { captureCallTileOverlay } from "./nativeTile";
 import { hasAcceptedPublishCapture, PublishController } from "./publishing";
@@ -322,6 +322,7 @@ export default definePlugin({
     },
     gridTileKeyExtractor,
     isDassParticipant,
+    isDassTileKey,
     dassParticipantTitle(participant: Parameters<typeof participantTitle>[0]) {
         return participantTitle(participant, gridRuntime.localDisplayName());
     },

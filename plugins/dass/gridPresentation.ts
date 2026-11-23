@@ -9,10 +9,18 @@ import type { WatchStatus } from "./watching";
 
 export type GridShare = { key: string; kind: "local"; } | { key: string; kind: "remote"; share: DassShare; ended?: boolean; };
 
+const LOCAL_TILE_KEY_PREFIX = "dass-local:";
+const REMOTE_TILE_KEY_PREFIX = "dass-remote:";
+
+/** DASS tile keys double as Discord participant ids; Discord must never parse them as its own stream keys. */
+export function isDassTileKey(key: unknown) {
+    return typeof key === "string" && (key.startsWith(LOCAL_TILE_KEY_PREFIX) || key.startsWith(REMOTE_TILE_KEY_PREFIX));
+}
+
 export function gridShares(channelId: string, currentChannelId: string | undefined, active: boolean, localCapture: boolean,
     directory: WatchStatus, watches: readonly WatchStatus[]): GridShare[] {
     if (!active || channelId !== currentChannelId) return [];
-    const result: GridShare[] = localCapture ? [{ key: `dass-local:${channelId}`, kind: "local" }] : [];
+    const result: GridShare[] = localCapture ? [{ key: `${LOCAL_TILE_KEY_PREFIX}${channelId}`, kind: "local" }] : [];
     const pending = watches.flatMap(watching => ["loading", "ready", "watching"].includes(watching.phase) && watching.watchingShare?.roomId === channelId
         ? [watching.watchingShare] : []);
     const closed = watches.flatMap(watching => {
@@ -32,7 +40,7 @@ export function gridShares(channelId: string, currentChannelId: string | undefin
             && directory.directoryRequestedAtMs !== undefined && watching.disconnectedAtMs !== undefined
             && directory.directoryRequestedAtMs > watching.disconnectedAtMs
             && !directory.shares.some(listed => listed.roomId === channelId && listed.shareId === share.shareId);
-        result.push({ key: `dass-remote:${channelId}:${share.shareId}`, kind: "remote", share, ...(ended ? { ended: true } : {}) });
+        result.push({ key: `${REMOTE_TILE_KEY_PREFIX}${channelId}:${share.shareId}`, kind: "remote", share, ...(ended ? { ended: true } : {}) });
     }
     return result;
 }

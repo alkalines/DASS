@@ -206,6 +206,10 @@ const PRESENTATION_PATCHES = [{
         // Discord's own tile hover overlay, reused for DASS tiles.
         match: /(\i)(\.displayName="CallTileOverlay")/,
         replace: "$self.captureCallTileOverlay($1)$2"
+    }, {
+        // Build 679109's focused stream drawing toolbar decodes the participant id as a Discord stream key and throws on DASS keys.
+        match: /(\i\.push\(\(0,\i\.jsx\)\(\i\.A,\{streamKey:(\i)\},"stream-drawing"\)\))/,
+        replace: "$self.isDassTileKey($2)||$1"
     }]
 }, {
     find: "cropSelfVideo:!1",
