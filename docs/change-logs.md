@@ -54,6 +54,11 @@ Uncommitted work has no commit ID until it is committed.
 
 ### Fixed
 
+- **Focused DASS tile failing on build 679109:** Discord's new stream drawing
+  toolbar parses every focused stream tile's participant id as a Discord stream
+  key, so focusing a DASS share showed "DASS stream tile failed" with
+  `Unknown stream type dass-remote`. Focused DASS tiles now skip that toolbar;
+  native Discord streams keep it. Build 679109 is now an approved build.
 - **DASS picker not opening on build 668923:** Discord now exports the Go Live
   opener as an anonymous value and minifies `openModalLazy`, so the opener patch
   stopped matching and Discord dropped the group. Choosing DASS closed the

@@ -356,7 +356,7 @@ loss, logout, disable and revoked access clear retained entries. DevTools mock
 checks verified typography, help expansion and close behavior; real failure
 timing still needs runtime acceptance.
 
-The reviewed Discord builds are **634304**, **637268**, **638651**, **661871** and **670026**. This list is
+The reviewed Discord builds are **634304**, **637268**, **638651**, **661871**, **670026** and **679109**. This list is
 informational, not a patch gate: DASS attempts its hooks on every build. On an
 unapproved or unidentifiable build, plugin startup shows a **DASS compatibility
 warning** once per client session: “The current plugin version is not yet approved
@@ -364,6 +364,11 @@ for this Discord build. This could cause the UI to break.” Enabling the plugin
 later in the session also performs this check. Source-match and grouped-patch
 rollback checks remain in place, but cannot guarantee compatibility or interception
 on future builds. If the chooser is missing, do not continue sharing expecting DASS.
+On November 23, 2026, focusing a DASS stream tile on stable build 679109 showed
+"DASS stream tile failed" with `Unknown stream type dass-remote`: Discord's new
+stream drawing toolbar in `CallTileOverlay` decodes the participant id as a
+Discord stream key. DASS now skips that toolbar for DASS tile ids. The user
+confirmed the focused tile works after rebuilding and restarting.
 On November 11, 2026, opening a DASS stream tile on stable build 670026 (hash
 `b3c0fdde529de65f069998d669fe1987e4cdbeef`) crashed the call view: Discord now
 exports values directly (`n.d(module,{},{Ay:CallTile})`), so the trailing-alias
